@@ -1,7 +1,5 @@
 """Harness worker main loop: consume NATS TASKS, claim, run agent, checkpoint."""
 
-from __future__ import annotations
-
 import asyncio
 import base64
 import json
@@ -14,7 +12,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from agent.utils.github_app import get_github_app_installation_token
+from agent.github.app import get_github_app_installation_token
 from alephat_platform.common.config import get_settings
 from alephat_platform.common.db import dispose_engine, get_session_factory
 from alephat_platform.common.enums import ParkReason, TaskStatus
@@ -118,6 +116,9 @@ class HarnessWorker:
         self.llm = make_llm_client()
         self._stop = asyncio.Event()
         self._busy = False
+
+    def request_stop(self) -> None:
+        self._stop.set()
 
     async def start(self) -> None:
         logging.basicConfig(
@@ -633,7 +634,7 @@ def main() -> None:
     loop = asyncio.new_event_loop()
 
     def _stop(*_args: Any) -> None:
-        worker._stop.set()
+        worker.request_stop()
 
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)

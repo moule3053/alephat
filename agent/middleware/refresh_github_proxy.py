@@ -7,8 +7,6 @@ the proxy with a fresh token before each model call when the recorded token is
 near expiry.
 """
 
-from __future__ import annotations
-
 import logging
 from typing import Any
 
@@ -16,11 +14,13 @@ from langchain.agents.middleware import AgentState, before_model
 from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
-from ..utils.github_proxy import maybe_refresh_proxy_token
+from agent.github.proxy import maybe_refresh_proxy_token
+from agent.middleware.trace import scrub_middleware_inputs
 
 logger = logging.getLogger(__name__)
 
 
+@scrub_middleware_inputs
 @before_model
 async def refresh_github_proxy_before_model(
     state: AgentState,  # noqa: ARG001

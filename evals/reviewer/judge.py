@@ -10,8 +10,6 @@ withmartian/code-review-benchmark `step3_judge_comments.py` so scores are
 directly comparable to martian's published numbers.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import threading
@@ -142,7 +140,7 @@ def _judge_pair(golden: ReviewComment, candidate: ReviewComment) -> PairResult:
     try:
         start, end = raw.find("{"), raw.rfind("}")
         parsed = json.loads(raw[start : end + 1])
-    except (ValueError, json.JSONDecodeError):
+    except ValueError, json.JSONDecodeError:
         return {"match": False, "confidence": 0.0, "reasoning": f"unparseable: {raw[:200]}"}
     if not isinstance(parsed, dict):
         return {"match": False, "confidence": 0.0, "reasoning": "judge returned non-object"}

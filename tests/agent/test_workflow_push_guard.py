@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 from typing import Any, cast
 
@@ -9,7 +7,7 @@ from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import ToolMessage
 
 from agent.middleware import workflow_push_guard as guard
-from agent.utils.sandbox_state import SandboxBackendProxy
+from agent.sandboxes.state import SandboxBackendProxy
 
 
 class _Response:
@@ -22,12 +20,20 @@ class _Response:
 class _Backend:
     id = "sandbox-id"
 
-    def __init__(self, *, workflow_files: str = ".github/workflows/ci.yml") -> None:
+    def __init__(
+        self,
+        *,
+        workflow_files: str = ".github/workflows/ci.yml",
+        inherited_from_main: bool = False,
+        workflows_changed_by_merge: bool = True,
+    ) -> None:
         self.workflow_files = workflow_files
+        self.inherited_from_main = inherited_from_main
+        self.workflows_changed_by_merge = workflows_changed_by_merge
         self.commands: list[str] = []
         self.head = "a" * 40
 
-    def execute(self, command: str, *, timeout: int | None = None) -> _Response:
+    async def aexecute(self, command: str, *, timeout: int | None = None) -> _Response:
         self.commands.append(command)
         if "rev-parse --show-toplevel" in command:
             return _Response("/repo\n")
@@ -35,6 +41,16 @@ class _Backend:
             return _Response("", 1)
         if "symbolic-ref --short refs/remotes/origin/HEAD" in command:
             return _Response("origin/main\n")
+        if "rev-list --parents -n 1" in command:
+            if self.inherited_from_main:
+                return _Response(f"{self.head} {'b' * 40} {'c' * 40}\n")
+            return _Response(f"{self.head} {'b' * 40}\n")
+        if "merge-base --is-ancestor" in command:
+            return _Response("", 0 if self.inherited_from_main else 1)
+        if f"diff --quiet {'b' * 40} {self.head}" in command:
+            return _Response("", 1 if self.workflows_changed_by_merge else 0)
+        if f"diff --quiet {'c' * 40} {self.head}" in command:
+            return _Response("", 0 if self.inherited_from_main else 1)
         if f"merge-base {self.head} origin/main" in command:
             return _Response("base-sha\n")
         if "diff --name-only" in command:
@@ -46,7 +62,7 @@ class _Backend:
         if "diff --numstat" in command:
             return _Response("1\t1\t.github/workflows/ci.yml\n")
         if "config --get remote.origin.url" in command:
-            return _Response("git@github.com:moule3053/alephat.git\n")
+            return _Response("git@github.com:langchain-ai/alephat.git\n")
         if "rev-parse --abbrev-ref HEAD" in command:
             return _Response("feature\n")
         if "rev-parse HEAD" in command or "rev-parse feature" in command:
@@ -66,9 +82,11 @@ class _Runtime:
 class _Request:
     runtime = _Runtime()
 
-    def __init__(self, command: str = "git -C /repo push origin feature") -> None:
+    def __init__(
+        self, command: str = "git -C /repo push origin feature", name: str = "execute"
+    ) -> None:
         self.tool_call = {
-            "name": "execute",
+            "name": name,
             "args": {"command": command},
             "id": "call-1",
         }
@@ -103,9 +121,9 @@ def test_parse_git_push_supports_git_c_and_cd() -> None:
     assert guard._parse_git_push("git push origin feature; git push origin evil:feature") is None
 
 
-def test_workflow_change_for_push_fingerprints_workflow_diff() -> None:
+async def test_workflow_change_for_push_fingerprints_workflow_diff() -> None:
     backend = _Backend()
-    change = guard._workflow_change_for_push(
+    change = await guard._workflow_change_for_push(
         backend,
         guard.ParsedGitPush(
             repo_dir="/repo", remote="origin", local_ref="feature", remote_ref="feature"
@@ -113,17 +131,42 @@ def test_workflow_change_for_push_fingerprints_workflow_diff() -> None:
     )
 
     assert change is not None
-    assert change.repo == "https://github.com/moule3053/alephat"
+    assert change.repo == "https://github.com/langchain-ai/alephat"
     assert change.branch == "feature"
     assert change.files == [".github/workflows/ci.yml"]
     assert change.diff_stats == {"files": 1, "additions": 1, "deletions": 1}
     assert change.diff_preview_truncated is False
+    assert change.inherited_from is None
     assert "diff --git" in change.diff_preview
     assert (
         change.fixed_command
         == "git -C /repo push origin aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:refs/heads/feature"
     )
     assert len(change.fingerprint) == 64
+
+
+async def test_workflow_change_marks_merge_workflows_as_inherited() -> None:
+    change = await guard._workflow_change_for_push(
+        _Backend(inherited_from_main=True),
+        guard.ParsedGitPush(
+            repo_dir="/repo", remote="origin", local_ref="feature", remote_ref="feature"
+        ),
+    )
+
+    assert change is not None
+    assert change.inherited_from == "main"
+
+
+async def test_workflow_change_does_not_misattribute_preexisting_workflows() -> None:
+    change = await guard._workflow_change_for_push(
+        _Backend(inherited_from_main=True, workflows_changed_by_merge=False),
+        guard.ParsedGitPush(
+            repo_dir="/repo", remote="origin", local_ref="feature", remote_ref="feature"
+        ),
+    )
+
+    assert change is not None
+    assert change.inherited_from is None
 
 
 def test_workflow_approval_response_serializes_review_fields() -> None:
@@ -133,7 +176,7 @@ def test_workflow_approval_response_serializes_review_fields() -> None:
         {
             "fingerprint": "abc",
             "status": "pending",
-            "repo": "https://github.com/moule3053/alephat",
+            "repo": "https://github.com/langchain-ai/alephat",
             "branch": "feature",
             "base_sha": "b" * 40,
             "head_sha": "a" * 40,
@@ -141,7 +184,8 @@ def test_workflow_approval_response_serializes_review_fields() -> None:
             "diff_stats": {"files": 1, "additions": 2, "deletions": 3},
             "diff_preview": "diff --git ...",
             "diff_preview_truncated": True,
-            "approval_url": "http://127.0.0.1:18080/agents/thread?workflowApproval=abc",
+            "inherited_from": "main",
+            "approval_url": "https://alephat.vercel.app/agents/thread?workflowApproval=abc",
             "requested_at": "2026-06-30T00:00:00+00:00",
         }
     )
@@ -151,14 +195,15 @@ def test_workflow_approval_response_serializes_review_fields() -> None:
     assert response["headSha"] == "a" * 40
     assert response["diffStats"] == {"files": 1, "additions": 2, "deletions": 3}
     assert response["diffPreviewTruncated"] is True
+    assert response["inheritedFrom"] == "main"
     assert response["approvalUrl"].endswith("workflowApproval=abc")
 
 
-def test_workflow_change_for_push_ignores_non_workflow_push() -> None:
+async def test_workflow_change_for_push_ignores_non_workflow_push() -> None:
     backend = _Backend(workflow_files="")
 
     assert (
-        guard._workflow_change_for_push(
+        await guard._workflow_change_for_push(
             backend,
             guard.ParsedGitPush(
                 repo_dir="/repo", remote="origin", local_ref="feature", remote_ref="feature"
@@ -168,11 +213,11 @@ def test_workflow_change_for_push_ignores_non_workflow_push() -> None:
     )
 
 
-def test_workflow_change_for_push_rejects_non_current_refspec() -> None:
+async def test_workflow_change_for_push_rejects_non_current_refspec() -> None:
     backend = _Backend()
 
     assert (
-        guard._workflow_change_for_push(
+        await guard._workflow_change_for_push(
             backend,
             guard.ParsedGitPush(
                 repo_dir="/repo", remote="origin", local_ref="evil", remote_ref="feature"
@@ -182,9 +227,11 @@ def test_workflow_change_for_push_rejects_non_current_refspec() -> None:
     )
 
 
+@pytest.mark.parametrize("tool_name", ["execute", "background_execute"])
 async def test_unapproved_workflow_push_blocks_and_posts_slack(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tool_name: str
 ) -> None:
+    monkeypatch.setenv("DASHBOARD_BASE_URL", "https://dashboard.example")
     guard.SANDBOX_BACKENDS["thread-1"] = SandboxBackendProxy(
         cast(SandboxBackendProtocol, _Backend()), thread_id="thread-1"
     )
@@ -223,7 +270,7 @@ async def test_unapproved_workflow_push_blocks_and_posts_slack(
         return ToolMessage(content="pushed", tool_call_id="call-1")
 
     result = await guard.WorkflowPushGuardMiddleware().awrap_tool_call(
-        cast(ToolCallRequest, _Request()), handler
+        cast(ToolCallRequest, _Request(name=tool_name)), handler
     )
 
     assert called is False
@@ -236,9 +283,13 @@ async def test_unapproved_workflow_push_blocks_and_posts_slack(
     assert payload["approval_url"].endswith("?workflowApproval=" + payload["fingerprint"])
     assert pending_kwargs["diff_preview"]
     assert pending_kwargs["diff_preview_truncated"] is False
+    assert pending_kwargs["inherited_from"] is None
     assert pending_kwargs["approval_url"] == payload["approval_url"]
     assert posted["channel_id"] == "C123"
     assert "Open in Web" in posted["message"]
+    assert "Why confirmation is required" in posted["message"]
+    assert posted["blocks"][1]["elements"][0]["text"]["text"] == "Approve & continue push"
+    assert posted["blocks"][1]["elements"][1]["text"]["text"] == "Cancel push"
     assert posted["blocks"][1]["elements"][0]["value"]
 
 

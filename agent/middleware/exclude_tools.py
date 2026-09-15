@@ -1,25 +1,21 @@
 """Hide named tools from the model without rebuilding the agent.
 
-`create_deep_agent` always wires the `task` tool when the auto-added
-general-purpose subagent is present. The reviewer agent has no use for
-subagent dispatch, so this middleware drops the named tools from the
-request before the model sees them. Mirrors the behavior of deepagents'
-own private `_ToolExclusionMiddleware` but lives here so we don't depend
-on a private import path.
+This provides per-agent tool filtering after Deep Agents injects its built-in
+tools. It mirrors Deep Agents' private `_ToolExclusionMiddleware` without
+depending on a private import path.
 """
-
-from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from langchain.agents.middleware.types import (
-    AgentMiddleware,
     AgentState,
     ModelRequest,
     ModelResponse,
 )
 from langchain_core.tools import BaseTool
+
+from agent.middleware.trace import AlephatMiddleware
 
 
 def _tool_name(tool: BaseTool | dict[str, Any] | Any) -> str | None:
@@ -30,7 +26,7 @@ def _tool_name(tool: BaseTool | dict[str, Any] | Any) -> str | None:
     return name if isinstance(name, str) else None
 
 
-class ExcludeToolsMiddleware(AgentMiddleware):
+class ExcludeToolsMiddleware(AlephatMiddleware):
     """Strip named tools from each model request.
 
     Place this AFTER tool-injecting middleware (FilesystemMiddleware,

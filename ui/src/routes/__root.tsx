@@ -2,20 +2,30 @@ import {
   HeadContent,
   Outlet,
   Scripts,
-  createRootRoute,
+  createRootRouteWithContext,
+  useRouter,
+  useRouterState,
 } from "@tanstack/react-router"
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools"
 import { TanStackDevtools } from "@tanstack/react-devtools"
 import { QueryClientProvider } from "@tanstack/react-query"
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools"
-import { useState } from "react"
 
 import appCss from "../styles.css?url"
-import { makeQueryClient } from "@/lib/query"
+import type { QueryClient } from "@tanstack/react-query"
+import { AppCommandProvider } from "@/lib/appCommands"
+import { resolveSessionOnServer } from "@/lib/session-ssr"
+import { ThemeSync } from "@/lib/ThemeSync"
+import { THEME_COLOR } from "@/lib/theme"
+import { apiWarmupScript } from "@/features/agents/lib/apiWarmup"
 
 const themeInitScript = `(function(){try{var t=localStorage.getItem("alephat-theme");var d=t==="dark"||((!t||t==="system")&&window.matchMedia("(prefers-color-scheme: dark)").matches);var r=document.documentElement;r.classList.toggle("dark",d);r.style.colorScheme=d?"dark":"light";}catch(e){}})();`
 
-export const Route = createRootRoute({
+export const Route = createRootRouteWithContext<{
+  queryClient: QueryClient
+}>()({
+  beforeLoad: ({ context, location }) =>
+    resolveSessionOnServer(context.queryClient, location.href),
   head: () => ({
     meta: [
       { charSet: "utf-8" },
@@ -23,14 +33,24 @@ export const Route = createRootRoute({
         name: "viewport",
         content: "width=device-width, initial-scale=1, maximum-scale=1",
       },
-      { name: "theme-color", content: "#000000" },
-      { title: "alephat" },
+      { name: "theme-color", content: THEME_COLOR.light },
+      { title: "Alephat" },
     ],
     links: [
       { rel: "stylesheet", href: appCss },
-      { rel: "manifest", href: "/manifest.webmanifest" },
-      { rel: "icon", type: "image/png", href: "/favicon.png" },
-      { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
+      {
+        rel: "manifest",
+        href: `${import.meta.env.BASE_URL}manifest.webmanifest`,
+      },
+      {
+        rel: "icon",
+        type: "image/png",
+        href: `${import.meta.env.BASE_URL}favicon.png`,
+      },
+      {
+        rel: "apple-touch-icon",
+        href: `${import.meta.env.BASE_URL}apple-touch-icon.png`,
+      },
     ],
   }),
   notFoundComponent: () => (
@@ -45,16 +65,29 @@ export const Route = createRootRoute({
 })
 
 function RootDocument({ children }: { children: React.ReactNode }) {
-  const [queryClient] = useState(() => makeQueryClient())
+  const { queryClient } = useRouter().options.context
+  const pathname = useRouterState({ select: (s) => s.location.pathname })
+  const warmupScript = apiWarmupScript(pathname)
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+        {warmupScript && (
+          <script dangerouslySetInnerHTML={{ __html: warmupScript }} />
+        )}
         <HeadContent />
       </head>
       <body>
+        {typeof window !== "undefined" &&
+          window.openSweDesktop && (
+            // Rendered first so later no-drag elements carve out of it; the
+            // desktop preload styles it. Preload-injected DOM would be cleared
+            // when React takes over the document, so it lives here instead.
+            <div aria-hidden data-desktop-drag-strip="" />
+          )}
+        <ThemeSync />
         <QueryClientProvider client={queryClient}>
-          {children ?? <Outlet />}
+          <AppCommandProvider>{children ?? <Outlet />}</AppCommandProvider>
           {import.meta.env.VITE_DEVTOOLS !== "false" && (
             <>
               <TanStackDevtools

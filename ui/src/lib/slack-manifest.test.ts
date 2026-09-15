@@ -1,0 +1,82 @@
+import { describe, expect, it } from "vitest"
+
+import {
+  slackAppManifest,
+  slackManifestPlaceholdersRemain,
+} from "./slack-manifest"
+
+const CODE_CHANNEL_SCOPES = [
+  "code_channels:manage",
+  "files:read",
+  // conversations.invite needs these, or a named invitee silently stays out.
+  "channels:manage",
+  "groups:write",
+]
+const CODE_CHANNEL_EVENTS = [
+  "agent_session_stopped",
+  "code_channel_action",
+  "message.channels",
+  "message.groups",
+]
+
+describe("slackAppManifest", () => {
+  it("defaults to the legacy Slack integration", () => {
+    const manifest = slackAppManifest()
+
+    expect(manifest.features).not.toHaveProperty("code_channels")
+    expect(manifest.oauth_config.scopes.bot).not.toEqual(
+      expect.arrayContaining(CODE_CHANNEL_SCOPES)
+    )
+    expect(manifest.settings.event_subscriptions.bot_events).not.toEqual(
+      expect.arrayContaining(CODE_CHANNEL_EVENTS)
+    )
+  })
+
+  it("adds the complete Code Channels manifest surface when enabled", () => {
+    const manifest = slackAppManifest(true)
+
+    expect(manifest.features.code_channels).toEqual({
+      enabled: true,
+      slash_command_url:
+        "https://<your-backend-url>/webhooks/slack/code-channel-commands",
+    })
+    expect(manifest.oauth_config.redirect_urls).toEqual([
+      "https://<your-backend-url>/dashboard/api/slack/callback",
+    ])
+    expect(manifest.oauth_config.scopes.bot).toEqual(
+      expect.arrayContaining(CODE_CHANNEL_SCOPES)
+    )
+    expect(manifest.settings.event_subscriptions.bot_events).toEqual(
+      expect.arrayContaining(CODE_CHANNEL_EVENTS)
+    )
+  })
+
+  it("fills in the running deployment's backend URL", () => {
+    const manifest = slackAppManifest(true, {
+      backendUrl: "https://alephat.example.com/",
+    })
+
+    expect(manifest.settings.event_subscriptions.request_url).toBe(
+      "https://alephat.example.com/webhooks/slack"
+    )
+    expect(manifest.settings.interactivity.request_url).toBe(
+      "https://alephat.example.com/webhooks/slack/interactivity"
+    )
+    expect(manifest.features.code_channels).toEqual({
+      enabled: true,
+      slash_command_url:
+        "https://alephat.example.com/webhooks/slack/code-channel-commands",
+    })
+    expect(manifest.oauth_config.redirect_urls).toEqual([
+      "https://alephat.example.com/dashboard/api/slack/callback",
+    ])
+  })
+
+  it("reports whether any placeholder survives the given config", () => {
+    expect(slackManifestPlaceholdersRemain()).toBe(true)
+    expect(slackManifestPlaceholdersRemain({ backendUrl: "  " })).toBe(true)
+    expect(
+      slackManifestPlaceholdersRemain({ backendUrl: "https://a.example.com" })
+    ).toBe(false)
+  })
+})

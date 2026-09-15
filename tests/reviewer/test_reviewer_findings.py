@@ -1,7 +1,5 @@
 """Unit tests for the Finding schema + thread-metadata helpers."""
 
-from __future__ import annotations
-
 import asyncio
 import copy
 from typing import Any
@@ -14,16 +12,23 @@ from agent.review.findings import (
     DiffSide,
     Finding,
     append_finding,
+    comment_ids_for_finding,
     filter_findings_for_publish,
+    is_surfaced,
+    is_thread_resolved,
     list_findings,
     mutate_findings,
     new_finding,
     new_finding_id,
     replace_findings,
     resolve_review_head_sha,
+    review_id_for_finding,
     set_reviewer_thread_metadata,
+    surface_state_of,
+    thread_ids_for_finding,
     update_finding_fields,
 )
+from agent.run_config import RunConfig
 
 
 def _f(**overrides: Any) -> Finding:
@@ -54,13 +59,12 @@ def test_new_finding_defaults() -> None:
     assert finding["first_seen_sha"] == "abc123"
     assert finding["last_confirmed_sha"] == "abc123"
     assert finding["github_review_id"] is None
-    assert finding["github_review_comment_id"] is None
     assert finding["github_review_comment_ids"] == []
-    assert finding["github_review_thread_id"] is None
     assert finding["github_review_thread_ids"] == []
     assert finding["github_review_run_id"] is None
-    assert finding["github_thread_resolved"] is False
     assert finding["github_resolved_thread_ids"] == []
+    assert finding["github_posted_resolution_comment_ids"] == []
+    assert finding["surface_state"] == "not_surfaced"
     assert finding["last_human_reply_at"] is None
     assert finding["resolution_note"] is None
     assert finding["suggestion"] is None
@@ -110,10 +114,11 @@ def test_filter_findings_for_publish_drops_below_threshold_and_resolved() -> Non
     assert [f["id"] for f in surfaced] == ["f_c", "f_a"]
 
 
-def test_filter_findings_for_publish_caps_results() -> None:
+def test_filter_findings_for_publish_is_uncapped_by_default() -> None:
     findings = [_f(id=f"f_{i}", severity="high", file=f"f{i}.py") for i in range(20)]
-    surfaced = filter_findings_for_publish(findings, severity_threshold="medium", cap=5)
-    assert len(surfaced) == 5
+    surfaced = filter_findings_for_publish(findings, severity_threshold="medium")
+    assert len(surfaced) == 20
+    assert len(filter_findings_for_publish(findings, cap=5)) == 5
 
 
 @pytest.mark.asyncio
@@ -140,6 +145,121 @@ async def test_list_findings_coerces_bad_entries() -> None:
     with patch("agent.review.findings.get_client", return_value=fake_client):
         findings = await list_findings("tid")
     assert [f["id"] for f in findings] == ["f_ok"]
+
+
+async def _read_persisted(record: dict[str, Any]) -> Finding:
+    fake_client = AsyncMock()
+    fake_client.threads.get.return_value = {"metadata": {"findings": [record]}}
+    with patch("agent.review.findings.get_client", return_value=fake_client):
+        findings = await list_findings("tid")
+    return findings[0]
+
+
+@pytest.mark.asyncio
+async def test_reading_legacy_singulars_folds_them_into_the_canonical_lists() -> None:
+    finding = await _read_persisted(
+        {
+            "id": "f_legacy",
+            "github_review_comment_id": 11,
+            "github_review_thread_id": "THREAD_1",
+            "github_review_comment_ids": [12],
+            "github_review_thread_ids": ["THREAD_2"],
+        }
+    )
+
+    assert comment_ids_for_finding(finding) == [11, 12]
+    assert thread_ids_for_finding(finding) == ["THREAD_1", "THREAD_2"]
+    assert "github_review_comment_id" not in finding
+    assert "github_review_thread_id" not in finding
+    assert surface_state_of(finding) == "surfaced"
+
+
+@pytest.mark.asyncio
+async def test_reading_legacy_resolved_flag_becomes_resolved_surface_state() -> None:
+    finding = await _read_persisted(
+        {
+            "id": "f_legacy",
+            "github_review_thread_ids": ["THREAD_1"],
+            "github_thread_resolved": True,
+        }
+    )
+
+    assert is_thread_resolved(finding) is True
+    assert is_surfaced(finding) is True
+    assert "github_thread_resolved" not in finding
+
+
+@pytest.mark.asyncio
+async def test_reading_legacy_surface_record_folds_ids_and_state() -> None:
+    finding = await _read_persisted(
+        {
+            "id": "f_legacy",
+            "anchor": {"file": "a.py", "start_line": 1, "end_line": 1, "side": "RIGHT"},
+            "surface": {
+                "finding_id": "f_legacy",
+                "state": "resolve_pending",
+                "github_review_id": 900,
+                "github_review_comment_id": 11,
+                "github_review_thread_id": "THREAD_1",
+                "severity_threshold_at_publish": "high",
+            },
+        }
+    )
+
+    assert comment_ids_for_finding(finding) == [11]
+    assert thread_ids_for_finding(finding) == ["THREAD_1"]
+    assert review_id_for_finding(finding) == 900
+    assert surface_state_of(finding) == "resolve_pending"
+    assert "surface" not in finding
+    assert "anchor" not in finding
+
+
+@pytest.mark.asyncio
+async def test_reading_a_never_published_legacy_record_stays_not_surfaced() -> None:
+    finding = await _read_persisted(
+        {
+            "id": "f_legacy",
+            "github_review_comment_id": None,
+            "github_review_thread_id": None,
+            "github_thread_resolved": False,
+            "surface": {"finding_id": "f_legacy", "state": "not_surfaced"},
+        }
+    )
+
+    assert comment_ids_for_finding(finding) == []
+    assert thread_ids_for_finding(finding) == []
+    assert review_id_for_finding(finding) is None
+    assert is_surfaced(finding) is False
+
+
+@pytest.mark.asyncio
+async def test_reading_a_legacy_record_persists_only_canonical_fields() -> None:
+    metadata: dict[str, Any] = {
+        "findings": [
+            {
+                "id": "f_legacy",
+                "status": "open",
+                "github_review_comment_id": 11,
+                "github_thread_resolved": True,
+                "surface": {"finding_id": "f_legacy", "state": "surfaced"},
+            }
+        ]
+    }
+    fake_client = AsyncMock()
+    fake_client.threads.get.return_value = {"metadata": metadata}
+
+    with patch("agent.review.findings.get_client", return_value=fake_client):
+        await update_finding_fields("tid", "f_legacy", {"status": "resolved"})
+
+    persisted = fake_client.threads.update.await_args.kwargs["metadata"]["findings"][0]
+    assert persisted == {
+        "id": "f_legacy",
+        "status": "resolved",
+        "github_review_id": None,
+        "github_review_comment_ids": [11],
+        "github_review_thread_ids": [],
+        "surface_state": "resolved",
+    }
 
 
 @pytest.mark.asyncio
@@ -341,7 +461,7 @@ async def test_resolve_review_head_sha_prefers_metadata_over_config() -> None:
     fake_client = AsyncMock()
     fake_client.threads.get.return_value = {"metadata": {"head_sha": "metahead"}}
     with patch("agent.review.findings.get_client", return_value=fake_client):
-        head = await resolve_review_head_sha("tid", {"head_sha": "confighead"})
+        head = await resolve_review_head_sha("tid", RunConfig(head_sha="confighead"))
     assert head == "metahead"
 
 
@@ -350,7 +470,7 @@ async def test_resolve_review_head_sha_falls_back_to_config_when_metadata_empty(
     fake_client = AsyncMock()
     fake_client.threads.get.return_value = {"metadata": {}}
     with patch("agent.review.findings.get_client", return_value=fake_client):
-        head = await resolve_review_head_sha("tid", {"head_sha": "confighead"})
+        head = await resolve_review_head_sha("tid", RunConfig(head_sha="confighead"))
     assert head == "confighead"
 
 
@@ -358,21 +478,21 @@ async def test_resolve_review_head_sha_falls_back_to_config_when_metadata_empty(
 async def test_resolve_review_head_sha_falls_back_without_thread_id() -> None:
     fake_client = AsyncMock()
     with patch("agent.review.findings.get_client", return_value=fake_client):
-        head = await resolve_review_head_sha("", {"head_sha": "confighead"})
+        head = await resolve_review_head_sha("", RunConfig(head_sha="confighead"))
     assert head == "confighead"
     fake_client.threads.get.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_replace_findings_raises_domain_error_when_thread_missing() -> None:
-    import httpx
+    import httpx2
     from langgraph_sdk.errors import NotFoundError
 
     from agent.review.findings import ReviewerThreadMissingError
 
     not_found = NotFoundError(
         "thread tid not found",
-        response=httpx.Response(404, request=httpx.Request("PATCH", "http://x")),
+        response=httpx2.Response(404, request=httpx2.Request("PATCH", "http://x")),
         body=None,
     )
     fake_client = AsyncMock()
@@ -387,12 +507,12 @@ async def test_replace_findings_raises_domain_error_when_thread_missing() -> Non
 
 
 def _not_found(method: str = "GET") -> Exception:
-    import httpx
+    import httpx2
     from langgraph_sdk.errors import NotFoundError
 
     return NotFoundError(
         "thread tid not found",
-        response=httpx.Response(404, request=httpx.Request(method, "http://x")),
+        response=httpx2.Response(404, request=httpx2.Request(method, "http://x")),
         body=None,
     )
 

@@ -1,14 +1,13 @@
 """Tests for LangSmith sandbox env-var configuration parsing."""
 
-import base64
-import uuid
+from pathlib import Path
 from typing import cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langsmith.sandbox import AsyncSandboxClient
+from langsmith.sandbox import AsyncSandboxClient, ResourceNotFoundError
 
-from agent.integrations.langsmith import (
+from agent.sandboxes.providers.langsmith import (
     DEFAULT_SANDBOX_DELETE_AFTER_STOP_SECONDS,
     DEFAULT_SANDBOX_IDLE_TTL_SECONDS,
     DEFAULT_SANDBOX_MEM_BYTES,
@@ -20,10 +19,13 @@ from agent.integrations.langsmith import (
     _get_sandbox_create_extra_fields,
     _get_sandbox_snapshot_config,
     _install_create_extra_fields,
-    _release_sandbox_name,
-    _sandbox_name_for_thread,
-    _wait_for_reconnected_sandbox,
+    _merge_sandbox_create_extra_fields,
+    _reuse_existing_sandbox,
+    capture_snapshot_with_tag,
+    create_langsmith_sandbox,
+    create_langsmith_sandbox_from_params,
 )
+from agent.sandboxes.providers.registry import SandboxGoneError
 
 
 def test_sandbox_api_endpoint_appends_v2_sandboxes() -> None:
@@ -34,45 +36,27 @@ def test_sandbox_api_endpoint_appends_v2_sandboxes() -> None:
 def test_sandbox_api_endpoint_no_double_suffix() -> None:
     with patch.dict(
         "os.environ",
-        {"SANDBOX_LANGSMITH_ENDPOINT": "https://x.smith.langchain.com/v2/sandboxes"},
+        {"LANGSMITH_ENDPOINT": "https://x.smith.langchain.com/v2/sandboxes"},
     ):
         assert _get_sandbox_api_endpoint() == "https://x.smith.langchain.com/v2/sandboxes"
 
 
-def test_sandbox_name_for_thread_encodes_uuid() -> None:
-    thread_id = "12345678-1234-5678-1234-567812345678"
-    name = _sandbox_name_for_thread(thread_id)
-    assert name is not None
-    prefix, _, encoded = name.partition("-")
-    assert prefix == "alephat"
-    assert encoded == encoded.lower()
-    assert "=" not in encoded and "-" not in encoded
-    # Round-trips back to the original UUID.
-    padded = encoded.upper() + "=" * (-len(encoded) % 8)
-    assert uuid.UUID(bytes=base64.b32decode(padded)) == uuid.UUID(thread_id)
+def test_nothing_deletes_sandboxes() -> None:
+    """No code path may delete a sandbox.
 
-
-def test_sandbox_name_for_thread_none_or_invalid() -> None:
-    assert _sandbox_name_for_thread(None) is None
-    assert _sandbox_name_for_thread("not-a-uuid") is None
-
-
-@pytest.mark.asyncio
-async def test_release_sandbox_name_deletes_stale_box() -> None:
-    client = AsyncMock()
-    await _release_sandbox_name(client, "alephat-abc")
-    client.delete_sandbox.assert_awaited_once_with("alephat-abc")
-
-
-@pytest.mark.asyncio
-async def test_release_sandbox_name_swallows_missing_and_skips_none() -> None:
-    client = AsyncMock()
-    client.delete_sandbox.side_effect = RuntimeError("not found")
-    await _release_sandbox_name(client, "alephat-abc")  # must not raise
-
-    client.delete_sandbox.reset_mock(side_effect=True)
-    await _release_sandbox_name(client, None)
-    client.delete_sandbox.assert_not_awaited()
+    A sandbox holds the agent's only copy of its working tree, and the metadata
+    read (``get_sandbox_id_from_metadata``) fails open to "this thread has no
+    sandbox". A delete keyed off that guess destroys a running box. Reclamation
+    belongs to the platform's idle TTL and delete-after-stop.
+    """
+    agent_root = Path(__file__).resolve().parents[2] / "agent"
+    offenders = [
+        f"{path.relative_to(agent_root)}:{lineno}"
+        for path in agent_root.rglob("*.py")
+        for lineno, line in enumerate(path.read_text().splitlines(), start=1)
+        if "delete_sandbox" in line
+    ]
+    assert offenders == []
 
 
 def test_defaults_when_env_unset() -> None:
@@ -87,6 +71,7 @@ def test_defaults_when_env_unset() -> None:
     assert vcpus == DEFAULT_SANDBOX_VCPUS
     assert mem == DEFAULT_SANDBOX_MEM_BYTES
     assert idle == DEFAULT_SANDBOX_IDLE_TTL_SECONDS
+    assert DEFAULT_SANDBOX_DELETE_AFTER_STOP_SECONDS == 30 * 24 * 60 * 60
     assert delete_after == DEFAULT_SANDBOX_DELETE_AFTER_STOP_SECONDS
 
 
@@ -103,6 +88,86 @@ def test_overrides_from_env() -> None:
         _, _, _, _, idle, delete_after = _get_sandbox_snapshot_config()
     assert idle == 120
     assert delete_after == 3600
+
+
+@pytest.mark.asyncio
+async def test_create_langsmith_sandbox_prefers_resource_overrides() -> None:
+    provider = MagicMock()
+    provider.get_or_create = AsyncMock(return_value=MagicMock())
+    with (
+        patch(
+            "agent.sandboxes.providers.langsmith._get_sandbox_snapshot_config",
+            return_value=("default-snap", 100, 2, 200, 300, 400),
+        ),
+        patch("agent.sandboxes.providers.langsmith.LangSmithProvider", return_value=provider),
+    ):
+        await create_langsmith_sandbox(
+            snapshot_id="env-snap",
+            mem_bytes=2_000,
+            vcpus=8,
+            fs_capacity_bytes=1_000,
+            create_params={"_internal_runtime": "v2"},
+        )
+
+    provider.get_or_create.assert_awaited_once_with(
+        sandbox_id=None,
+        snapshot_id="env-snap",
+        fs_capacity_bytes=1_000,
+        vcpus=8,
+        mem_bytes=2_000,
+        idle_ttl_seconds=300,
+        delete_after_stop_seconds=400,
+        create_params={"_internal_runtime": "v2"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_langsmith_sandbox_uses_root_snapshot_when_unset() -> None:
+    provider = MagicMock()
+    provider.get_or_create = AsyncMock(return_value=MagicMock())
+    with (
+        patch(
+            "agent.sandboxes.providers.langsmith._get_sandbox_snapshot_config",
+            return_value=(None, 100, 2, 200, 300, 400),
+        ),
+        patch("agent.sandboxes.providers.langsmith.LangSmithProvider", return_value=provider),
+    ):
+        await create_langsmith_sandbox()
+
+    assert provider.get_or_create.await_args is not None
+    assert provider.get_or_create.await_args.kwargs["snapshot_id"] == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "expected_vcpus", "expected_mem_bytes"),
+    [
+        ({"vcpus": 8}, 8, None),
+        ({"mem_bytes": 8_000}, None, 8_000),
+    ],
+)
+async def test_create_langsmith_sandbox_derives_partial_cpu_memory_overrides(
+    overrides: dict[str, int],
+    expected_vcpus: int | None,
+    expected_mem_bytes: int | None,
+) -> None:
+    provider = MagicMock()
+    provider.get_or_create = AsyncMock(return_value=MagicMock())
+    with (
+        patch(
+            "agent.sandboxes.providers.langsmith._get_sandbox_snapshot_config",
+            return_value=("default-snap", 100, 2, 200, 300, 400),
+        ),
+        patch("agent.sandboxes.providers.langsmith.LangSmithProvider", return_value=provider),
+    ):
+        await create_langsmith_sandbox(
+            mem_bytes=overrides.get("mem_bytes"),
+            vcpus=overrides.get("vcpus"),
+        )
+
+    assert provider.get_or_create.await_args is not None
+    assert provider.get_or_create.await_args.kwargs["vcpus"] == expected_vcpus
+    assert provider.get_or_create.await_args.kwargs["mem_bytes"] == expected_mem_bytes
 
 
 def test_zero_disables_ttls() -> None:
@@ -176,31 +241,44 @@ class _FakeSandboxClient:
         return {"sandbox": kwargs["snapshot_id"]}
 
 
-class _FakeStatusSandbox:
-    def __init__(self, status: str) -> None:
-        self.status = status
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("snapshot_id", "create_params"),
+    [(None, None), ("", None), (None, {"snapshot_id": ""})],
+)
+async def test_provider_omits_snapshot_id_when_unset(
+    snapshot_id: str | None, create_params: dict[str, str] | None
+) -> None:
+    """No usable snapshot must send no `snapshot_id` key at all.
 
+    The API boots its default root snapshot only when the field is absent. It
+    is a UUID server-side, so sending "" is rejected with a 422 before any
+    validation runs, and no sandbox is created.
+    """
+    client = AsyncSandboxClient(api_key="key", api_endpoint="https://example.com/v2/sandboxes")
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"name": "sandbox-new", "status": "ready"}
+    post = AsyncMock(return_value=response)
+    client._http.post = post
 
-class _FakeReconnectClient:
-    def __init__(self, statuses: list[str]) -> None:
-        self.statuses = statuses
-        self.calls = 0
+    with patch("agent.sandboxes.providers.langsmith.AsyncSandboxClient", return_value=client):
+        await LangSmithProvider(api_key="key").get_or_create(
+            snapshot_id=snapshot_id, create_params=create_params
+        )
 
-    async def get_sandbox(self, *, name: str) -> _FakeStatusSandbox:
-        self.calls += 1
-        status = self.statuses[min(self.calls - 1, len(self.statuses) - 1)]
-        return _FakeStatusSandbox(status)
+    assert post.await_args is not None
+    assert "snapshot_id" not in post.await_args.kwargs["json"]
 
 
 @pytest.mark.asyncio
 async def test_create_sandbox_with_retry_retries_transient_errors(monkeypatch) -> None:  # noqa: ANN001
     client = _FakeSandboxClient(failures=2)
-    monkeypatch.setattr("agent.integrations.langsmith.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("agent.sandboxes.providers.langsmith.asyncio.sleep", AsyncMock())
 
     result = await _create_sandbox_with_retry(
         cast(AsyncSandboxClient, client),
         snapshot_id="snap-1",
-        name="alephat-abc",
         fs_capacity_bytes=None,
         vcpus=None,
         mem_bytes=None,
@@ -211,25 +289,63 @@ async def test_create_sandbox_with_retry_retries_transient_errors(monkeypatch) -
 
     assert result == {"sandbox": "snap-1"}
     assert client.calls == 3
-    assert client.last_kwargs["name"] == "alephat-abc"
+    assert "name" not in client.last_kwargs
 
 
 @pytest.mark.asyncio
-async def test_wait_for_reconnected_sandbox_polls_until_ready(monkeypatch) -> None:  # noqa: ANN001
-    client = _FakeReconnectClient(["starting", "starting", "running"])
-    sleep = AsyncMock()
-    monkeypatch.setattr("agent.integrations.langsmith.asyncio.sleep", sleep)
+async def test_create_from_params_forwards_public_and_hidden_options() -> None:
+    sandbox = MagicMock(name="sandbox-new")
+    sandbox.name = "sandbox-new"
+    sandbox.to_sync.return_value = MagicMock(id="sandbox-new")
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.create_sandbox = AsyncMock(return_value=sandbox)
+    client.wait_for_sandbox = AsyncMock(return_value=sandbox)
 
-    sandbox = await _wait_for_reconnected_sandbox(
-        cast(AsyncSandboxClient, client),
-        "sandbox-1",
-        timeout_seconds=30,
-        poll_seconds=2,
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "LANGSMITH_API_KEY": "shared-key",
+                "LANGSMITH_ENDPOINT": "https://shared.smith.langchain.com",
+                "SANDBOX_LANGSMITH_API_KEY": "retired-key",
+                "SANDBOX_LANGSMITH_ENDPOINT": "https://retired.smith.langchain.com",
+            },
+            clear=True,
+        ),
+        patch(
+            "agent.sandboxes.providers.langsmith.AsyncSandboxClient", return_value=client
+        ) as client_factory,
+        patch("agent.sandboxes.providers.langsmith._install_create_extra_fields") as install,
+        patch(
+            "agent.sandboxes.providers.langsmith._get_sandbox_create_extra_fields",
+            return_value={},
+        ),
+    ):
+        await create_langsmith_sandbox_from_params(
+            {
+                "snapshot_name": "python:latest",
+                "wait_for_ready": False,
+                "timeout": 240,
+                "cpu_millicores": 500,
+                "_internal_runtime": "v2",
+            }
+        )
+
+    client_factory.assert_called_once_with(
+        api_key="shared-key", api_endpoint="https://shared.smith.langchain.com/v2/sandboxes"
     )
-
-    assert sandbox.status == "running"
-    assert client.calls == 3
-    assert sleep.await_count == 2
+    client.create_sandbox.assert_awaited_once_with(
+        snapshot_name="python:latest",
+        wait_for_ready=False,
+        timeout=240,
+    )
+    client.wait_for_sandbox.assert_awaited_once_with("sandbox-new", timeout=240)
+    install.assert_called_once_with(
+        client,
+        {"cpu_millicores": 500, "_internal_runtime": "v2"},
+    )
 
 
 def test_extra_fields_unset_is_empty() -> None:
@@ -246,6 +362,21 @@ def test_extra_fields_parsed() -> None:
         clear=True,
     ):
         assert _get_sandbox_create_extra_fields() == {"_internal_runtime": "v2"}
+
+
+def test_environment_create_params_override_deployment_defaults() -> None:
+    with patch.dict(
+        "os.environ",
+        {"SANDBOX_CREATE_EXTRA_JSON": '{"_internal_runtime": "v1", "shared": true}'},
+        clear=True,
+    ):
+        assert _merge_sandbox_create_extra_fields(
+            {"_internal_runtime": "v2", "proxy_config": {"rules": []}}
+        ) == {
+            "_internal_runtime": "v2",
+            "shared": True,
+            "proxy_config": {"rules": []},
+        }
 
 
 def test_extra_fields_rejects_invalid_json() -> None:
@@ -286,6 +417,62 @@ async def test_install_create_extra_fields_merges_only_boxes_post() -> None:
 
 
 @pytest.mark.asyncio
+async def test_capture_snapshot_sends_the_tag_and_restores_the_client() -> None:
+    """The SDK has no `tag` parameter yet, so it rides in on the capture body."""
+    calls: list[tuple[str, dict]] = []
+
+    class _FakeHttp:
+        async def post(self, url, **kwargs):  # noqa: ANN001, ANN003
+            payload = kwargs.get("json")
+            assert isinstance(payload, dict)
+            calls.append((url, payload))
+            return "ok"
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self._http = _FakeHttp()
+            self.original_post = self._http.post
+
+        async def capture_snapshot(self, sandbox_id: str, name: str, *, timeout: int) -> str:
+            await self._http.post(
+                f"https://api/v2/sandboxes/boxes/{sandbox_id}/snapshot", json={"name": name}
+            )
+            return "snap-1"
+
+    client = _FakeClient()
+    snapshot = await capture_snapshot_with_tag(
+        cast(AsyncSandboxClient, client), "sb-1", "acme-monorepo", "latest", timeout=60
+    )
+
+    assert snapshot == "snap-1"
+    assert calls[0][1] == {"name": "acme-monorepo", "tag": "latest"}
+    assert client._http.post == client.original_post
+
+
+@pytest.mark.asyncio
+async def test_capture_snapshot_restores_the_client_after_a_failure() -> None:
+    class _FakeHttp:
+        async def post(self, url, **kwargs):  # noqa: ANN001, ANN003
+            raise RuntimeError("capture exploded")
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self._http = _FakeHttp()
+            self.original_post = self._http.post
+
+        async def capture_snapshot(self, sandbox_id: str, name: str, *, timeout: int) -> str:
+            return await self._http.post("https://api/v2/sandboxes/boxes/x/snapshot", json={})
+
+    client = _FakeClient()
+    with pytest.raises(RuntimeError, match="capture exploded"):
+        await capture_snapshot_with_tag(
+            cast(AsyncSandboxClient, client), "sb-1", "acme-monorepo", "latest", timeout=60
+        )
+
+    assert client._http.post == client.original_post
+
+
+@pytest.mark.asyncio
 async def test_install_create_extra_fields_noop_when_empty() -> None:
     class _FakeHttp:
         def __init__(self) -> None:
@@ -298,3 +485,28 @@ async def test_install_create_extra_fields_noop_when_empty() -> None:
     client = _FakeClient()
     _install_create_extra_fields(cast(AsyncSandboxClient, client), {})
     assert client._http.post == "sentinel"
+
+
+class _MissingSandboxClient:
+    """get_sandbox raises instead of returning a sandbox."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+
+    async def get_sandbox(self, *, name: str) -> None:
+        raise self.exc
+
+
+@pytest.mark.asyncio
+async def test_reuse_reports_a_deleted_sandbox_as_gone() -> None:
+    client = _MissingSandboxClient(ResourceNotFoundError("Sandbox 'alephat-abc' not found"))
+    with pytest.raises(SandboxGoneError):
+        await _reuse_existing_sandbox(cast(AsyncSandboxClient, client), "alephat-abc")
+
+
+@pytest.mark.asyncio
+async def test_reuse_keeps_other_failures_untyped() -> None:
+    client = _MissingSandboxClient(RuntimeError("boom"))
+    with pytest.raises(RuntimeError) as excinfo:
+        await _reuse_existing_sandbox(cast(AsyncSandboxClient, client), "alephat-abc")
+    assert not isinstance(excinfo.value, SandboxGoneError)

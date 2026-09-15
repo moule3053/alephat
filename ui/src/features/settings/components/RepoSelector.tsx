@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { CaretDownIcon, FolderIcon } from "@phosphor-icons/react"
+import {
+  ArrowsClockwiseIcon,
+  CaretDownIcon,
+  FolderIcon,
+} from "@phosphor-icons/react"
 
+import { useRefreshRepos } from "@/lib/profile"
 import { cn } from "@/lib/utils"
 
 type RepoOption = { full_name: string }
@@ -8,6 +13,7 @@ type RepoOption = { full_name: string }
 interface RepoSelectorProps {
   repos?: Array<RepoOption>
   selectedRepo?: string | null
+  selectedLabel?: string
   onRepoChange: (repo: string | null) => void
   placeholder?: string
   emptySelectionLabel?: string
@@ -16,12 +22,14 @@ interface RepoSelectorProps {
   className?: string
   triggerClassName?: string
   dropdownClassName?: string
+  side?: "top" | "bottom"
   disabled?: boolean
 }
 
 export function RepoSelector({
   repos,
   selectedRepo = null,
+  selectedLabel,
   onRepoChange,
   placeholder = "Select repository",
   emptySelectionLabel = "No repository",
@@ -30,11 +38,13 @@ export function RepoSelector({
   className,
   triggerClassName,
   dropdownClassName,
+  side = "bottom",
   disabled = false,
 }: RepoSelectorProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState("")
   const dropdownRef = useRef<HTMLDivElement>(null)
+  const refresh = useRefreshRepos()
 
   const filteredRepos = useMemo(() => {
     const all = repos ?? []
@@ -67,24 +77,39 @@ export function RepoSelector({
       >
         <FolderIcon className="size-3.5 shrink-0" />
         <span className="flex-1 truncate text-left">
-          {selectedRepo || placeholder}
+          {selectedRepo ? (selectedLabel ?? selectedRepo) : placeholder}
         </span>
         <CaretDownIcon className="size-3 shrink-0 opacity-70" />
       </button>
       {open && (
         <div
           className={cn(
-            "absolute top-full left-0 z-50 mt-1 flex max-h-72 w-72 flex-col overflow-hidden rounded border border-border bg-popover text-xs text-popover-foreground shadow-lg",
+            "absolute left-0 z-50 flex max-h-72 w-72 flex-col overflow-hidden rounded border border-border bg-popover text-xs text-popover-foreground shadow-lg",
+            side === "top" ? "bottom-full mb-1" : "top-full mt-1",
             dropdownClassName
           )}
         >
-          <input
-            autoFocus
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={searchPlaceholder}
-            className="w-full border-b border-border bg-transparent px-2 py-1.5 text-foreground outline-none placeholder:text-muted-foreground"
-          />
+          <div className="flex items-center border-b border-border">
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={searchPlaceholder}
+              className="min-w-0 flex-1 bg-transparent px-2 py-1.5 text-foreground outline-none placeholder:text-muted-foreground"
+            />
+            <button
+              type="button"
+              title="Refresh repositories"
+              aria-label="Refresh repositories"
+              disabled={refresh.isPending}
+              onClick={() => refresh.mutate()}
+              className="mr-1 cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-muted disabled:cursor-default"
+            >
+              <ArrowsClockwiseIcon
+                className={cn("size-3.5", refresh.isPending && "animate-spin")}
+              />
+            </button>
+          </div>
           <div className="overflow-y-auto">
             <button
               type="button"

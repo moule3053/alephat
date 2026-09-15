@@ -1,7 +1,5 @@
 """Deep Agents backend for the Kubernetes Agent Sandbox Python runtime."""
 
-from __future__ import annotations
-
 import posixpath
 import secrets
 import shlex
@@ -24,7 +22,11 @@ from deepagents.backends.protocol import (
     ReadResult,
     WriteResult,
 )
-from deepagents.backends.sandbox import BaseSandbox, _build_edit_tmpfile_cmd, _parse_edit_output
+from deepagents.backends.sandbox import (
+    BaseSandbox,
+    _build_edit_tmpfile_cmd,  # noqa: PLC2701 — pinned SDK helpers preserve edit semantics
+    _parse_edit_output,  # noqa: PLC2701
+)
 
 
 class AgentSandboxBackend(BaseSandbox):

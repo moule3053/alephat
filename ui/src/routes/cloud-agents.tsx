@@ -1,9 +1,13 @@
-import { Link, createFileRoute } from "@tanstack/react-router"
-import { CaretRightIcon } from "@phosphor-icons/react"
+import { createFileRoute } from "@tanstack/react-router"
 import { useEffect, useRef, useState } from "react"
 
 import type { ModelOption } from "@/lib/api"
-import { AppShell, SettingsRow, SettingsSection } from "@/components/AppShell"
+import {
+  AppShell,
+  SettingsNavRow,
+  SettingsRow,
+  SettingsSection,
+} from "@/components/AppShell"
 import { Button } from "@/components/ui/button"
 import { RepoSelector } from "@/features/settings/components/RepoSelector"
 import { Input } from "@/components/ui/input"
@@ -38,16 +42,19 @@ function CloudAgentsPage() {
   const save = useSaveProfile()
 
   const [modelId, setModelId] = useState("")
-  const [effort, setEffort] = useState("")
+  const [effortChoice, setEffort] = useState("")
   const [subagentModelId, setSubagentModelId] = useState("")
-  const [subagentEffort, setSubagentEffort] = useState("")
+  const [subagentEffortChoice, setSubagentEffort] = useState("")
   const [defaultRepo, setDefaultRepo] = useState("")
   const [baseBranch, setBaseBranch] = useState("")
   const [branchPrefix, setBranchPrefix] = useState("")
   const [error, setError] = useState<string | null>(null)
   const initialized = useRef(false)
 
-  const firstModel: ModelOption | undefined = options.data?.models[0]
+  const defaultModels = options.data?.models.filter(
+    (model) => model.can_be_default !== false
+  )
+  const firstModel: ModelOption | undefined = defaultModels?.[0]
   const defaultAgentModel =
     options.data?.default_agent_model ?? firstModel?.id ?? ""
   const defaultAgentEffort =
@@ -59,15 +66,25 @@ function CloudAgentsPage() {
   const defaultSubagentEffort =
     options.data?.default_agent_subagent_reasoning_effort ?? defaultAgentEffort
   const currentModel: ModelOption | undefined =
-    options.data?.models.find((m) => m.id === modelId) ?? firstModel
+    defaultModels?.find((m) => m.id === modelId) ?? firstModel
   const currentSubagentModel: ModelOption | undefined =
-    options.data?.models.find((m) => m.id === subagentModelId) ?? firstModel
+    defaultModels?.find((m) => m.id === subagentModelId) ?? firstModel
+  const effort =
+    currentModel && !currentModel.efforts.includes(effortChoice)
+      ? currentModel.default_effort
+      : effortChoice
+  const subagentEffort =
+    currentSubagentModel &&
+    !currentSubagentModel.efforts.includes(subagentEffortChoice)
+      ? currentSubagentModel.default_effort
+      : subagentEffortChoice
 
   useEffect(() => {
     if (!profile.data || initialized.current) return
     const hasModel = !!profile.data.default_model || !!defaultAgentModel
     if (!hasModel) return
     initialized.current = true
+    // oxlint-disable-next-line react/set-state-in-effect
     setModelId(profile.data.default_model ?? defaultAgentModel)
     setEffort(profile.data.reasoning_effort ?? defaultAgentEffort)
     setSubagentModelId(
@@ -90,21 +107,6 @@ function CloudAgentsPage() {
     defaultSubagentModel,
     defaultSubagentEffort,
   ])
-
-  useEffect(() => {
-    if (currentModel && !currentModel.efforts.includes(effort)) {
-      setEffort(currentModel.default_effort)
-    }
-  }, [currentModel, effort])
-
-  useEffect(() => {
-    if (
-      currentSubagentModel &&
-      !currentSubagentModel.efforts.includes(subagentEffort)
-    ) {
-      setSubagentEffort(currentSubagentModel.default_effort)
-    }
-  }, [currentSubagentModel, subagentEffort])
 
   if (session.isLoading) {
     return (
@@ -143,20 +145,51 @@ function CloudAgentsPage() {
     <AppShell
       user={session.data}
       title="Alephat Agent"
-      description="Configure how the Alephat Agent picks a model, repository, and PR defaults."
+      description="Personal defaults for Alephat Agent runs you trigger. These settings only apply to your account."
     >
       <SettingsSection title="Defaults">
         <div className="divide-y divide-border">
           <SettingsRow
+            label="Adaptive model routing"
+            description="Automatically choose a model for each turn. Inherit uses the org-wide default; Enabled or Disabled overrides it."
+            control={
+              <Select
+                value={
+                  profile.data?.model_routing_enabled === true
+                    ? "enabled"
+                    : profile.data?.model_routing_enabled === false
+                      ? "disabled"
+                      : "inherit"
+                }
+                onValueChange={(v) =>
+                  persist({
+                    model_routing_enabled:
+                      v === "enabled" ? true : v === "disabled" ? false : null,
+                  })
+                }
+                disabled={profile.isLoading || save.isPending}
+              >
+                <SelectTrigger className="w-40">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="inherit">Inherit org default</SelectItem>
+                  <SelectItem value="enabled">Enabled</SelectItem>
+                  <SelectItem value="disabled">Disabled</SelectItem>
+                </SelectContent>
+              </Select>
+            }
+          />
+          <SettingsRow
             label="Default Model"
-            description="Used when no model is specified"
+            description="Used when adaptive routing is off or no model is specified"
             control={
               <Select value={modelId} onValueChange={(v) => v && setModelId(v)}>
                 <SelectTrigger className="w-40">
                   <SelectValue placeholder="Pick a model" />
                 </SelectTrigger>
                 <SelectContent>
-                  {options.data?.models.map((m) => (
+                  {defaultModels?.map((m) => (
                     <SelectItem key={m.id} value={m.id}>
                       {m.label}
                     </SelectItem>
@@ -195,7 +228,7 @@ function CloudAgentsPage() {
                   <SelectValue placeholder="Pick a model" />
                 </SelectTrigger>
                 <SelectContent>
-                  {options.data?.models.map((m) => (
+                  {defaultModels?.map((m) => (
                     <SelectItem key={m.id} value={m.id}>
                       {m.label}
                     </SelectItem>
@@ -303,51 +336,21 @@ function CloudAgentsPage() {
               />
             }
           />
-          <SettingsRow
-            label="Always Create PRs"
-            description="Always create a pull request for code changes. When disabled, agents create PRs only when necessary or requested."
-            control={
-              <Switch
-                checked={profile.data?.create_prs ?? false}
-                onCheckedChange={(v) => persist({ create_prs: v })}
-              />
-            }
-          />
         </div>
       </SettingsSection>
 
       <SettingsSection title="Rules">
-        <Link
+        <SettingsNavRow
           to="/agents/instructions"
-          className="flex items-center justify-between gap-6 px-4 py-3 hover:bg-muted/40"
-        >
-          <div className="flex flex-col gap-0.5">
-            <span className="text-xs font-medium text-foreground">
-              Repository Instructions
-            </span>
-            <span className="text-xs text-muted-foreground">
-              Per-repo custom instructions injected into the agent's system
-              prompt.
-            </span>
-          </div>
-          <CaretRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
-        </Link>
+          label="Repository Instructions"
+          description="Per-repo custom instructions injected into the agent's system prompt."
+        />
         {session.data.is_admin && (
-          <Link
-            to="/agents/snapshots"
-            className="flex items-center justify-between gap-6 px-4 py-3 hover:bg-muted/40"
-          >
-            <div className="flex flex-col gap-0.5">
-              <span className="text-xs font-medium text-foreground">
-                Repository Snapshots
-              </span>
-              <span className="text-xs text-muted-foreground">
-                Build a per-repo sandbox image from a custom Dockerfile. Falls
-                back to the default image.
-              </span>
-            </div>
-            <CaretRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
-          </Link>
+          <SettingsNavRow
+            to="/agents/sandbox"
+            label="Sandbox"
+            description="The snapshot new sandboxes boot from when their environment has none."
+          />
         )}
       </SettingsSection>
 

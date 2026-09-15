@@ -36,7 +36,10 @@ export function setNotificationsPref(enabled: boolean) {
   }
 }
 
-export function showRunNotification(thread: AgentThread) {
+export function showRunNotification(
+  thread: AgentThread,
+  onClick: (threadId: string) => void
+) {
   if (!notificationsEnabled()) return
   const statusLabel =
     thread.status === "error"
@@ -49,11 +52,12 @@ export function showRunNotification(thread: AgentThread) {
   try {
     const n = new Notification(title, {
       body,
-      icon: "/logo-mark.png",
+      icon: `${import.meta.env.BASE_URL}logo-mark.png`,
       tag: `run-${thread.id}`,
     })
     n.onclick = () => {
       window.focus()
+      onClick(thread.id)
       n.close()
     }
   } catch {

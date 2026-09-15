@@ -1,7 +1,5 @@
 """Task/run transition helpers."""
 
-from __future__ import annotations
-
 from alephat_platform.common.enums import TERMINAL_TASK_STATUSES, TaskStatus
 from alephat_platform.common.errors import ConflictError
 

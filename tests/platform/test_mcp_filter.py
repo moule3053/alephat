@@ -37,5 +37,7 @@ async def test_connected_tool_invokes_underlying_langchain_tool(monkeypatch):
     )
     assert sessions[0].ok
     assert sessions[0].tools[0].namespaced == "mcp_docs_search"
-    assert await sessions[0].tools[0].handler(query="leases") == '{"answer": "found"}'
+    handler = sessions[0].tools[0].handler
+    assert handler is not None
+    assert await handler(query="leases") == '{"answer": "found"}'
     assert calls == [{"query": "leases"}]

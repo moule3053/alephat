@@ -1,12 +1,11 @@
 """Workflow-file push approval state."""
 
-from __future__ import annotations
-
 from collections.abc import Mapping
-from datetime import UTC, datetime
 from typing import Any
 
 from langgraph_sdk import get_client
+
+from agent.store import now_iso
 
 WORKFLOW_PUSH_APPROVALS_KEY = "workflow_push_approvals"
 WORKFLOW_APPROVAL_PENDING = "pending"
@@ -14,10 +13,6 @@ WORKFLOW_APPROVAL_APPROVED = "approved"
 WORKFLOW_APPROVAL_REJECTED = "rejected"
 _MAX_APPROVAL_RECORDS = 20
 _TERMINAL_STATUSES = {WORKFLOW_APPROVAL_APPROVED, WORKFLOW_APPROVAL_REJECTED}
-
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 def _approvals_from_metadata(metadata: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -57,6 +52,7 @@ async def ensure_workflow_push_pending(
     diff_stats: Mapping[str, Any] | None = None,
     diff_preview: str | None = None,
     diff_preview_truncated: bool = False,
+    inherited_from: str | None = None,
     approval_url: str | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Store a pending approval unless a terminal record already exists."""
@@ -74,6 +70,7 @@ async def ensure_workflow_push_pending(
         "diff_stats": _normalize_diff_stats(diff_stats, len(files)),
         "diff_preview": diff_preview or "",
         "diff_preview_truncated": diff_preview_truncated,
+        "inherited_from": inherited_from,
         "approval_url": approval_url,
     }
     if existing and existing.get("status") == WORKFLOW_APPROVAL_PENDING:
@@ -86,7 +83,7 @@ async def ensure_workflow_push_pending(
         "fingerprint": fingerprint,
         "status": WORKFLOW_APPROVAL_PENDING,
         **review_fields,
-        "requested_at": _now(),
+        "requested_at": now_iso(),
         "notified": False,
     }
     approvals[fingerprint] = record
@@ -97,7 +94,7 @@ async def ensure_workflow_push_pending(
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         return max(0, int(value))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
 
 
@@ -118,6 +115,7 @@ def workflow_push_approval_response(record: Mapping[str, Any]) -> dict[str, Any]
     decided_at = record.get("decided_at")
     decided_by = record.get("decided_by")
     approval_url = record.get("approval_url")
+    inherited_from = record.get("inherited_from")
     return {
         "fingerprint": str(record.get("fingerprint") or ""),
         "status": str(record.get("status") or WORKFLOW_APPROVAL_PENDING),
@@ -132,6 +130,9 @@ def workflow_push_approval_response(record: Mapping[str, Any]) -> dict[str, Any]
         ),
         "diffPreview": str(record.get("diff_preview") or ""),
         "diffPreviewTruncated": record.get("diff_preview_truncated") is True,
+        "inheritedFrom": (
+            inherited_from if isinstance(inherited_from, str) and inherited_from else None
+        ),
         "approvalUrl": approval_url if isinstance(approval_url, str) and approval_url else None,
         "requestedAt": requested_at if isinstance(requested_at, str) else None,
         "decidedAt": decided_at if isinstance(decided_at, str) else None,
@@ -152,7 +153,7 @@ async def mark_workflow_push_notified(thread_id: str, fingerprint: str) -> None:
     if not record:
         return
     record["notified"] = True
-    record["notified_at"] = _now()
+    record["notified_at"] = now_iso()
     approvals[fingerprint] = record
     await _save_approvals(thread_id, approvals)
 
@@ -169,7 +170,7 @@ async def decide_workflow_push_approval(
     if not record:
         return None
     record["status"] = WORKFLOW_APPROVAL_APPROVED if approved else WORKFLOW_APPROVAL_REJECTED
-    record["decided_at"] = _now()
+    record["decided_at"] = now_iso()
     record["decided_by"] = actor
     approvals[fingerprint] = record
     await _save_approvals(thread_id, approvals)

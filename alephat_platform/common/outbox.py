@@ -1,7 +1,5 @@
 """Transactional outbox writer and publisher loop."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import uuid

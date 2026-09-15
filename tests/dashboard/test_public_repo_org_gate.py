@@ -1,7 +1,5 @@
 """Tests for the public-repo org-membership gate on GitHub webhooks."""
 
-from __future__ import annotations
-
 import hashlib
 import hmac
 import json
@@ -9,11 +7,11 @@ from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
-from httpx import Response
+from httpx2 import Response
 
 from agent.api.app import app
+from agent.github import webhook as github_webhooks
 from agent.webhooks import common as webhook_common
-from agent.webhooks import github as github_webhooks
 
 _TEST_WEBHOOK_SECRET = "test-secret-for-webhook"
 
@@ -78,7 +76,9 @@ def test_gate_blocks_non_member_on_public_pr_comment(monkeypatch) -> None:
                 "id": 1,
                 "number": 7,
                 "title": "PR title",
-                "pull_request": {"url": "https://api.github.com/repos/moule3053/alephat/pulls/7"},
+                "pull_request": {
+                    "url": "https://api.github.com/repos/langchain-ai/alephat/pulls/7"
+                },
             },
             "comment": {"body": "@alephat review"},
             "repository": {
@@ -120,7 +120,9 @@ def test_gate_allows_org_member_on_public_pr_comment(monkeypatch) -> None:
                 "id": 1,
                 "number": 7,
                 "title": "PR title",
-                "pull_request": {"url": "https://api.github.com/repos/moule3053/alephat/pulls/7"},
+                "pull_request": {
+                    "url": "https://api.github.com/repos/langchain-ai/alephat/pulls/7"
+                },
             },
             "comment": {"body": "@alephat review"},
             "repository": {
@@ -160,7 +162,9 @@ def test_gate_skipped_on_private_repo(monkeypatch) -> None:
                 "id": 1,
                 "number": 7,
                 "title": "PR title",
-                "pull_request": {"url": "https://api.github.com/repos/moule3053/alephat/pulls/7"},
+                "pull_request": {
+                    "url": "https://api.github.com/repos/langchain-ai/alephat/pulls/7"
+                },
             },
             "comment": {"body": "@alephat please look at this"},
             "repository": {
@@ -201,7 +205,9 @@ def test_gate_disabled_when_env_unset(monkeypatch) -> None:
                 "id": 1,
                 "number": 7,
                 "title": "PR title",
-                "pull_request": {"url": "https://api.github.com/repos/moule3053/alephat/pulls/7"},
+                "pull_request": {
+                    "url": "https://api.github.com/repos/langchain-ai/alephat/pulls/7"
+                },
             },
             "comment": {"body": "@alephat please look at this"},
             "repository": {
@@ -268,7 +274,7 @@ def test_review_requested_is_unsupported_before_public_repo_gate(monkeypatch) ->
             "requested_reviewer": {"login": "alephat[bot]"},
             "pull_request": {
                 "number": 1244,
-                "html_url": "https://github.com/moule3053/alephat/pull/1244",
+                "html_url": "https://github.com/langchain-ai/alephat/pull/1244",
                 "base": {"sha": "base-sha"},
                 "head": {"sha": "head-sha", "ref": "feature-branch"},
             },
@@ -312,7 +318,9 @@ def test_gate_allows_internal_bot_sender(monkeypatch) -> None:
                 "id": 1,
                 "number": 7,
                 "title": "PR title",
-                "pull_request": {"url": "https://api.github.com/repos/moule3053/alephat/pulls/7"},
+                "pull_request": {
+                    "url": "https://api.github.com/repos/langchain-ai/alephat/pulls/7"
+                },
             },
             "comment": {"body": "@alephat please look at this"},
             "repository": {
@@ -332,11 +340,17 @@ def test_gate_allows_internal_bot_sender(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_is_user_active_org_member_returns_false_when_no_token(monkeypatch) -> None:
-    from agent.utils import github_org_membership
+    from agent.github import org_membership as github_org_membership
 
-    async def fake_token() -> None:
+    async def fake_installation(_org: str) -> int:
+        return 1
+
+    async def fake_token(**_kwargs) -> None:
         return None
 
+    monkeypatch.setattr(
+        github_org_membership, "get_github_app_installation_id_for_org", fake_installation
+    )
     monkeypatch.setattr(github_org_membership, "get_github_app_installation_token", fake_token)
 
     assert await github_org_membership.is_user_active_org_member("alice", "langchain-ai") is False
@@ -365,23 +379,33 @@ class _FakeResponse:
         return self._payload
 
 
-def _patch_membership_http(monkeypatch, response: _FakeResponse) -> None:
-    from agent.utils import github_org_membership
+def _patch_membership_http(monkeypatch, response: _FakeResponse) -> dict[str, Any]:
+    from agent.github import org_membership as github_org_membership
 
-    async def fake_token() -> str:
+    seen: dict[str, Any] = {}
+
+    async def fake_installation(_org: str) -> int:
+        return 1
+
+    async def fake_token(**kwargs) -> str:
+        seen.update(kwargs)
         return "x"
 
+    monkeypatch.setattr(
+        github_org_membership, "get_github_app_installation_id_for_org", fake_installation
+    )
     monkeypatch.setattr(github_org_membership, "get_github_app_installation_token", fake_token)
 
     def factory(*_args, **_kwargs) -> _FakeAsyncClient:
         return _FakeAsyncClient(response)
 
-    monkeypatch.setattr(github_org_membership.httpx, "AsyncClient", factory)
+    monkeypatch.setattr(github_org_membership.httpx2, "AsyncClient", factory)
+    return seen
 
 
 @pytest.mark.asyncio
 async def test_is_user_active_org_member_handles_404(monkeypatch) -> None:
-    from agent.utils import github_org_membership
+    from agent.github import org_membership as github_org_membership
 
     _patch_membership_http(monkeypatch, _FakeResponse(404))
 
@@ -390,16 +414,17 @@ async def test_is_user_active_org_member_handles_404(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_is_user_active_org_member_active(monkeypatch) -> None:
-    from agent.utils import github_org_membership
+    from agent.github import org_membership as github_org_membership
 
-    _patch_membership_http(monkeypatch, _FakeResponse(200, {"state": "active"}))
+    seen = _patch_membership_http(monkeypatch, _FakeResponse(200, {"state": "active"}))
 
     assert await github_org_membership.is_user_active_org_member("alice", "langchain-ai") is True
+    assert seen == {"installation_id": 1, "permissions": {"members": "read"}}
 
 
 @pytest.mark.asyncio
 async def test_is_user_active_org_member_pending_returns_false(monkeypatch) -> None:
-    from agent.utils import github_org_membership
+    from agent.github import org_membership as github_org_membership
 
     _patch_membership_http(monkeypatch, _FakeResponse(200, {"state": "pending"}))
 

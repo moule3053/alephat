@@ -1,26 +1,17 @@
-FROM node:22-slim AS build
-
+FROM node:24-alpine AS build
 WORKDIR /app
 RUN corepack enable
-COPY ui/package.json ui/pnpm-lock.yaml ui/pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
-COPY ui/ ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
+COPY ui/package.json ui/package.json
+RUN pnpm install --frozen-lockfile --filter alephat-dashboard...
+COPY ui/ ui/
 ENV VITE_DEVTOOLS=false
 ENV VITE_PLATFORM_API_BASE_URL=""
-ENV NODE_OPTIONS="--max-old-space-size=3072"
-RUN if [ -d ".output/public" ] && [ "$(ls -A .output/public 2>/dev/null)" ]; then \
-      echo "Using pre-built UI assets from .output/public"; \
-    elif [ -d "ui/.output/public" ] && [ "$(ls -A ui/.output/public 2>/dev/null)" ]; then \
-      echo "Using pre-built UI assets from ui/.output/public"; \
-      mkdir -p .output && cp -r ui/.output/public .output/public; \
-    else \
-      echo "Building UI in container..."; \
-      pnpm run build; \
-    fi
+RUN pnpm --filter alephat-dashboard run build
 
 FROM nginx:1.27-alpine
 COPY deploy/nginx.ui.conf /etc/nginx/templates/default.conf.template
-COPY --from=build /app/.output/public /usr/share/nginx/html
+COPY --from=build /app/ui/.output/public /usr/share/nginx/html
 ENV API_UPSTREAM=api:8080
 ENV NGINX_ENVSUBST_FILTER=API_UPSTREAM
 EXPOSE 3000

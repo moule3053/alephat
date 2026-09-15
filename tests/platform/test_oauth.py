@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import parse_qs, urlparse
@@ -36,12 +34,12 @@ def test_platform_oauth_redirect_and_callback(monkeypatch: pytest.MonkeyPatch) -
             "avatar_url": "https://avatars.example/alice.png",
         }, "alice@example.com"
 
-    async def fake_enforce_org_login_gate(login: str) -> None:
+    async def fake_enforce_github_login_gate(login: str) -> None:
         assert login == "alice"
 
     monkeypatch.setattr(routes_oauth, "exchange_code", fake_exchange_code)
     monkeypatch.setattr(routes_oauth, "fetch_github_user", fake_fetch_github_user)
-    monkeypatch.setattr(routes_oauth, "enforce_org_login_gate", fake_enforce_org_login_gate)
+    monkeypatch.setattr(routes_oauth, "enforce_github_login_gate", fake_enforce_github_login_gate)
 
     app = FastAPI()
     app.include_router(routes_oauth.router)

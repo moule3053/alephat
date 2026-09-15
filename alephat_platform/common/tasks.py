@@ -1,7 +1,5 @@
 """Task domain operations (create, message, cancel, park, resume, claim)."""
 
-from __future__ import annotations
-
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any

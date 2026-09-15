@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 from typing import Any, cast
 
@@ -13,9 +11,9 @@ from agent.middleware.pr_creation_guard import (
 
 
 class _Request:
-    def __init__(self, command: str) -> None:
+    def __init__(self, command: str, name: str = "execute") -> None:
         self.tool_call = {
-            "name": "execute",
+            "name": name,
             "args": {"command": command},
             "id": "call-1",
         }
@@ -28,28 +26,28 @@ async def _handler(_request: Any) -> ToolMessage:
 def test_detects_pr_creation_fallback_commands() -> None:
     assert is_pr_creation_fallback_command("GH_TOKEN=dummy gh pr create --draft")
     assert is_pr_creation_fallback_command(
-        "gh api repos/moule3053/alephat/pulls -X POST -f title=x"
+        "gh api repos/langchain-ai/alephat/pulls -X POST -f title=x"
     )
     assert is_pr_creation_fallback_command(
-        "gh api -X POST repos/moule3053/alephat/pulls -f title=x"
+        "gh api -X POST repos/langchain-ai/alephat/pulls -f title=x"
     )
     assert is_pr_creation_fallback_command(
-        "GH_TOKEN=dummy gh api -X POST repos/moule3053/alephat/pulls -f title=x"
+        "GH_TOKEN=dummy gh api -X POST repos/langchain-ai/alephat/pulls -f title=x"
     )
     assert is_pr_creation_fallback_command(
-        "curl -X POST https://api.github.com/repos/moule3053/alephat/pulls -d '{}'"
+        "curl -X POST https://api.github.com/repos/langchain-ai/alephat/pulls -d '{}'"
     )
     assert is_pr_creation_fallback_command("/usr/bin/gh pr create --draft")
     assert is_pr_creation_fallback_command(
-        "/usr/bin/curl -X POST https://api.github.com/repos/moule3053/alephat/pulls -d '{}'"
+        "/usr/bin/curl -X POST https://api.github.com/repos/langchain-ai/alephat/pulls -d '{}'"
     )
     assert is_pr_creation_fallback_command("bash -c 'gh pr create --draft'")
     assert is_pr_creation_fallback_command("GH_TOKEN=dummy sh -c 'gh pr create --draft'")
     assert is_pr_creation_fallback_command(
-        "zsh -lc 'gh api repos/moule3053/alephat/pulls -X POST -f title=x'"
+        "zsh -lc 'gh api repos/langchain-ai/alephat/pulls -X POST -f title=x'"
     )
     assert is_pr_creation_fallback_command(
-        "bash -c \"curl -X POST https://api.github.com/repos/moule3053/alephat/pulls -d '{}'\""
+        "bash -c \"curl -X POST https://api.github.com/repos/langchain-ai/alephat/pulls -d '{}'\""
     )
     assert is_pr_creation_fallback_command(
         'bash -c \'sh -c "dash -c \\"zsh -c \\\\\\"gh pr create --draft\\\\\\"\\""\''
@@ -68,9 +66,9 @@ def test_allows_safe_pr_commands() -> None:
 async def test_middleware_blocks_execute_pr_creation_fallbacks() -> None:
     for command in (
         "GH_TOKEN=dummy gh pr create --draft",
-        "gh api repos/moule3053/alephat/pulls -X POST -f title=x",
-        "GH_TOKEN=dummy gh api -X POST repos/moule3053/alephat/pulls -f title=x",
-        "curl -X POST https://api.github.com/repos/moule3053/alephat/pulls -d '{}'",
+        "gh api repos/langchain-ai/alephat/pulls -X POST -f title=x",
+        "GH_TOKEN=dummy gh api -X POST repos/langchain-ai/alephat/pulls -f title=x",
+        "curl -X POST https://api.github.com/repos/langchain-ai/alephat/pulls -d '{}'",
     ):
         result = await PullRequestCreationGuardMiddleware().awrap_tool_call(
             cast(ToolCallRequest, _Request(command)), _handler
@@ -83,6 +81,15 @@ async def test_middleware_blocks_execute_pr_creation_fallbacks() -> None:
         assert payload["recoverable_by_agent"] is False
         assert "open_pull_request" in payload["error"]
         assert payload["blocked_command"] == command
+
+
+async def test_middleware_blocks_background_pr_creation_fallback() -> None:
+    result = await PullRequestCreationGuardMiddleware().awrap_tool_call(
+        cast(ToolCallRequest, _Request("gh pr create --draft", "background_execute")), _handler
+    )
+
+    assert isinstance(result, ToolMessage)
+    assert result.status == "error"
 
 
 async def test_middleware_allows_safe_pr_view() -> None:

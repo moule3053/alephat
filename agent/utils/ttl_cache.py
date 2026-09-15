@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
@@ -28,7 +26,7 @@ def _lock_for(key: str) -> asyncio.Lock:
     return lock
 
 
-async def cached(key: str, ttl_seconds: float, loader: Callable[[], Awaitable[T]]) -> T:
+async def cached[T](key: str, ttl_seconds: float, loader: Callable[[], Awaitable[T]]) -> T:
     now = _now()
     entry = _CACHE.get(key)
     if entry is not None:
@@ -85,7 +83,7 @@ def _schedule_refresh(
     task.add_done_callback(lambda _task: _REFRESH_TASKS.pop(task_key, None))
 
 
-async def cached_stale_while_revalidate(
+async def cached_stale_while_revalidate[T](
     key: str,
     ttl_seconds: float,
     loader: Callable[[], Awaitable[T]],
@@ -117,5 +115,8 @@ def clear() -> None:
     _CACHE.clear()
     _LOCKS.clear()
     for task in _REFRESH_TASKS.values():
-        task.cancel()
+        try:
+            task.cancel()
+        except RuntimeError:
+            pass
     _REFRESH_TASKS.clear()

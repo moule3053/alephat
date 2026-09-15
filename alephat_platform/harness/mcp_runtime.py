@@ -1,7 +1,5 @@
 """Load MCP tools from task snapshot (harness-side)."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 import logging

@@ -1,29 +1,24 @@
 """Tool: ``update_finding``. Mutate an existing finding by id."""
 
-from __future__ import annotations
-
 from typing import Any
 
-from langgraph.config import get_config
-
-from ..review.findings import (
+from agent.review.findings import (
     DEFAULT_FINDING_TITLE,
     MAX_SUGGESTION_LINES,
     Finding,
     ReviewerThreadMissingError,
     clip_suggestion,
+    comment_ids_for_finding,
     get_thread_id_from_runtime,
     list_findings,
     normalize_finding_title,
     resolve_review_head_sha,
+    thread_ids_for_finding,
     thread_missing_tool_result,
     update_finding_fields,
 )
-from ..utils.reviewer_outcomes import emit_finding_status_outcome
-
-
-def _is_non_empty_str(value: Any) -> bool:
-    return isinstance(value, str) and bool(value)
+from agent.run_config import RunConfig
+from agent.utils.reviewer_outcomes import emit_finding_status_outcome
 
 
 def _normalize_note(note: str | None) -> str | None:
@@ -34,20 +29,7 @@ def _normalize_note(note: str | None) -> str | None:
 
 
 def _has_published_github_surface(finding: Finding) -> bool:
-    surface = finding.get("surface")
-    if isinstance(surface, dict) and (
-        isinstance(surface.get("github_review_comment_id"), int)
-        or _is_non_empty_str(surface.get("github_review_thread_id"))
-    ):
-        return True
-    comment_ids = finding.get("github_review_comment_ids")
-    thread_ids = finding.get("github_review_thread_ids")
-    return (
-        isinstance(finding.get("github_review_comment_id"), int)
-        or _is_non_empty_str(finding.get("github_review_thread_id"))
-        or (isinstance(comment_ids, list) and any(isinstance(item, int) for item in comment_ids))
-        or (isinstance(thread_ids, list) and any(_is_non_empty_str(item) for item in thread_ids))
-    )
+    return bool(comment_ids_for_finding(finding) or thread_ids_for_finding(finding))
 
 
 async def update_finding(
@@ -60,34 +42,7 @@ async def update_finding(
     suggestion: str | None = None,
     note: str | None = None,
 ) -> dict[str, Any]:
-    """Update fields on an existing finding.
-
-    Use this on a re-review run to mark an existing finding as resolved or
-    dismissed, or to revise its severity/description/suggestion if the new
-    commits changed the situation.
-
-    Args:
-        finding_id: The id returned by ``add_finding`` (or shown in the
-            ``Existing findings`` block of the re-review user message).
-        status: New status (``open``, ``resolved``, ``dismissed``).
-            Use ``resolved`` when the new commits address the issue. Resolving
-            or dismissing requires a ``note`` with the full message to post.
-        severity: New severity, if reassessing.
-        confidence: New confidence rating (``low``, ``medium``, ``high``), if
-            new commits change how sure you are the finding is a real issue.
-        title: New concise generated headline, if revising.
-        description: New description body, if revising. Do not repeat ``title``
-            as the first line.
-        suggestion: New replacement text. Pass an empty string to clear it.
-            Capped at 4 lines — longer values are dropped (the finding keeps
-            its description). Only set this for small, obvious fixes.
-        note: Optional free-form note explaining the change. Required when
-            resolving or dismissing because it is posted verbatim as the full
-            GitHub reply body.
-
-    Returns:
-        Dictionary with ``success`` and (on success) the updated ``finding``.
-    """
+    """Implement the `update_finding` tool."""
     if status is not None and status not in {"open", "resolved", "dismissed"}:
         return {"success": False, "error": f"Invalid status: {status}"}
     if severity is not None and severity not in {"low", "medium", "high", "critical"}:
@@ -128,15 +83,7 @@ async def update_finding(
         if status in {"resolved", "dismissed"}:
             updates["resolution_note"] = normalized_note
 
-    config = get_config()
-    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
-    if status == "open":
-        try:
-            head_sha = await resolve_review_head_sha(get_thread_id_from_runtime(), configurable)
-        except ReviewerThreadMissingError as exc:
-            return thread_missing_tool_result(exc)
-        if head_sha:
-            updates["last_confirmed_sha"] = head_sha
+    cfg = RunConfig.from_runtime()
 
     if not updates:
         if suggestion_dropped:
@@ -162,20 +109,13 @@ async def update_finding(
         return {"success": False, "error": f"No finding found with id {finding_id}"}
 
     delegated_resolution = False
-    repo_config = configurable.get("repo") if isinstance(configurable, dict) else None
-    pr_number = configurable.get("pr_number") if isinstance(configurable, dict) else None
-    can_resolve_github_thread = (
-        isinstance(repo_config, dict)
-        and bool(repo_config.get("owner"))
-        and bool(repo_config.get("name"))
-        and isinstance(pr_number, int)
-    )
+    can_resolve_github_thread = bool(cfg.repo) and cfg.pr_number is not None
     if (
         status in {"resolved", "dismissed"}
         and can_resolve_github_thread
         and _has_published_github_surface(finding)
     ):
-        from .resolve_finding_thread import resolve_finding_thread
+        from agent.tools.resolve_finding_thread import resolve_finding_thread
 
         resolve_result = await resolve_finding_thread(
             finding_id, status=status, note=normalized_note or ""
@@ -205,6 +145,14 @@ async def update_finding(
                 )
             return result
 
+    if status is not None and not delegated_resolution:
+        try:
+            head_sha = await resolve_review_head_sha(thread_id, cfg)
+        except ReviewerThreadMissingError as exc:
+            return thread_missing_tool_result(exc)
+        if head_sha:
+            updates["last_confirmed_sha"] = head_sha
+
     try:
         updated = await update_finding_fields(thread_id, finding_id, updates)
     except ReviewerThreadMissingError as exc:
@@ -212,7 +160,7 @@ async def update_finding(
     if updated is None:
         return {"success": False, "error": f"No finding found with id {finding_id}"}
     if status in {"resolved", "dismissed"} and not delegated_resolution:
-        emit_finding_status_outcome(updated, status, configurable=configurable, thread_id=thread_id)
+        await emit_finding_status_outcome(updated, status, cfg=cfg, thread_id=thread_id)
     result = {"success": True, "finding": updated}
     if suggestion_dropped:
         result["suggestion_dropped"] = True

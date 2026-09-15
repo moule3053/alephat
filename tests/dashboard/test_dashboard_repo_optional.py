@@ -1,33 +1,37 @@
-from __future__ import annotations
-
 import asyncio
 from typing import Any
 
 import pytest
 
-from agent.dashboard import thread_api
+from agent.dashboard.threads import runs as thread_runs
+from agent.dashboard.threads import summary as thread_summary
+from tests.conftest import patch_thread_module
+
+
+async def _fake_trace_url(thread_id: str, **kwargs: object) -> str:
+    return f"https://smith.example/t/{thread_id}"
 
 
 def test_resolve_repo_config_parses_request_repo() -> None:
-    assert thread_api._resolve_repo_config("octo/repo") == {"owner": "octo", "name": "repo"}
+    assert thread_runs._resolve_repo_config("octo/repo") == {"owner": "octo", "name": "repo"}
 
 
 def test_resolve_repo_config_returns_empty_when_no_repo_given() -> None:
-    assert thread_api._resolve_repo_config(None) == {}
-    assert thread_api._resolve_repo_config("") == {}
-    assert thread_api._resolve_repo_config("not-a-repo") == {}
+    assert thread_runs._resolve_repo_config(None) == {}
+    assert thread_runs._resolve_repo_config("") == {}
+    assert thread_runs._resolve_repo_config("not-a-repo") == {}
 
 
-def test_thread_summary_blanks_repo_when_absent() -> None:
-    summary = thread_api._thread_summary(
+async def test_thread_summary_blanks_repo_when_absent() -> None:
+    summary = await thread_summary._thread_summary(
         {"thread_id": "t1", "metadata": {"source": "dashboard", "title": "no repo run"}}
     )
     assert summary["repo"] == ""
     assert summary["repoFullName"] == ""
 
 
-def test_thread_summary_keeps_repo_when_present() -> None:
-    summary = thread_api._thread_summary(
+async def test_thread_summary_keeps_repo_when_present() -> None:
+    summary = await thread_summary._thread_summary(
         {
             "thread_id": "t2",
             "metadata": {
@@ -42,13 +46,58 @@ def test_thread_summary_keeps_repo_when_present() -> None:
     assert summary["repoFullName"] == "octo/repo"
 
 
-def test_thread_summary_includes_trace_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        thread_api,
-        "get_langsmith_trace_url",
-        lambda thread_id: f"https://smith.example/t/{thread_id}",
+async def test_thread_summary_classifies_legacy_schedule_metadata() -> None:
+    summary = await thread_summary._thread_summary(
+        {
+            "thread_id": "scheduled",
+            "metadata": {
+                "source": "schedule",
+                "schedule_id": "schedule-1",
+                "schedule_name": "Daily triage",
+            },
+        }
     )
-    summary = thread_api._thread_summary(
+    assert summary["origin"] == "schedule"
+    assert summary["threadCategory"] == "automation"
+    assert summary["triggerKind"] == "schedule"
+    assert summary["automationId"] == "schedule-1"
+    assert summary["automationName"] == "Daily triage"
+    assert summary["automationActionPosted"] is False
+
+
+async def test_thread_summary_marks_automation_actions_posted_to_slack() -> None:
+    summary = await thread_summary._thread_summary(
+        {
+            "thread_id": "scheduled-action",
+            "metadata": {
+                "source": "schedule",
+                "schedule_id": "schedule-1",
+                "automation_action_posted_at": "2026-08-21T12:00:00+00:00",
+            },
+        }
+    )
+
+    assert summary["automationActionPosted"] is True
+
+
+async def test_thread_summary_derives_issue_category_from_source_context() -> None:
+    summary = await thread_summary._thread_summary(
+        {
+            "thread_id": "linear",
+            "metadata": {
+                "source": "linear",
+                "source_context": {"linear_issue": {"id": "issue-1"}},
+            },
+        }
+    )
+    assert summary["origin"] == "linear"
+    assert summary["threadCategory"] == "issue"
+    assert summary["triggerKind"] == "user"
+
+
+async def test_thread_summary_includes_trace_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_thread_module(monkeypatch, "get_langsmith_trace_url", _fake_trace_url)
+    summary = await thread_summary._thread_summary(
         {"thread_id": "t3", "metadata": {"source": "dashboard", "title": "traced run"}}
     )
     assert summary["traceUrl"] == "https://smith.example/t/t3"
@@ -105,10 +154,10 @@ def dashboard_run_client(monkeypatch: pytest.MonkeyPatch) -> _FakeLangGraphClien
     async def fake_resolve_email(login: str, profile: dict[str, Any]) -> str:
         return "octo@example.com"
 
-    monkeypatch.setattr(thread_api, "langgraph_client", lambda: client)
-    monkeypatch.setattr(thread_api, "get_profile", fake_get_profile)
-    monkeypatch.setattr(thread_api, "_ensure_dashboard_github_token", fake_ensure_token)
-    monkeypatch.setattr(thread_api, "_resolve_run_email", fake_resolve_email)
+    patch_thread_module(monkeypatch, "langgraph_client", lambda: client)
+    patch_thread_module(monkeypatch, "get_profile", fake_get_profile)
+    patch_thread_module(monkeypatch, "_ensure_dashboard_github_token", fake_ensure_token)
+    patch_thread_module(monkeypatch, "resolve_run_email", fake_resolve_email)
     return client
 
 
@@ -120,7 +169,7 @@ def test_create_thread_record_omits_repo_less_marker_when_repo_unset(
     # ``_build_dashboard_configurable``. The thread record must not persist a
     # repo-less marker when the repo is simply unset (not explicitly cleared).
     asyncio.run(
-        thread_api._create_dashboard_thread_record(
+        thread_runs._create_dashboard_thread_record(
             "thread-id",
             login="octo",
             repo_config={},
@@ -129,7 +178,7 @@ def test_create_thread_record_omits_repo_less_marker_when_repo_unset(
     )
 
     configurable = asyncio.run(
-        thread_api._build_dashboard_configurable("thread-id", "octo", {"source": "dashboard"})
+        thread_runs._build_dashboard_configurable("thread-id", "octo", {"source": "dashboard"})
     )
     assert "repo_explicitly_none" not in configurable
     assert "repo" not in configurable
@@ -139,7 +188,7 @@ def test_build_configurable_marks_repo_less_config_when_explicit(
     dashboard_run_client: _FakeLangGraphClient,
 ) -> None:
     configurable = asyncio.run(
-        thread_api._build_dashboard_configurable(
+        thread_runs._build_dashboard_configurable(
             "thread-id",
             "octo",
             {"source": "dashboard", "repo_explicitly_none": True},
@@ -153,7 +202,7 @@ def test_build_configurable_includes_repo_when_configured(
     dashboard_run_client: _FakeLangGraphClient,
 ) -> None:
     configurable = asyncio.run(
-        thread_api._build_dashboard_configurable(
+        thread_runs._build_dashboard_configurable(
             "thread-id",
             "octo",
             {"source": "dashboard", "repo_owner": "octo", "repo_name": "repo"},

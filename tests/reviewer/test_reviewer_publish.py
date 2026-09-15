@@ -1,7 +1,5 @@
 """Unit tests for the publish_review rendering and orchestration helpers."""
 
-from __future__ import annotations
-
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -635,7 +633,7 @@ async def test_resolve_review_thread_returns_true_on_success() -> None:
     client_cm.__aenter__.return_value = client_cm
     client_cm.post = AsyncMock(return_value=response)
 
-    with patch("agent.utils.github_http.httpx.AsyncClient", return_value=client_cm):
+    with patch("agent.github.http.httpx2.AsyncClient", return_value=client_cm):
         ok = await resolve_review_thread(thread_node_id="T_1", token="t")
     assert ok is True
 
@@ -653,7 +651,7 @@ async def test_fetch_pr_review_threads_handles_null_repository() -> None:
     client_cm.__aenter__.return_value = client_cm
     client_cm.post = AsyncMock(return_value=response)
 
-    with patch("agent.utils.github_http.httpx.AsyncClient", return_value=client_cm):
+    with patch("agent.github.http.httpx2.AsyncClient", return_value=client_cm):
         threads = await fetch_pr_review_threads(owner="o", repo="r", pr_number=1, token="t")
     assert threads == []
 
@@ -673,7 +671,7 @@ async def test_post_pull_request_review_non_dict_body_surfaces_status_and_excerp
     client_cm.__aenter__.return_value = client_cm
     client_cm.post = AsyncMock(return_value=response)
 
-    with patch("agent.utils.github_http.httpx.AsyncClient", return_value=client_cm):
+    with patch("agent.github.http.httpx2.AsyncClient", return_value=client_cm):
         result = await post_pull_request_review(
             owner="o",
             repo="r",
@@ -704,18 +702,18 @@ async def test_resolve_review_thread_returns_false_on_graphql_errors() -> None:
     client_cm.__aenter__.return_value = client_cm
     client_cm.post = AsyncMock(return_value=response)
 
-    with patch("agent.utils.github_http.httpx.AsyncClient", return_value=client_cm):
+    with patch("agent.github.http.httpx2.AsyncClient", return_value=client_cm):
         ok = await resolve_review_thread(thread_node_id="T_1", token="t")
     assert ok is False
 
 
 @pytest.mark.asyncio
 async def test_publish_review_skips_findings_already_published() -> None:
-    """Re-runs must not re-post findings that already have a github_review_comment_id."""
+    """Re-runs must not re-post findings that already carry a review comment id."""
     from agent.tools.publish_review import _publish_review_async
 
     findings = [
-        _f(id="f_old", severity="high", file="a.py", github_review_comment_id=42),
+        _f(id="f_old", severity="high", file="a.py", github_review_comment_ids=[42]),
         _f(id="f_new", severity="high", file="b.py"),
     ]
 
@@ -764,7 +762,7 @@ async def test_publish_review_skips_post_on_re_review_with_no_new_findings() -> 
     """Re-review with nothing new to surface must not spam another comment."""
     from agent.tools.publish_review import _publish_review_async
 
-    # All findings already have github_review_comment_id from the prior publish
+    # All findings already carry a review comment id from the prior publish
     # (so none are "unpublished"), plus one previously-resolved finding whose
     # thread still needs to be resolved on GitHub.
     findings = [
@@ -781,7 +779,7 @@ async def test_publish_review_skips_post_on_re_review_with_no_new_findings() -> 
             "status": "resolved",
             "first_seen_sha": "s",
             "last_confirmed_sha": "s",
-            "github_review_comment_id": 100,
+            "github_review_comment_ids": [100],
         },
     ]
     list_async = AsyncMock(return_value=findings)
@@ -837,8 +835,6 @@ async def test_publish_review_does_not_surface_out_of_diff_finding() -> None:
             file="caller.py",
             in_diff=False,
             first_seen_sha="newsha",
-            github_review_comment_id=None,
-            github_review_id=None,
         )
     ]
     post_review = AsyncMock(return_value={"id": 555})
@@ -1113,7 +1109,7 @@ async def test_alephat_review_exists_detects_summary_marker() -> None:
     client_cm.__aenter__.return_value = client_cm
     client_cm.get = AsyncMock(return_value=response)
 
-    with patch("agent.utils.github_http.httpx.AsyncClient", return_value=client_cm):
+    with patch("agent.github.http.httpx2.AsyncClient", return_value=client_cm):
         exists = await alephat_review_exists(owner="o", repo="r", pr_number=7, token="t")
     assert exists is True
 
@@ -1128,7 +1124,7 @@ async def test_alephat_review_exists_false_without_marker() -> None:
     client_cm.__aenter__.return_value = client_cm
     client_cm.get = AsyncMock(return_value=response)
 
-    with patch("agent.utils.github_http.httpx.AsyncClient", return_value=client_cm):
+    with patch("agent.github.http.httpx2.AsyncClient", return_value=client_cm):
         exists = await alephat_review_exists(owner="o", repo="r", pr_number=7, token="t")
     assert exists is False
 
@@ -1138,13 +1134,13 @@ async def test_alephat_review_exists_returns_none_on_http_error() -> None:
     """A failed reviews API call is reported as ``None`` (unknown), never
     ``False`` — the empty-summary dedup must not treat a transient failure as
     "no prior review exists" and double-post."""
-    import httpx
+    import httpx2
 
     client_cm = AsyncMock()
     client_cm.__aenter__.return_value = client_cm
-    client_cm.get = AsyncMock(side_effect=httpx.HTTPError("boom"))
+    client_cm.get = AsyncMock(side_effect=httpx2.HTTPError("boom"))
 
-    with patch("agent.utils.github_http.httpx.AsyncClient", return_value=client_cm):
+    with patch("agent.github.http.httpx2.AsyncClient", return_value=client_cm):
         exists = await alephat_review_exists(owner="o", repo="r", pr_number=7, token="t")
     assert exists is None
 
@@ -1153,7 +1149,7 @@ async def test_alephat_review_exists_returns_none_on_http_error() -> None:
 async def test_re_review_backfills_existing_marker_and_skips_duplicate_post() -> None:
     from agent.tools.publish_review import _publish_review_async
 
-    finding = _f(id="f_old", first_seen_sha="oldsha", github_review_comment_id=None)
+    finding = _f(id="f_old", first_seen_sha="oldsha")
     findings = [finding]
     thread = {
         "id": "THREAD_1",
@@ -1199,8 +1195,8 @@ async def test_re_review_backfills_existing_marker_and_skips_duplicate_post() ->
 
     post_review.assert_not_called()
     assert result["skipped_empty_re_review"] is True
-    assert findings[0]["github_review_comment_id"] == 101
-    assert findings[0]["github_review_thread_id"] == "THREAD_1"
+    assert findings[0]["github_review_comment_ids"] == [101]
+    assert findings[0]["github_review_thread_ids"] == ["THREAD_1"]
 
 
 @pytest.mark.asyncio
@@ -1210,7 +1206,6 @@ async def test_re_review_backfills_and_resolves_duplicate_existing_threads() -> 
     finding = _f(
         id="f_old",
         first_seen_sha="oldsha",
-        github_review_comment_id=None,
         status="resolved",
         resolution_note="The duplicate threads are fixed by the latest commit.",
     )
@@ -1287,7 +1282,7 @@ async def test_re_review_backfills_and_resolves_duplicate_existing_threads() -> 
     assert findings[0]["github_review_thread_ids"] == ["THREAD_1", "THREAD_2"]
     assert findings[0]["github_resolved_thread_ids"] == ["THREAD_1", "THREAD_2"]
     assert findings[0]["github_posted_resolution_comment_ids"] == [101, 102]
-    assert findings[0]["github_thread_resolved"] is True
+    assert findings[0]["surface_state"] == "resolved"
 
 
 @pytest.mark.asyncio
@@ -1348,8 +1343,8 @@ async def test_publish_review_backfills_from_threads_when_review_comments_are_em
     assert result["review_id"] == 999
     assert fetch_threads.await_count == 2
     assert findings[0]["github_review_id"] == 999
-    assert findings[0]["github_review_comment_id"] == 202
-    assert findings[0]["github_review_thread_id"] == "THREAD_1"
+    assert findings[0]["github_review_comment_ids"] == [202]
+    assert findings[0]["github_review_thread_ids"] == ["THREAD_1"]
 
 
 @pytest.mark.asyncio
@@ -1401,7 +1396,7 @@ async def test_re_review_only_posts_current_head_unpublished_findings() -> None:
     assert [comment["path"] for comment in inline_comments] == ["new.py"]
     assert old["github_review_id"] is None
     assert new["github_review_id"] == 888
-    assert new["github_review_comment_id"] == 303
+    assert new["github_review_comment_ids"] == [303]
 
 
 @pytest.mark.asyncio
@@ -1452,8 +1447,8 @@ async def test_publish_review_matches_comment_ids_by_marker_not_path_line_body()
 
     assert result["success"] is True
     by_id = {f["id"]: f for f in findings}
-    assert by_id["f_one"]["github_review_comment_id"] == 901
-    assert by_id["f_two"]["github_review_comment_id"] == 902
+    assert by_id["f_one"]["github_review_comment_ids"] == [901]
+    assert by_id["f_two"]["github_review_comment_ids"] == [902]
 
 
 @pytest.mark.asyncio
@@ -1504,13 +1499,12 @@ async def test_publish_review_records_review_id_and_comment_id_in_single_write()
     # half-stamped intermediate state.
     persisted_snapshots = [call.args[1] for call in replace.await_args_list]
     assert any(
-        snap[0].get("github_review_id") == 555 and snap[0].get("github_review_comment_id") == 808
+        snap[0].get("github_review_id") == 555 and snap[0].get("github_review_comment_ids") == [808]
         for snap in persisted_snapshots
     )
     assert all(
         not (
-            snap[0].get("github_review_id") == 555
-            and snap[0].get("github_review_comment_id") is None
+            snap[0].get("github_review_id") == 555 and not snap[0].get("github_review_comment_ids")
         )
         for snap in persisted_snapshots
     )
@@ -1824,7 +1818,7 @@ async def test_fetch_pr_review_threads_parses_threads_and_comments() -> None:
     client_cm.__aenter__.return_value = client_cm
     client_cm.post = AsyncMock(return_value=response)
 
-    with patch("agent.utils.github_http.httpx.AsyncClient", return_value=client_cm):
+    with patch("agent.github.http.httpx2.AsyncClient", return_value=client_cm):
         threads = await fetch_pr_review_threads(owner="o", repo="r", pr_number=1, token="t")
 
     assert len(threads) == 2
@@ -1841,13 +1835,13 @@ async def test_fetch_pr_review_threads_parses_threads_and_comments() -> None:
 
 @pytest.mark.asyncio
 async def test_fetch_pr_review_threads_returns_empty_on_http_error() -> None:
-    import httpx
+    import httpx2
 
     client_cm = AsyncMock()
     client_cm.__aenter__.return_value = client_cm
-    client_cm.post = AsyncMock(side_effect=httpx.HTTPError("boom"))
+    client_cm.post = AsyncMock(side_effect=httpx2.HTTPError("boom"))
 
-    with patch("agent.utils.github_http.httpx.AsyncClient", return_value=client_cm):
+    with patch("agent.github.http.httpx2.AsyncClient", return_value=client_cm):
         threads = await fetch_pr_review_threads(owner="o", repo="r", pr_number=1, token="t")
     assert threads == []
 
@@ -1863,7 +1857,7 @@ async def test_reply_to_review_comment_posts_reply_payload() -> None:
     client_cm.__aenter__.return_value = client_cm
     client_cm.post = AsyncMock(return_value=response)
 
-    with patch("agent.utils.github_http.httpx.AsyncClient", return_value=client_cm):
+    with patch("agent.github.http.httpx2.AsyncClient", return_value=client_cm):
         result = await reply_to_review_comment(
             owner="o",
             repo="r",
@@ -1885,13 +1879,13 @@ async def test_post_pull_request_review_tags_unresolved_anchor_on_422() -> None:
     ``unresolved_anchor`` and carry the raw errors so the tool layer can act
     on it (drop offending findings + retry) instead of bubbling an opaque
     error string that the agent will only retry with identical args."""
-    import httpx
+    import httpx2
 
     response = MagicMock()
     response.status_code = 422
     response.text = '{"errors":["Path could not be resolved"]}'
     response.json.return_value = {"errors": ["Path could not be resolved"]}
-    response.raise_for_status.side_effect = httpx.HTTPStatusError(
+    response.raise_for_status.side_effect = httpx2.HTTPStatusError(
         "Unprocessable Entity",
         request=MagicMock(),
         response=response,
@@ -1901,7 +1895,7 @@ async def test_post_pull_request_review_tags_unresolved_anchor_on_422() -> None:
     client_cm.__aenter__.return_value = client_cm
     client_cm.post = AsyncMock(return_value=response)
 
-    with patch("agent.utils.github_http.httpx.AsyncClient", return_value=client_cm):
+    with patch("agent.github.http.httpx2.AsyncClient", return_value=client_cm):
         result = await post_pull_request_review(
             owner="o",
             repo="r",
@@ -1924,13 +1918,13 @@ async def test_post_pull_request_review_tags_unresolved_anchor_on_line_error() -
     """A 'Line could not be resolved' 422 must also be tagged as
     ``unresolved_anchor`` so a line that's not in the diff is treated the same
     way as a path that's not in the diff."""
-    import httpx
+    import httpx2
 
     response = MagicMock()
     response.status_code = 422
     response.text = '{"errors":["Line could not be resolved"]}'
     response.json.return_value = {"errors": ["Line could not be resolved"]}
-    response.raise_for_status.side_effect = httpx.HTTPStatusError(
+    response.raise_for_status.side_effect = httpx2.HTTPStatusError(
         "Unprocessable Entity",
         request=MagicMock(),
         response=response,
@@ -1940,7 +1934,7 @@ async def test_post_pull_request_review_tags_unresolved_anchor_on_line_error() -
     client_cm.__aenter__.return_value = client_cm
     client_cm.post = AsyncMock(return_value=response)
 
-    with patch("agent.utils.github_http.httpx.AsyncClient", return_value=client_cm):
+    with patch("agent.github.http.httpx2.AsyncClient", return_value=client_cm):
         result = await post_pull_request_review(
             owner="o",
             repo="r",
@@ -1960,13 +1954,13 @@ async def test_post_pull_request_review_does_not_tag_unrelated_422() -> None:
     """A 422 whose errors don't match the anchor patterns must NOT be tagged
     as ``unresolved_anchor`` — the retry path is only safe for known
     per-comment anchor failures."""
-    import httpx
+    import httpx2
 
     response = MagicMock()
     response.status_code = 422
     response.text = '{"errors":["something else"]}'
     response.json.return_value = {"errors": ["something else"]}
-    response.raise_for_status.side_effect = httpx.HTTPStatusError(
+    response.raise_for_status.side_effect = httpx2.HTTPStatusError(
         "Unprocessable Entity",
         request=MagicMock(),
         response=response,
@@ -1976,7 +1970,7 @@ async def test_post_pull_request_review_does_not_tag_unrelated_422() -> None:
     client_cm.__aenter__.return_value = client_cm
     client_cm.post = AsyncMock(return_value=response)
 
-    with patch("agent.utils.github_http.httpx.AsyncClient", return_value=client_cm):
+    with patch("agent.github.http.httpx2.AsyncClient", return_value=client_cm):
         result = await post_pull_request_review(
             owner="o",
             repo="r",
@@ -2021,7 +2015,7 @@ async def test_publish_review_drops_unresolvable_findings_and_retries_once() -> 
 
     with (
         patch(
-            "agent.tools.publish_review.get_config",
+            "agent.run_config.get_config",
             return_value={
                 "configurable": {
                     "thread_id": "tid",
@@ -2097,7 +2091,7 @@ async def test_publish_review_reports_unresolvable_when_retry_still_fails() -> N
 
     with (
         patch(
-            "agent.tools.publish_review.get_config",
+            "agent.run_config.get_config",
             return_value={
                 "configurable": {
                     "thread_id": "tid",
@@ -2156,7 +2150,7 @@ async def test_publish_review_does_not_retry_when_no_findings_can_be_dropped() -
 
     with (
         patch(
-            "agent.tools.publish_review.get_config",
+            "agent.run_config.get_config",
             return_value={"configurable": {"thread_id": "tid"}},
         ),
         patch("agent.tools.publish_review.get_thread_id_from_runtime", return_value="tid"),
@@ -2227,7 +2221,7 @@ async def test_publish_review_fetches_pr_diff_when_diff_line_set_missing() -> No
 
     with (
         patch(
-            "agent.tools.publish_review.get_config",
+            "agent.run_config.get_config",
             return_value={"configurable": {"thread_id": "tid"}},
         ),
         patch("agent.tools.publish_review.get_thread_id_from_runtime", return_value="tid"),

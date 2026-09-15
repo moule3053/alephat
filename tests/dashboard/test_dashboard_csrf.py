@@ -1,13 +1,12 @@
 """CSRF defenses for cookie-authenticated dashboard mutations."""
 
-from __future__ import annotations
-
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from agent.dashboard import oauth, routes, thread_api
+from agent.dashboard import oauth, routes
+from agent.dashboard.threads import proxy as thread_proxy
 
 
 def _request(
@@ -24,6 +23,8 @@ def _request(
         headers.append((b"referer", referer.encode()))
     scope = {
         "type": "http",
+        "scheme": "https",
+        "server": ("backend.example", 443),
         "method": method,
         "path": path,
         "headers": headers,
@@ -54,6 +55,20 @@ async def test_require_same_origin_allows_configured_origin(monkeypatch) -> None
 
     oauth.require_same_origin(_request(origin="https://dashboard.example"))
     oauth.require_same_origin(_request(origin="https://preview.example"))
+
+
+@pytest.mark.asyncio
+async def test_require_same_origin_allows_backend_origin(monkeypatch) -> None:
+    monkeypatch.setenv("DASHBOARD_BASE_URL", "https://dashboard.example")
+
+    oauth.require_same_origin(_request(origin="https://backend.example"))
+
+
+@pytest.mark.asyncio
+async def test_require_same_origin_allows_desktop_origin(monkeypatch) -> None:
+    monkeypatch.setenv("DASHBOARD_BASE_URL", "https://dashboard.example")
+
+    oauth.require_same_origin(_request(origin="alephat://app"))
 
 
 @pytest.mark.asyncio
@@ -185,7 +200,7 @@ def test_router_allows_allowed_origin_post(dashboard_client: TestClient) -> None
 async def test_proxy_commands_rejects_non_json_content_type() -> None:
     for content_type in ("text/plain", "application/x-www-form-urlencoded", "multipart/form-data"):
         with pytest.raises(HTTPException) as exc:
-            await thread_api.proxy_dashboard_thread_commands(
+            await thread_proxy.proxy_dashboard_thread_commands(
                 "tid",
                 "octocat",
                 b'{"method": "run.start"}',
@@ -197,7 +212,7 @@ async def test_proxy_commands_rejects_non_json_content_type() -> None:
 
 async def test_proxy_commands_accepts_json_content_type_with_charset() -> None:
     with pytest.raises(HTTPException) as exc:
-        await thread_api.proxy_dashboard_thread_commands(
+        await thread_proxy.proxy_dashboard_thread_commands(
             "tid",
             "octocat",
             b"not-json",

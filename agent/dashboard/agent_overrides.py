@@ -1,17 +1,19 @@
 """Profile lookup + override helpers consumed by ``agent.server.get_agent``."""
 
-from __future__ import annotations
-
 import logging
 from typing import Any
 
-import httpx
-from langgraph_sdk import get_client
-
-from .options import SUPPORTED_MODEL_IDS, model_supports_effort, provider_fallback_pair
-from .profiles import PROFILES_NAMESPACE
-from .team_settings import get_team_default_model
-from .user_mappings import cached_login_for_email, login_for_email
+from agent.dashboard.options import (
+    NON_DEFAULT_MODEL_IDS,
+    SUPPORTED_MODEL_IDS,
+    canonical_model_pair,
+    model_supports_effort,
+    provider_fallback_pair,
+)
+from agent.dashboard.profiles import PROFILES_NAMESPACE
+from agent.dashboard.team_settings import get_team_default_model
+from agent.dashboard.user_mappings import cached_login_for_email, login_for_email
+from agent.store import get_value
 
 logger = logging.getLogger(__name__)
 
@@ -69,27 +71,31 @@ async def get_profile_default_repo(login: str | None) -> dict[str, str] | None:
 
 
 async def load_profile(login: str) -> dict[str, Any] | None:
+    """The user's profile record, or ``None`` when it is missing or unreadable.
+
+    Fail-soft on purpose: every caller — ``agent.server.get_agent``,
+    :func:`get_profile_default_repo`, :func:`resolve_agent_model_id` — is on the
+    path that starts an agent run, and a store blip must cost the run its
+    per-user overrides, not the run itself. Dashboard reads that should surface
+    a failure use :func:`agent.dashboard.profiles.get_profile` instead.
+    """
     try:
-        item = await get_client().store.get_item(PROFILES_NAMESPACE, login)
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            return None
-        logger.warning("profile lookup failed for %s: %s", login, e)
+        return await get_value(PROFILES_NAMESPACE, login)
+    except Exception:
+        logger.warning("profile lookup failed for %s", login, exc_info=True)
         return None
-    if item is None:
-        return None
-    value = item.get("value") if isinstance(item, dict) else getattr(item, "value", None)
-    return value if isinstance(value, dict) else None
 
 
-def profile_create_prs(profile: dict[str, Any] | None) -> bool:
-    """Return whether the agent should always open a PR. Defaults to False."""
-    if not isinstance(profile, dict):
-        return False
-    value = profile.get("create_prs")
-    if isinstance(value, bool):
-        return value
-    return False
+def profile_draft_prs(profile: dict[str, Any] | None) -> bool:
+    """Return whether new PRs should be drafts. Defaults to True."""
+    value = profile.get("draft_prs") if isinstance(profile, dict) else None
+    return value if isinstance(value, bool) else True
+
+
+def profile_model_routing_enabled(profile: dict[str, Any] | None) -> bool | None:
+    """The user's adaptive model routing preference, or ``None`` to inherit the org default."""
+    value = profile.get("model_routing_enabled") if isinstance(profile, dict) else None
+    return value if isinstance(value, bool) else None
 
 
 def _normalize_profile_model_pair(
@@ -103,6 +109,7 @@ def _normalize_profile_model_pair(
     if (
         isinstance(model_id, str)
         and model_id in SUPPORTED_MODEL_IDS
+        and model_id not in NON_DEFAULT_MODEL_IDS
         and isinstance(effort, str)
         and model_supports_effort(model_id, effort)
     ):
@@ -153,6 +160,11 @@ async def resolve_agent_model_id(
             overridden_model, _ = normalize_profile_overrides(profile)
             if overridden_model:
                 model_id = overridden_model
-    if isinstance(per_thread_model_id, str) and per_thread_model_id in SUPPORTED_MODEL_IDS:
-        model_id = per_thread_model_id
+    if isinstance(per_thread_model_id, str):
+        if per_thread_model_id in SUPPORTED_MODEL_IDS:
+            model_id = per_thread_model_id
+        else:
+            canonical = canonical_model_pair(per_thread_model_id)
+            if canonical is not None:
+                model_id = canonical[0]
     return model_id

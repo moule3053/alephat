@@ -1,18 +1,16 @@
-from __future__ import annotations
-
 import json
 from typing import Any, cast
 
 import pytest
 from fastapi import BackgroundTasks, Request
 
-from agent.utils import github_feedback
-from agent.utils.github_feedback import (
+from agent.github import feedback as github_feedback
+from agent.github import routes as github_routes
+from agent.github.feedback import (
     process_github_reaction_added,
     process_github_reaction_removed,
 )
 from agent.webhooks import common as webhook_common
-from agent.webhooks import github_routes
 
 
 class _FakeStore:
@@ -59,7 +57,7 @@ def _reaction_payload(content: str = "+1", action: str = "created") -> dict[str,
     return {
         "action": action,
         "reaction": {"content": content},
-        "repository": {"owner": {"login": "moule3053"}, "name": "alephat"},
+        "repository": {"owner": {"login": "langchain-ai"}, "name": "alephat"},
         "pull_request": {"number": 7},
         "comment": {"id": 123, "pull_request_url": "https://api.github.com/repos/o/r/pulls/7"},
         "sender": {"login": "reviewer"},
@@ -73,7 +71,7 @@ async def test_github_reaction_added_creates_langsmith_feedback(
     client = _FakeClient()
     created: dict[str, Any] = {}
 
-    def fake_create_feedback(
+    async def fake_create_feedback(
         run_id: str,
         key: str,
         *,
@@ -98,7 +96,7 @@ async def test_github_reaction_added_creates_langsmith_feedback(
         return [
             {
                 "id": "f1",
-                "github_review_comment_id": 123,
+                "github_review_comment_ids": [123],
                 "github_review_run_id": "run-1",
             }
         ]
@@ -113,10 +111,10 @@ async def test_github_reaction_added_creates_langsmith_feedback(
     await process_github_reaction_added(_reaction_payload(), delivery_id="delivery-1")
 
     assert created["run_id"] == "run-1"
-    assert created["key"] == "github_reaction:moule3053/alephat:reviewer:123"
+    assert created["key"] == "github_reaction:langchain-ai/alephat:reviewer:123"
     assert created["score"] == 1.0
     assert created["source_info"]["finding_id"] == "f1"
-    assert (("github_reaction_events", "moule3053/alephat"), "delivery-1") in client.store.items
+    assert (("github_reaction_events", "langchain-ai/alephat"), "delivery-1") in client.store.items
 
 
 @pytest.mark.asyncio
@@ -124,7 +122,9 @@ async def test_github_reaction_removed_deletes_langsmith_feedback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = _FakeClient()
-    client.store.items[(("github_reaction_state", "moule3053/alephat"), "run-1:reviewer:123")] = {
+    client.store.items[
+        (("github_reaction_state", "langchain-ai/alephat"), "run-1:reviewer:123")
+    ] = {
         "value": {
             "run_id": "run-1",
             "user_login": "reviewer",
@@ -134,7 +134,7 @@ async def test_github_reaction_removed_deletes_langsmith_feedback(
     }
     deleted: dict[str, str] = {}
 
-    def fake_delete_feedback(run_id: str, key: str) -> bool:
+    async def fake_delete_feedback(run_id: str, key: str) -> bool:
         deleted["run_id"] = run_id
         deleted["key"] = key
         return True
@@ -145,7 +145,7 @@ async def test_github_reaction_removed_deletes_langsmith_feedback(
         return [
             {
                 "id": "f1",
-                "github_review_comment_id": 123,
+                "github_review_comment_ids": [123],
                 "github_review_run_id": "run-1",
             }
         ]
@@ -163,10 +163,10 @@ async def test_github_reaction_removed_deletes_langsmith_feedback(
 
     assert deleted == {
         "run_id": "run-1",
-        "key": "github_reaction:moule3053/alephat:reviewer:123",
+        "key": "github_reaction:langchain-ai/alephat:reviewer:123",
     }
     assert (
-        ("github_reaction_state", "moule3053/alephat"),
+        ("github_reaction_state", "langchain-ai/alephat"),
         "run-1:reviewer:123",
     ) not in client.store.items
 

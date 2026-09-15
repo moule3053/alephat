@@ -1,18 +1,18 @@
-from __future__ import annotations
-
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, NotRequired, cast
 
 from langchain.agents.middleware.types import (
-    AgentMiddleware,
     AgentState,
     ModelRequest,
     ModelResponse,
 )
 from langchain_core.messages import SystemMessage
 from langgraph.runtime import Runtime
+
+from agent.middleware.trace import AlephatMiddleware
+from agent.utils.startup_trace import flush_phases
 
 
 class PrepareRunState(AgentState):
@@ -38,7 +38,7 @@ def _latest_message_fingerprint(state: Mapping[str, Any]) -> str | None:
     return hashlib.sha256(encoded).hexdigest()
 
 
-class BasePrepareRunMiddleware(AgentMiddleware):
+class BasePrepareRunMiddleware(AlephatMiddleware):
     """Checkpointed per-run setup.
 
     Subclasses must keep `_prepare` idempotent. LangGraph checkpoints the
@@ -56,15 +56,21 @@ class BasePrepareRunMiddleware(AgentMiddleware):
         state: AgentState,
         runtime: Runtime,
     ) -> dict[str, Any] | None:
-        prepared_state = cast(PrepareRunState, state)
-        fingerprint = self._prepare_fingerprint(prepared_state, runtime)
-        if (
-            prepared_state.get("run_prepared")
-            and prepared_state.get("run_prepared_for") == fingerprint
-        ):
-            return None
-        updates = await self._prepare(prepared_state, runtime)
-        return {"run_prepared": True, "run_prepared_for": fingerprint, **updates}
+        try:
+            prepared_state = cast(PrepareRunState, state)
+            fingerprint = self._prepare_fingerprint(prepared_state, runtime)
+            if (
+                prepared_state.get("run_prepared")
+                and prepared_state.get("run_prepared_for") == fingerprint
+            ):
+                return None
+            updates = await self._prepare(prepared_state, runtime)
+            return {"run_prepared": True, "run_prepared_for": fingerprint, **updates}
+        finally:
+            # This hook is the first span the startup work can hang off of. A
+            # resumed invocation latches out of `_prepare` but its graph factory
+            # ran regardless, so the flush has to cover that path too.
+            flush_phases(getattr(self, "_thread_id", None))
 
     def _prepare_fingerprint(self, state: PrepareRunState, runtime: Runtime) -> str:  # noqa: ARG002
         payload = {

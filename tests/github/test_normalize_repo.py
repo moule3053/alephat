@@ -1,8 +1,6 @@
-from __future__ import annotations
-
 import pytest
 
-from agent.dashboard.review_styles import normalize_repo_full_name
+from agent.review.styles import normalize_repo_full_name
 
 
 def test_normalize_repo_full_name_accepts_urls() -> None:

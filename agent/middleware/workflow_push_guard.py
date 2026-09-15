@@ -1,7 +1,5 @@
 """Gate workflow-file pushes on human approval."""
 
-from __future__ import annotations
-
 import hashlib
 import json
 import logging
@@ -11,21 +9,28 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
-from langchain.agents.middleware.types import AgentMiddleware, AgentState
+from langchain.agents.middleware.types import AgentState
 from langchain_core.messages import ToolCall, ToolMessage
 from langgraph.config import get_config
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
+from langgraph_sdk import get_client
 
-from ..dashboard.workflow_approval import (
+from agent.dashboard.workflow_approval import (
     ensure_workflow_push_pending,
     mark_workflow_push_notified,
     workflow_push_approved,
 )
-from ..tools.slack_thread_reply import build_workflow_approval_blocks
-from ..utils.dashboard_links import dashboard_workflow_approval_url
-from ..utils.sandbox_state import SANDBOX_BACKENDS
-from ..utils.slack import post_slack_thread_reply_with_ts
+from agent.middleware.trace import AlephatMiddleware
+from agent.run_config import RunConfig
+from agent.sandboxes.state import SANDBOX_BACKENDS
+from agent.slack.client import (
+    LANGGRAPH_URL,
+    get_active_slack_thread,
+    post_slack_thread_reply_with_ts,
+)
+from agent.slack.tools.thread_reply import build_workflow_approval_blocks
+from agent.utils.dashboard_links import dashboard_workflow_approval_url
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +63,7 @@ class WorkflowPushChange:
     diff_stats: dict[str, int]
     diff_preview: str
     diff_preview_truncated: bool
+    inherited_from: str | None
     remote: str
     local_ref: str
     remote_ref: str
@@ -103,15 +109,12 @@ def _config(request: ToolCallRequest) -> Mapping[str, Any]:
     return config if isinstance(config, Mapping) else {}
 
 
-def _configurable(request: ToolCallRequest) -> Mapping[str, Any]:
-    config = _config(request)
-    configurable = config.get("configurable")
-    return configurable if isinstance(configurable, Mapping) else {}
+def _configurable(request: ToolCallRequest) -> RunConfig:
+    return RunConfig.from_config(_config(request))
 
 
 def _thread_id(request: ToolCallRequest) -> str | None:
-    thread_id = _configurable(request).get("thread_id")
-    return thread_id if isinstance(thread_id, str) and thread_id else None
+    return _configurable(request).thread_id or None
 
 
 def _backend(thread_id: str | None) -> Any | None:
@@ -225,9 +228,9 @@ def _git_command(repo_dir: str | None, args: str) -> str:
     return f"git {args}"
 
 
-def _run_git(backend: Any, repo_dir: str | None, args: str) -> GitInspectResult:
+async def _run_git(backend: Any, repo_dir: str | None, args: str) -> GitInspectResult:
     try:
-        response = backend.execute(_git_command(repo_dir, args), timeout=30)
+        response = await backend.aexecute(_git_command(repo_dir, args), timeout=30)
     except Exception:
         logger.debug("workflow push inspection failed for git %s", args, exc_info=True)
         return GitInspectResult("", False)
@@ -288,51 +291,87 @@ def _diff_stats(files: list[str], numstat: str) -> dict[str, int]:
     return {"files": len(files), "additions": additions, "deletions": deletions}
 
 
+async def _inherited_workflow_source(backend: Any, root: str, head: str) -> str | None:
+    parents = await _run_git(backend, root, f"rev-list --parents -n 1 {shlex.quote(head)}")
+    parts = _first_line(parents.output).split() if parents.ok else []
+    if len(parts) != 3:
+        return None
+    first_parent, merged_parent = parts[1:]
+    if first_parent == merged_parent:
+        return None
+    origin_head = await _run_git(backend, root, "symbolic-ref --short refs/remotes/origin/HEAD")
+    source_ref = _first_line(origin_head.output) if origin_head.ok else ""
+    if not source_ref:
+        return None
+    source_contains_parent = await _run_git(
+        backend,
+        root,
+        f"merge-base --is-ancestor {shlex.quote(merged_parent)} {shlex.quote(source_ref)}",
+    )
+    if not source_contains_parent.ok:
+        return None
+    feature_workflow_diff = await _run_git(
+        backend,
+        root,
+        f"diff --quiet {shlex.quote(first_parent)} {shlex.quote(head)} -- .github/workflows",
+    )
+    if feature_workflow_diff.ok:
+        return None
+    merged_workflow_diff = await _run_git(
+        backend,
+        root,
+        f"diff --quiet {shlex.quote(merged_parent)} {shlex.quote(head)} -- .github/workflows",
+    )
+    return source_ref.removeprefix("origin/") if merged_workflow_diff.ok else None
+
+
 def _approval_url(thread_id: str | None, fingerprint: str) -> str | None:
     if not thread_id:
         return None
     return dashboard_workflow_approval_url(thread_id, fingerprint)
 
 
-def _workflow_change_for_push(backend: Any, parsed: ParsedGitPush) -> WorkflowPushChange | None:
-    root_result = _run_git(backend, parsed.repo_dir, "rev-parse --show-toplevel")
+async def _workflow_change_for_push(
+    backend: Any, parsed: ParsedGitPush
+) -> WorkflowPushChange | None:
+    root_result = await _run_git(backend, parsed.repo_dir, "rev-parse --show-toplevel")
     if not root_result.ok:
         return None
     root = _first_line(root_result.output)
     if not root:
         return None
 
-    branch = _run_git(backend, root, "rev-parse --abbrev-ref HEAD")
+    branch = await _run_git(backend, root, "rev-parse --abbrev-ref HEAD")
     branch_name = _first_line(branch.output) if branch.ok else ""
     if not branch_name or branch_name == "HEAD" or parsed.remote_ref != branch_name:
         return None
     if parsed.local_ref not in {"HEAD", branch_name}:
         return None
 
-    target_sha = _run_git(backend, root, f"rev-parse {shlex.quote(parsed.local_ref)}")
+    target_sha = await _run_git(backend, root, f"rev-parse {shlex.quote(parsed.local_ref)}")
     head = _first_line(target_sha.output) if target_sha.ok else ""
     if not head or not _GIT_OBJECT_ID.fullmatch(head):
         return None
 
     remote_branch = f"refs/remotes/{parsed.remote}/{parsed.remote_ref}"
-    remote_branch_exists = _run_git(
+    remote_branch_exists = await _run_git(
         backend, root, f"rev-parse --verify {shlex.quote(remote_branch)}"
     )
     if remote_branch_exists.ok and _first_line(remote_branch_exists.output):
         base_ref = remote_branch
         range_expr = f"{shlex.quote(base_ref)}..{shlex.quote(head)}"
-        base_sha = _first_line(_run_git(backend, root, f"rev-parse {shlex.quote(base_ref)}").output)
+        base_result = await _run_git(backend, root, f"rev-parse {shlex.quote(base_ref)}")
+        base_sha = _first_line(base_result.output)
     else:
-        origin_head = _run_git(backend, root, "symbolic-ref --short refs/remotes/origin/HEAD")
+        origin_head = await _run_git(backend, root, "symbolic-ref --short refs/remotes/origin/HEAD")
         base_ref = _first_line(origin_head.output) if origin_head.ok else "origin/main"
         range_expr = f"{shlex.quote(base_ref)}...{shlex.quote(head)}"
-        base_sha = _first_line(
-            _run_git(
-                backend, root, f"merge-base {shlex.quote(head)} {shlex.quote(base_ref)}"
-            ).output
+        merge_base = await _run_git(
+            backend, root, f"merge-base {shlex.quote(head)} {shlex.quote(base_ref)}"
         )
+        base_sha = _first_line(merge_base.output)
 
-    names = _run_git(
+    names = await _run_git(
         backend,
         root,
         f"diff --name-only --diff-filter=ACMRTD {range_expr} -- .github/workflows",
@@ -347,14 +386,17 @@ def _workflow_change_for_push(backend: Any, parsed: ParsedGitPush) -> WorkflowPu
     if not files:
         return None
 
-    diff = _run_git(backend, root, f"diff --binary --full-index {range_expr} -- .github/workflows")
+    diff = await _run_git(
+        backend, root, f"diff --binary --full-index {range_expr} -- .github/workflows"
+    )
     if not diff.ok or not diff.output:
         return None
-    numstat = _run_git(backend, root, f"diff --numstat {range_expr} -- .github/workflows")
+    numstat = await _run_git(backend, root, f"diff --numstat {range_expr} -- .github/workflows")
     diff_preview, diff_preview_truncated = _diff_preview(diff.output)
     diff_stats = _diff_stats(files, numstat.output if numstat.ok else "")
+    inherited_from = await _inherited_workflow_source(backend, root, head)
 
-    remote = _run_git(backend, root, "config --get remote.origin.url")
+    remote = await _run_git(backend, root, "config --get remote.origin.url")
     repo = _normalize_remote(_first_line(remote.output)) if remote.ok else ""
     fixed_refspec = f"{head}:refs/heads/{parsed.remote_ref}"
     fixed_args = ["push"]
@@ -384,6 +426,7 @@ def _workflow_change_for_push(backend: Any, parsed: ParsedGitPush) -> WorkflowPu
         diff_stats=diff_stats,
         diff_preview=diff_preview,
         diff_preview_truncated=diff_preview_truncated,
+        inherited_from=inherited_from,
         remote=parsed.remote,
         local_ref=parsed.local_ref,
         remote_ref=parsed.remote_ref,
@@ -441,15 +484,25 @@ def _approval_slack_message(change: WorkflowPushChange, approval_url: str | None
     branch = change.branch or "the current branch"
     stats = change.diff_stats
     web_review = f"\n\n*Review diff:* <{approval_url}|Open in Web>" if approval_url else ""
+    if change.inherited_from:
+        headline = "*Confirm workflow changes inherited from the base branch*"
+        source = (
+            f"This branch now includes {len(change.files)} GitHub Actions files from merging "
+            f"`{change.inherited_from}`. Alephat did not author these workflow changes."
+        )
+    else:
+        headline = "*Confirm GitHub Actions workflow changes*"
+        source = f"Alephat is ready to push workflow changes in `{repo}` on `{branch}`."
     return (
-        "*Workflow file approval required*\n"
-        f"Alephat is trying to push changes to GitHub workflow files in `{repo}` on `{branch}`.\n\n"
+        f"{headline}\n{source}\n\n"
+        "*Why confirmation is required:* Workflow files control CI jobs and may access "
+        "repository secrets.\n\n"
         f"*Files:*\n{files}\n\n"
         f"*Diff stat:* {stats.get('files', len(change.files))} files, "
         f"+{stats.get('additions', 0)} / -{stats.get('deletions', 0)}\n"
-        f"*Fingerprint:* `{change.fingerprint}`{web_review}\n\n"
-        "Approve only if this exact workflow diff is expected. If the workflow files change, "
-        "a new fingerprint will be required."
+        f"*Approval ID:* `{change.fingerprint}`{web_review}\n\n"
+        "Approval resumes this exact push only. If the workflow files change, Alephat will "
+        "ask again."
     )
 
 
@@ -458,12 +511,16 @@ async def _post_slack_approval_if_needed(
 ) -> None:
     if record.get("notified") is True:
         return
-    configurable = _configurable(request)
-    slack_thread = configurable.get("slack_thread")
-    if not isinstance(slack_thread, Mapping):
+    cfg = _configurable(request)
+    active = await get_active_slack_thread(
+        get_client(url=LANGGRAPH_URL),
+        cfg.thread_id,
+        cfg.slack_thread.dump() if cfg.slack_thread else None,
+    )
+    if not active:
         return
-    channel_id = slack_thread.get("channel_id")
-    thread_ts = slack_thread.get("thread_ts")
+    channel_id = active.get("channel_id")
+    thread_ts = active.get("thread_ts")
     if not isinstance(channel_id, str) or not isinstance(thread_ts, str):
         return
     message = _approval_slack_message(
@@ -474,6 +531,7 @@ async def _post_slack_approval_if_needed(
         thread_ts,
         message,
         blocks=build_workflow_approval_blocks(message, change.fingerprint),
+        agent_thread_id=cfg.thread_id,
     )
     if message_ts and not error:
         thread_id = _thread_id(request)
@@ -500,6 +558,7 @@ async def _approval_state(request: ToolCallRequest, change: WorkflowPushChange) 
             diff_stats=change.diff_stats,
             diff_preview=change.diff_preview,
             diff_preview_truncated=change.diff_preview_truncated,
+            inherited_from=change.inherited_from,
             approval_url=approval_url,
         )
         await _post_slack_approval_if_needed(request, change, record)
@@ -509,13 +568,13 @@ async def _approval_state(request: ToolCallRequest, change: WorkflowPushChange) 
         return "approval_error"
 
 
-class WorkflowPushGuardMiddleware(AgentMiddleware):
+class WorkflowPushGuardMiddleware(AlephatMiddleware):
     """Require approval before pushing `.github/workflows` changes."""
 
     state_schema = AgentState
 
-    def _change_for_request(self, request: ToolCallRequest) -> WorkflowPushChange | None:
-        if _tool_name(request) != "execute":
+    async def _change_for_request(self, request: ToolCallRequest) -> WorkflowPushChange | None:
+        if _tool_name(request) not in {"execute", "background_execute"}:
             return None
         command = _tool_args(request).get("command")
         if not isinstance(command, str):
@@ -526,7 +585,7 @@ class WorkflowPushGuardMiddleware(AgentMiddleware):
         backend = _backend(_thread_id(request))
         if backend is None:
             return None
-        return _workflow_change_for_push(backend, parsed)
+        return await _workflow_change_for_push(backend, parsed)
 
     async def _handle_change_async(
         self,
@@ -553,7 +612,7 @@ class WorkflowPushGuardMiddleware(AgentMiddleware):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
-        change = self._change_for_request(request)
+        change = await self._change_for_request(request)
         if change is None:
             return await handler(request)
         return await self._handle_change_async(request, handler, change)

@@ -1,9 +1,11 @@
-from __future__ import annotations
-
 import asyncio
 import sys
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx2
+import langgraph_sdk
 import pytest
 
 import agent.tools.open_pull_request  # noqa: F401
@@ -11,11 +13,26 @@ import agent.tools.open_pull_request  # noqa: F401
 opr = sys.modules["agent.tools.open_pull_request"]
 
 
+class _FakeRequest:
+    def __init__(self, method: str, url: str) -> None:
+        self.method = method
+        self.url = url
+
+
 class _FakeResponse:
-    def __init__(self, status_code: int, payload: Any = None, text: str = "") -> None:
+    def __init__(
+        self,
+        status_code: int,
+        payload: Any = None,
+        text: str = "",
+        headers: dict[str, str] | None = None,
+        request: _FakeRequest | None = None,
+    ) -> None:
         self.status_code = status_code
         self._payload = payload
         self.text = text
+        self.headers = headers or {}
+        self.request = request
 
     def json(self) -> Any:
         return self._payload
@@ -44,13 +61,15 @@ class _FakeClient:
         self, url: str, *, headers: dict[str, str], params: dict[str, str] | None = None
     ) -> _FakeResponse:
         self.get_calls.append({"url": url, "headers": headers, "params": params})
+        if url.endswith("/installation/repositories"):
+            return _FakeResponse(200, {"repositories": [{"full_name": "langchain-ai/alephat"}]})
         if self._get is not None:
             return self._get
         return _FakeResponse(200, {"name": "ok"})
 
 
 class _RoutingClient:
-    """Fake httpx client that routes GETs by URL substring."""
+    """Fake httpx2 client that routes GETs by URL substring."""
 
     def __init__(self, *, post: _FakeResponse, get_routes: dict[str, _FakeResponse]) -> None:
         self._post = post
@@ -81,20 +100,43 @@ class _RoutingClient:
 
 
 def _install_client(monkeypatch: pytest.MonkeyPatch, client: _FakeClient | _RoutingClient) -> None:
-    monkeypatch.setattr(opr.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(opr.httpx2, "AsyncClient", lambda **_kwargs: client)
 
 
-def _set_config(monkeypatch: pytest.MonkeyPatch, configurable: dict[str, Any]) -> None:
-    monkeypatch.setattr(opr, "get_config", lambda: {"configurable": configurable})
+def _set_config(
+    monkeypatch: pytest.MonkeyPatch,
+    configurable: dict[str, Any],
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    configurable.setdefault("thread_id", "pr-thread")
+    metadata = (
+        metadata
+        if metadata is not None
+        else (
+            {"visibility": "public"}
+            if configurable.get("source") == "github"
+            else {"visibility": "private", "owner_login": configurable.get("github_login")}
+        )
+    )
+    monkeypatch.setattr(
+        langgraph_sdk,
+        "get_client",
+        lambda: SimpleNamespace(
+            threads=SimpleNamespace(get=AsyncMock(return_value={"metadata": metadata}))
+        ),
+    )
+    monkeypatch.setattr("agent.run_config.get_config", lambda: {"configurable": configurable})
+    monkeypatch.setattr(opr, "get_config", lambda: {"configurable": configurable}, raising=False)
 
 
-def _open() -> dict[str, Any]:
+def _open(base: str = "main") -> dict[str, Any]:
     return asyncio.run(
         opr._open_pull_request(
-            owner="moule3053",
+            owner="langchain-ai",
             repo="alephat",
             head="alephat/feature",
-            base="main",
+            base=base,
             title="feat: x",
             body="body",
             draft=True,
@@ -102,8 +144,74 @@ def _open() -> dict[str, Any]:
     )
 
 
-def test_uses_user_token_for_slack_with_login(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_config(monkeypatch, {"source": "slack", "github_login": "johannes117"})
+@pytest.mark.parametrize(
+    "workspace_access", ["allowed", "other_account", "unavailable", "no_token"]
+)
+def test_public_pr_cannot_use_initiator_authority_outside_workspace(
+    monkeypatch: pytest.MonkeyPatch, workspace_access: str
+) -> None:
+    _set_config(
+        monkeypatch,
+        {"source": "slack", "github_login": "bob"},
+        metadata={"visibility": "public", "owner_type": "user", "owner_login": "Alice"},
+    )
+    monkeypatch.setattr(
+        "agent.dashboard.profiles.get_valid_access_token", AsyncMock(return_value="alice-token")
+    )
+    monkeypatch.setattr(
+        opr,
+        "get_github_app_installation_token",
+        AsyncMock(return_value=None if workspace_access == "no_token" else "workspace-token"),
+    )
+    monkeypatch.setattr(opr, "_record_pr_telemetry", AsyncMock())
+    monkeypatch.setattr(opr, "get_plan_content", AsyncMock(return_value=None))
+    requests: list[httpx2.Request] = []
+
+    async def github(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        if request.url.path == "/installation/repositories":
+            assert request.headers["Authorization"] == "Bearer workspace-token"
+            if workspace_access == "unavailable":
+                return httpx2.Response(503)
+            if request.url.params["page"] == "1":
+                return httpx2.Response(
+                    200,
+                    json={
+                        "repositories": [{"full_name": f"workspace/repo-{i}"} for i in range(100)]
+                    },
+                )
+            full_name = "langchain-ai/alephat" if workspace_access == "allowed" else "other/alephat"
+            return httpx2.Response(200, json={"repositories": [{"full_name": full_name}]})
+        # OAuth has broader access, including branches already pushed by someone else.
+        assert request.headers["Authorization"] == "Bearer alice-token"
+        if request.method == "POST":
+            return httpx2.Response(201, json={"number": 1, "user": {"login": "Alice"}})
+        return httpx2.Response(200, json={"name": "existing-branch", "private": False})
+
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(github))
+    monkeypatch.setattr(opr.httpx2, "AsyncClient", lambda **kwargs: client)
+    result = _open()
+
+    if workspace_access == "allowed":
+        assert result["success"] is True
+        assert result["author"] == "Alice"
+        assert result["token_kind"] == "user"
+        assert any(request.method == "POST" for request in requests)
+    else:
+        assert result["success"] is False
+        assert "workspace" in result["error"]
+        assert all(request.headers["Authorization"] != "Bearer alice-token" for request in requests)
+
+
+@pytest.mark.parametrize("visibility", ["public", "private"])
+def test_uses_user_token_for_slack_with_login(
+    monkeypatch: pytest.MonkeyPatch, visibility: str
+) -> None:
+    _set_config(
+        monkeypatch,
+        {"source": "slack", "github_login": "johannes117"},
+        metadata={"visibility": visibility, "owner_type": "user", "owner_login": "johannes117"},
+    )
 
     from agent.dashboard import profiles
 
@@ -114,7 +222,8 @@ def test_uses_user_token_for_slack_with_login(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(profiles, "get_valid_access_token", fake_user_token)
 
     async def fail_bot() -> str | None:
-        raise AssertionError("bot token should not be used when a user token exists")
+        assert visibility == "public", "private PRs should not need workspace credentials"
+        return "workspace-token"
 
     monkeypatch.setattr(opr, "get_github_app_installation_token", fail_bot)
 
@@ -141,6 +250,23 @@ def test_uses_user_token_for_slack_with_login(monkeypatch: pytest.MonkeyPatch) -
         "body": "body",
         "draft": True,
     }
+
+
+def test_profile_draft_preference_overrides_tool_argument(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_config(monkeypatch, {"source": "slack", "github_login": "johannes117", "draft_prs": False})
+    _stub_token(monkeypatch)
+    client = _FakeClient(
+        post=_FakeResponse(
+            201,
+            {"html_url": "https://x/pull/1", "number": 1, "user": {"login": "johannes117"}},
+        )
+    )
+    _install_client(monkeypatch, client)
+
+    result = _open()
+
+    assert result["success"] is True
+    assert client.post_calls[0]["json"]["draft"] is False
 
 
 def test_uses_user_token_for_linear_with_login(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -177,8 +303,12 @@ def test_uses_user_token_for_linear_with_login(monkeypatch: pytest.MonkeyPatch) 
     assert client.post_calls[0]["headers"]["Authorization"] == "Bearer user-tok"
 
 
-def test_falls_back_to_bot_for_github_source(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_config(monkeypatch, {"source": "github", "github_login": "johannes117"})
+def test_system_thread_uses_bot_for_github_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_config(
+        monkeypatch,
+        {"source": "github", "github_login": "johannes117"},
+        metadata={"visibility": "public", "owner_type": "system"},
+    )
 
     from agent.dashboard import profiles
 
@@ -205,7 +335,7 @@ def test_falls_back_to_bot_for_github_source(monkeypatch: pytest.MonkeyPatch) ->
     assert client.post_calls[0]["headers"]["Authorization"] == "Bearer bot-tok"
 
 
-def test_falls_back_to_bot_when_user_token_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_private_pr_requires_user_token(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_config(monkeypatch, {"source": "slack", "github_login": "johannes117"})
 
     from agent.dashboard import profiles
@@ -223,7 +353,8 @@ def test_falls_back_to_bot_when_user_token_missing(monkeypatch: pytest.MonkeyPat
     client = _FakeClient(post=_FakeResponse(201, {"html_url": "u", "number": 3, "user": {}}))
     _install_client(monkeypatch, client)
 
-    assert _open()["token_kind"] == "bot"
+    with pytest.raises(opr.GitHubUserAuthRequired):
+        _open()
 
 
 def test_returns_existing_pr_on_422(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -249,7 +380,7 @@ def test_returns_existing_pr_on_422(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["number"] == 9
     pr_lookup = [call for call in client.get_calls if call["params"]]
     assert pr_lookup[0]["params"] == {
-        "head": "moule3053:alephat/feature",
+        "head": "langchain-ai:alephat/feature",
         "state": "open",
     }
 
@@ -268,10 +399,9 @@ def test_error_surfaced_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     result = _open()
 
     assert result["success"] is False
-    assert result["code"] == "github_pr_create_failed"
-    assert result["recoverable_by_agent"] is False
-    assert result["pr_created"] is False
+    assert set(result) == {"success", "error"}
     assert "403" in result["error"]
+    assert "PR created: no" in result["error"]
 
 
 def test_404_create_returns_actionable_access_diagnostic(
@@ -285,16 +415,9 @@ def test_404_create_returns_actionable_access_diagnostic(
     result = _open()
 
     assert result["success"] is False
-    assert result["code"] == "github_app_access_missing_or_repo_not_found"
-    assert result["recoverable_by_agent"] is False
-    assert result["owner"] == "moule3053"
-    assert result["repo"] == "alephat"
-    assert result["head"] == "alephat/feature"
-    assert result["base"] == "main"
-    assert result["branch_pushed"] is True
-    assert result["pr_created"] is False
-    assert "install or grant" in result["suggested_action"]
+    assert "Branch pushed: langchain-ai/alephat:alephat/feature (yes)" in result["error"]
     assert "PR created: no" in result["error"]
+    assert "not installed on, granted access" in result["error"]
     assert (
         "open_pull_request_failed code=github_app_access_missing_or_repo_not_found" in caplog.text
     )
@@ -308,11 +431,11 @@ def test_preflight_head_branch_404_reports_branch_not_pushed(
     client = _RoutingClient(
         post=_FakeResponse(201, {"html_url": "u", "number": 1, "user": {}}),
         get_routes={
-            "/repos/moule3053/alephat/branches/main": _FakeResponse(200, {"name": "main"}),
-            "/repos/moule3053/alephat/branches/alephat%2Ffeature": _FakeResponse(
+            "/repos/langchain-ai/alephat/branches/main": _FakeResponse(200, {"name": "main"}),
+            "/repos/langchain-ai/alephat/branches/alephat%2Ffeature": _FakeResponse(
                 404, {"message": "Branch not found"}
             ),
-            "/repos/moule3053/alephat": _FakeResponse(200, {"private": True}),
+            "/repos/langchain-ai/alephat": _FakeResponse(200, {"private": True}),
         },
     )
     _install_client(monkeypatch, client)
@@ -320,10 +443,44 @@ def test_preflight_head_branch_404_reports_branch_not_pushed(
     result = _open()
 
     assert result["success"] is False
-    assert result["code"] == "github_pr_branch_not_visible"
-    assert result["branch_pushed"] is False
-    assert result["head_branch_visible"] is False
-    assert result["failed_step"] == "preflight_head_branch"
+    assert "head branch `alephat/feature`" in result["error"]
+    assert "Branch pushed: langchain-ai/alephat:alephat/feature (no)" in result["error"]
+    assert client.post_calls == []
+
+
+def test_preflight_base_branch_redirect_surfaces_raw_github_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_config(monkeypatch, {"source": "slack", "github_login": "johannes117"})
+    _stub_token(monkeypatch)
+    redirect = _FakeResponse(
+        301,
+        {"message": "Moved Permanently"},
+        text='{"message":"Moved Permanently"}',
+        headers={"location": "https://api.github.com/repos/langchain-ai/alephat/branches/main"},
+        request=_FakeRequest(
+            "GET", "https://api.github.com/repos/langchain-ai/alephat/branches/master"
+        ),
+    )
+    client = _RoutingClient(
+        post=_FakeResponse(201, {"html_url": "u", "number": 1, "user": {}}),
+        get_routes={
+            "/repos/langchain-ai/alephat/branches/master": redirect,
+            "/repos/langchain-ai/alephat": _FakeResponse(200, {"private": True}),
+        },
+    )
+    _install_client(monkeypatch, client)
+
+    result = _open(base="master")
+
+    assert result["success"] is False
+    error = result["error"]
+    assert (
+        "GitHub responded to GET "
+        "https://api.github.com/repos/langchain-ai/alephat/branches/master with 301" in error
+    )
+    assert "location: https://api.github.com/repos/langchain-ai/alephat/branches/main" in error
+    assert 'response body: {"message":"Moved Permanently"}' in error
     assert client.post_calls == []
 
 
@@ -334,7 +491,7 @@ async def _coro(value: Any) -> Any:
 def _open_with_body(body: str) -> dict[str, Any]:
     return asyncio.run(
         opr._open_pull_request(
-            owner="moule3053",
+            owner="langchain-ai",
             repo="alephat",
             head="alephat/feature",
             base="main",
@@ -346,6 +503,7 @@ def _open_with_body(body: str) -> dict[str, Any]:
 
 
 def _stub_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(opr, "private_credential_login", AsyncMock(return_value="test-owner"))
     monkeypatch.setattr(opr, "_resolve_pr_author_token", lambda: _coro(("tok", "user")))
 
 
@@ -368,7 +526,7 @@ def test_appends_slack_reference_for_private_repo(monkeypatch: pytest.MonkeyPatc
 
     client = _RoutingClient(
         post=_FakeResponse(201, {"html_url": "u", "number": 1, "user": {}}),
-        get_routes={"/repos/moule3053/alephat": _FakeResponse(200, {"private": True})},
+        get_routes={"/repos/langchain-ai/alephat": _FakeResponse(200, {"private": True})},
     )
     _install_client(monkeypatch, client)
 
@@ -400,7 +558,7 @@ def test_uses_stored_slack_permalink_reference(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(opr, "get_slack_permalink", fail_permalink)
     client = _RoutingClient(
         post=_FakeResponse(201, {"html_url": "u", "number": 1, "user": {}}),
-        get_routes={"/repos/moule3053/alephat": _FakeResponse(200, {"private": True})},
+        get_routes={"/repos/langchain-ai/alephat": _FakeResponse(200, {"private": True})},
     )
     _install_client(monkeypatch, client)
 
@@ -413,7 +571,13 @@ def test_appends_plan_reference_from_thread_id(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("DASHBOARD_BASE_URL", "https://dashboard.example")
     _set_config(monkeypatch, {"source": "dashboard", "thread_id": "thread-1"})
     _stub_token(monkeypatch)
-    _stub_plan(monkeypatch, {"markdown": "# Plan\n- step 1", "status": "ready"})
+    _stub_plan(
+        monkeypatch,
+        {
+            "html": "<html><head><title>Plan</title></head><body>step 1</body></html>",
+            "status": "ready",
+        },
+    )
 
     client = _FakeClient(post=_FakeResponse(201, {"html_url": "u", "number": 1, "user": {}}))
     _install_client(monkeypatch, client)
@@ -441,11 +605,11 @@ def test_omits_plan_reference_when_no_plan_exists(monkeypatch: pytest.MonkeyPatc
     assert client.post_calls
 
 
-def test_omits_plan_reference_when_plan_markdown_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_omits_plan_reference_when_plan_html_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DASHBOARD_BASE_URL", "https://dashboard.example")
     _set_config(monkeypatch, {"source": "dashboard", "thread_id": "thread-1"})
     _stub_token(monkeypatch)
-    _stub_plan(monkeypatch, {"markdown": "   \n  ", "status": "ready"})
+    _stub_plan(monkeypatch, {"html": "   \n  ", "status": "ready"})
 
     client = _FakeClient(post=_FakeResponse(201, {"html_url": "u", "number": 1, "user": {}}))
     _install_client(monkeypatch, client)
@@ -488,7 +652,13 @@ def test_plan_reference_survives_source_reference_failure(
         },
     )
     _stub_token(monkeypatch)
-    _stub_plan(monkeypatch, {"markdown": "# Plan\n- step 1", "status": "ready"})
+    _stub_plan(
+        monkeypatch,
+        {
+            "html": "<html><head><title>Plan</title></head><body>step 1</body></html>",
+            "status": "ready",
+        },
+    )
 
     async def fail_permalink(*_args: Any, **_kwargs: Any) -> str:
         raise RuntimeError("slack failed")
@@ -519,7 +689,7 @@ def test_omits_slack_reference_for_public_repo(monkeypatch: pytest.MonkeyPatch) 
 
     client = _RoutingClient(
         post=_FakeResponse(201, {"html_url": "u", "number": 1, "user": {}}),
-        get_routes={"/repos/moule3053/alephat": _FakeResponse(200, {"private": False})},
+        get_routes={"/repos/langchain-ai/alephat": _FakeResponse(200, {"private": False})},
     )
     _install_client(monkeypatch, client)
 
@@ -541,14 +711,20 @@ def test_public_repo_appends_plan_but_not_slack_reference(
         },
     )
     _stub_token(monkeypatch)
-    _stub_plan(monkeypatch, {"markdown": "# Plan\n- step 1", "status": "ready"})
+    _stub_plan(
+        monkeypatch,
+        {
+            "html": "<html><head><title>Plan</title></head><body>step 1</body></html>",
+            "status": "ready",
+        },
+    )
     monkeypatch.setattr(
         opr, "get_slack_permalink", lambda *_a, **_k: _coro("https://slack.example/p1")
     )
 
     client = _RoutingClient(
         post=_FakeResponse(201, {"html_url": "u", "number": 1, "user": {}}),
-        get_routes={"/repos/moule3053/alephat": _FakeResponse(200, {"private": False})},
+        get_routes={"/repos/langchain-ai/alephat": _FakeResponse(200, {"private": False})},
     )
     _install_client(monkeypatch, client)
 
@@ -571,7 +747,7 @@ def test_appends_linear_reference_for_private_repo(monkeypatch: pytest.MonkeyPat
 
     client = _RoutingClient(
         post=_FakeResponse(201, {"html_url": "u", "number": 1, "user": {}}),
-        get_routes={"/repos/moule3053/alephat": _FakeResponse(200, {"private": True})},
+        get_routes={"/repos/langchain-ai/alephat": _FakeResponse(200, {"private": True})},
     )
     _install_client(monkeypatch, client)
 
@@ -587,7 +763,7 @@ def test_appends_github_issue_reference_for_private_repo(monkeypatch: pytest.Mon
         {
             "source": "github",
             "github_issue": {
-                "url": "https://github.com/moule3053/alephat/issues/42",
+                "url": "https://github.com/langchain-ai/alephat/issues/42",
                 "number": 42,
             },
         },
@@ -596,14 +772,14 @@ def test_appends_github_issue_reference_for_private_repo(monkeypatch: pytest.Mon
 
     client = _RoutingClient(
         post=_FakeResponse(201, {"html_url": "u", "number": 1, "user": {}}),
-        get_routes={"/repos/moule3053/alephat": _FakeResponse(200, {"private": True})},
+        get_routes={"/repos/langchain-ai/alephat": _FakeResponse(200, {"private": True})},
     )
     _install_client(monkeypatch, client)
 
     _open_with_body("body")
 
     sent_body = client.post_calls[0]["json"]["body"]
-    assert "- GitHub issue: [#42](https://github.com/moule3053/alephat/issues/42)" in sent_body
+    assert "- GitHub issue: [#42](https://github.com/langchain-ai/alephat/issues/42)" in sent_body
 
 
 def test_skips_append_when_no_source_context(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -638,6 +814,77 @@ def test_does_not_duplicate_existing_references(monkeypatch: pytest.MonkeyPatch)
     assert client.post_calls
 
 
+@pytest.mark.asyncio
+async def test_thread_pull_requests_seeds_legacy_metadata() -> None:
+    fake_client = MagicMock()
+    fake_client.threads.get = AsyncMock(
+        return_value={
+            "metadata": {
+                "pr_url": "https://github.com/langchain-ai/alephat/pull/42",
+                "pr_number": 42,
+                "pr_title": "Legacy PR",
+                "pr_state": "draft",
+                "branch_name": "feature/legacy",
+                "base_branch": "main",
+                "diff_stats": {"files": 2, "additions": 5, "deletions": 1},
+            }
+        }
+    )
+
+    with patch.object(opr, "get_client", return_value=fake_client):
+        records = await opr._thread_pull_requests("thread-1")
+
+    assert records == [
+        {
+            "repo_full_name": "langchain-ai/alephat",
+            "number": 42,
+            "url": "https://github.com/langchain-ai/alephat/pull/42",
+            "title": "Legacy PR",
+            "state": "draft",
+            "head_ref": "feature/legacy",
+            "base_ref": "main",
+            "author": "",
+            "author_avatar_url": "",
+            "created_at": "",
+            "diff_stats": {"files": 2, "additions": 5, "deletions": 1},
+        }
+    ]
+
+
+def test_upsert_pull_request_keeps_multiple_repositories() -> None:
+    first = {
+        "repo_full_name": "langchain-ai/alephat",
+        "number": 42,
+        "url": "https://github.com/langchain-ai/alephat/pull/42",
+        "title": "Alephat",
+    }
+    second = {
+        "repo_full_name": "langchain-ai/langchain",
+        "number": 42,
+        "url": "https://github.com/langchain-ai/langchain/pull/42",
+        "title": "LangChain",
+    }
+
+    assert opr._upsert_pull_request([first], second) == [first, second]
+
+
+def test_upsert_pull_request_replaces_duplicate_and_moves_it_latest() -> None:
+    first = {
+        "repo_full_name": "langchain-ai/alephat",
+        "number": 42,
+        "url": "https://github.com/langchain-ai/alephat/pull/42",
+        "state": "draft",
+    }
+    other = {
+        "repo_full_name": "langchain-ai/langchain",
+        "number": 7,
+        "url": "https://github.com/langchain-ai/langchain/pull/7",
+    }
+    updated = {**first, "state": "open"}
+
+    assert opr._upsert_pull_request([first, other], updated) == [other, updated]
+
+
 def test_derive_pr_state_prefers_merged() -> None:
     assert opr.derive_pr_state(state="closed", merged=True, draft=True) == "merged"
 
@@ -652,3 +899,150 @@ def test_derive_pr_state_draft() -> None:
 
 def test_derive_pr_state_open() -> None:
     assert opr.derive_pr_state(state="open", merged=False, draft=False) == "open"
+
+
+def test_resolves_thread_flag_is_forwarded_to_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_config(monkeypatch, {"source": "github", "github_login": "johannes117"})
+
+    async def fake_bot() -> str | None:
+        return "bot-tok"
+
+    monkeypatch.setattr(opr, "get_github_app_installation_token", fake_bot)
+    record_telemetry = AsyncMock()
+    monkeypatch.setattr(opr, "_record_pr_telemetry", record_telemetry)
+    _install_client(
+        monkeypatch,
+        _FakeClient(
+            post=_FakeResponse(
+                201, {"html_url": "https://x/pull/4", "number": 4, "user": {"login": "octo"}}
+            )
+        ),
+    )
+
+    result = asyncio.run(
+        opr._open_pull_request(
+            owner="langchain-ai",
+            repo="alephat",
+            head="alephat/feature",
+            base="main",
+            title="feat: x",
+            body="body",
+            draft=True,
+            resolves_thread=True,
+        )
+    )
+
+    assert result["success"] is True
+    record_telemetry.assert_awaited_once()
+    assert record_telemetry.await_args is not None
+    assert record_telemetry.await_args.kwargs["resolves_thread"] is True
+
+
+def test_resolves_thread_flag_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_config(monkeypatch, {"source": "github", "github_login": "johannes117"})
+
+    async def fake_bot() -> str | None:
+        return "bot-tok"
+
+    monkeypatch.setattr(opr, "get_github_app_installation_token", fake_bot)
+    record_telemetry = AsyncMock()
+    monkeypatch.setattr(opr, "_record_pr_telemetry", record_telemetry)
+    _install_client(
+        monkeypatch,
+        _FakeClient(
+            post=_FakeResponse(
+                201, {"html_url": "https://x/pull/4", "number": 4, "user": {"login": "octo"}}
+            )
+        ),
+    )
+
+    _open()
+
+    record_telemetry.assert_awaited_once()
+    assert record_telemetry.await_args is not None
+    assert record_telemetry.await_args.kwargs["resolves_thread"] is False
+
+
+@pytest.mark.parametrize("top_level_run_id", [False, True])
+async def test_record_pr_telemetry_persists_resolves_thread_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    top_level_run_id: bool,
+) -> None:
+    _set_config(
+        monkeypatch,
+        {
+            "source": "slack",
+            "thread_id": "t1",
+            "github_login": "octo",
+            "run_id": "old-run" if top_level_run_id else "run-1",
+            "slack_thread": {"channel_id": "C1", "thread_ts": "1.0"},
+        },
+    )
+    if top_level_run_id:
+        config = {**opr.get_config(), "run_id": "run-1"}
+        monkeypatch.setattr(opr, "get_config", lambda: config)
+    monkeypatch.setattr(opr, "record_agent_pr_usage", AsyncMock())
+    monkeypatch.setattr(opr, "get_active_slack_thread", AsyncMock(return_value=None))
+    langgraph = MagicMock()
+    langgraph.threads.get = AsyncMock(return_value={"metadata": {}})
+    langgraph.threads.update = AsyncMock()
+    monkeypatch.setattr(opr, "get_client", lambda: langgraph)
+    details = {
+        "html_url": "https://github.com/langchain-ai/alephat/pull/3",
+        "number": 3,
+        "state": "open",
+        "draft": True,
+        "merged": False,
+        "title": "feat: x",
+        "user": {"login": "octo"},
+    }
+    client = _FakeClient(post=_FakeResponse(201, {}), get=_FakeResponse(200, details))
+
+    await opr._record_pr_telemetry(
+        client=client,  # type: ignore[arg-type]
+        token="tok",
+        owner="langchain-ai",
+        repo="alephat",
+        head="alephat/feature",
+        base="main",
+        pr=details,
+        resolves_thread=True,
+    )
+
+    langgraph.threads.update.assert_awaited_once()
+    assert langgraph.threads.update.await_args is not None
+    metadata = langgraph.threads.update.await_args.kwargs["metadata"]
+    assert metadata["pull_requests"] == [
+        {
+            "repo_full_name": "langchain-ai/alephat",
+            "number": 3,
+            "url": details["html_url"],
+            "title": "feat: x",
+            "state": "draft",
+            "head_ref": "alephat/feature",
+            "base_ref": "main",
+            "author": "octo",
+            "author_avatar_url": "",
+            "created_at": "",
+            "diff_stats": {"files": 0, "additions": 0, "deletions": 0},
+            "resolves_thread": True,
+            "slack_feedback": {"run_id": "run-1", "channel_id": "C1"},
+        }
+    ]
+
+
+def test_updating_pr_preserves_original_feedback_run() -> None:
+    original = {
+        "url": "https://github.com/lc/repo/pull/7",
+        "repo_full_name": "lc/repo",
+        "number": 7,
+        "slack_feedback": {"run_id": "original-run", "channel_id": "C1"},
+    }
+    updated = {
+        **original,
+        "state": "open",
+        "slack_feedback": {"run_id": "later-run", "channel_id": "C2"},
+    }
+    result = opr._upsert_pull_request([original], updated)
+    assert result[0]["slack_feedback"] == original["slack_feedback"]
+    assert result[0]["state"] == "open"

@@ -1,37 +1,49 @@
 """Tool: ``publish_review``. Post the findings list to GitHub as a PR Review."""
 
-from __future__ import annotations
-
+import logging
 from collections.abc import Mapping
 from typing import Annotated, Any
 
 from langgraph.config import get_config
 from langgraph.prebuilt import InjectedState
 
-from ..dashboard.team_settings import get_team_review_trace_links_enabled
-from ..review.diff import compute_diff_line_set, fetch_pr_diff, is_range_in_diff
-from ..review.findings import (
+from agent.dashboard.agent_usage import record_reviewer_publication
+from agent.dashboard.team_settings import get_team_review_trace_links_enabled
+from agent.github.checks import review_check_conclusion
+from agent.github.thread_token import (
+    GitHubAuthError,
+    get_github_token,
+    invalidate_cached_github_token,
+)
+from agent.review.diff import compute_diff_line_set, fetch_pr_diff, is_range_in_diff
+from agent.review.findings import (
     REVIEW_FINDING_CAP,
     REVIEWER_EVAL_PUBLICATION_KEY,
     SEVERITY_ORDER,
     Finding,
     ReviewerThreadMissingError,
     Severity,
-    _coerce_surface,
+    comment_ids_for_finding,
     filter_findings_for_publish,
     get_thread_id_from_runtime,
     get_thread_last_reviewed_sha,
     get_thread_metadata,
     get_thread_slack_ref,
+    mark_surfaced,
+    posted_resolution_comment_ids_for_finding,
     replace_findings,
     resolve_review_head_sha,
+    resolved_thread_ids_for_finding,
+    review_id_for_finding,
     set_reviewer_thread_metadata,
+    set_surface_state,
+    thread_ids_for_finding,
     thread_missing_tool_result,
 )
-from ..review.findings import (
+from agent.review.findings import (
     list_findings as list_findings_async,
 )
-from ..review.publish import (
+from agent.review.publish import (
     alephat_review_exists,
     clear_review_started_comment,
     fetch_pr_review_threads,
@@ -46,97 +58,53 @@ from ..review.publish import (
     resolve_review_thread,
     settle_review_check_run,
 )
-from ..review.reconcile import reconcile_findings_with_review_threads
-from ..utils.dashboard_links import dashboard_review_url
-from ..utils.github_checks import review_check_conclusion
-from ..utils.github_token import (
-    GitHubAuthError,
-    get_github_token,
-    invalidate_cached_github_token,
-)
-from ..utils.langsmith import get_langsmith_trace_url
-from ..utils.slack import post_slack_thread_reply
-from ..utils.tracing import REVIEW_TRACING_PROJECT
+from agent.review.reconcile import reconcile_findings_with_review_threads
+from agent.run_config import RunConfig
+from agent.slack.client import post_slack_thread_reply
+from agent.utils.dashboard_links import dashboard_review_url
+from agent.utils.langsmith import get_langsmith_trace_url
+
+logger = logging.getLogger(__name__)
+
+
+async def _record_reviewer_usage(**kwargs: Any) -> None:
+    try:
+        await record_reviewer_publication(**kwargs)
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to record reviewer usage", exc_info=True)
 
 
 async def publish_review(
-    severity_threshold: str = "medium",
+    severity_threshold: Severity = "medium",
     state: Annotated[dict[str, Any] | None, InjectedState] = None,
 ) -> dict[str, Any]:
-    """Post all current findings to the PR as a GitHub Review.
-
-    Call this once at the end of a review run, after you have finished adding
-    findings (and, on a re-review, after marking resolved findings via
-    ``update_finding``). The tool posts one GitHub PR Review for eligible
-    inline findings, records the GitHub comment/thread IDs for future
-    re-reviews, resolves GitHub threads for findings now marked resolved, and
-    advances the reviewer thread's ``last_reviewed_sha``.
-
-    On a re-review with no new findings to surface, it skips posting a new
-    GitHub Review but still resolves fixed threads and updates reviewer state.
-
-    Args:
-        severity_threshold: Lowest severity to surface as inline GitHub comments
-            (default ``medium``). Lower-severity findings stay in state and are
-            mentioned in the review summary with a link to the web app, but are
-            not posted as inline PR comments.
-    Returns:
-        Dictionary with ``success``, ``review_id``, ``surfaced_count``,
-        ``hidden_count``, ``resolved_thread_count``, and sometimes
-        ``unresolvable_findings``, plus the flags below.
-
-        ``success: true`` alone does NOT mean a GitHub Review was posted —
-        check the flags:
-
-        - ``skipped_empty_re_review: true`` (with ``review_id: null``): an
-          empty re-review was deliberately skipped. No GitHub Review was
-          created; the call was a valid no-op. Do not describe the review as
-          published/posted/submitted.
-        - ``dry_run: true`` (with ``review_id: null``): eval/benchmark mode —
-          the publish was simulated and nothing was posted to GitHub. Do not
-          claim publication.
-
-        Only a numeric ``review_id`` (with neither flag set) confirms a real
-        GitHub Review was created.
-    """
+    """Implement the `publish_review` tool."""
     if severity_threshold not in {"low", "medium", "high", "critical"}:
         return {"success": False, "error": f"Invalid severity_threshold: {severity_threshold}"}
 
     config = get_config()
-    raw_configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
-    configurable = raw_configurable if isinstance(raw_configurable, dict) else {}
-    repo_config = configurable.get("repo")
-    pr_number = configurable.get("pr_number")
-    head_sha = configurable.get("head_sha")
-    is_re_review = bool(configurable.get("re_review"))
+    cfg = RunConfig.from_config(config)
+    pr_number = cfg.pr_number
+    head_sha = cfg.head_sha
+    is_re_review = bool(cfg.re_review)
 
-    if (
-        not isinstance(repo_config, dict)
-        or not repo_config.get("owner")
-        or not repo_config.get("name")
-    ):
+    if not cfg.repo:
         return {"success": False, "error": "Missing repo info in run config"}
-    if not isinstance(pr_number, int):
+    if pr_number is None:
         return {"success": False, "error": "Missing pr_number in run config"}
-    if not isinstance(head_sha, str) or not head_sha:
+    if not head_sha:
         return {"success": False, "error": "Missing head_sha in run config"}
 
-    if _is_reviewer_eval_mode(configurable):
-        eval_threshold = configurable.get("reviewer_eval_severity_threshold")
-        if isinstance(eval_threshold, str) and eval_threshold in {
-            "low",
-            "medium",
-            "high",
-            "critical",
-        }:
-            severity_threshold = eval_threshold
-        eval_cap = configurable.get("reviewer_eval_cap")
-        if not isinstance(eval_cap, int) or isinstance(eval_cap, bool) or eval_cap < 0:
+    if cfg.is_eval:
+        if cfg.reviewer_eval_severity_threshold in {"low", "medium", "high", "critical"}:
+            severity_threshold = cfg.reviewer_eval_severity_threshold
+        eval_cap = cfg.reviewer_eval_cap
+        if eval_cap is None or eval_cap < 0:
             eval_cap = REVIEW_FINDING_CAP
         try:
             return await _publish_review_eval_dry_run_async(
                 head_sha=head_sha,
-                severity_threshold=_cast_severity(severity_threshold),
+                severity_threshold=severity_threshold,
                 cap=eval_cap,
             )
         except ReviewerThreadMissingError as exc:
@@ -148,16 +116,16 @@ async def publish_review(
 
     try:
         return await _publish_review_async(
-            owner=str(repo_config["owner"]),
-            repo=str(repo_config["name"]),
+            owner=cfg.repo.owner,
+            repo=cfg.repo.name,
             pr_number=pr_number,
             head_sha=head_sha,
             token=token,
-            severity_threshold=_cast_severity(severity_threshold),
-            cap=REVIEW_FINDING_CAP,
+            severity_threshold=severity_threshold,
+            cap=None,
             is_re_review=is_re_review,
             langgraph_run_id=_current_run_id(config),
-            trace_link_config_override=configurable.get("review_trace_link_enabled"),
+            trace_link_config_override=cfg.review_trace_link_enabled,
             state=state,
         )
     except ReviewerThreadMissingError as exc:
@@ -176,22 +144,14 @@ async def publish_review(
         }
 
 
-def _cast_severity(value: str) -> Severity:
-    return value  # type: ignore[return-value]
-
-
-async def _resolve_review_trace_url(thread_id: str, config_override: object) -> str | None:
+async def _resolve_review_trace_url(thread_id: str, config_override: bool | None) -> str | None:
     if config_override is False:
         return None
     if not await get_team_review_trace_links_enabled():
         return None
     if not thread_id:
         return None
-    return get_langsmith_trace_url(thread_id, project_name=REVIEW_TRACING_PROJECT)
-
-
-def _is_reviewer_eval_mode(configurable: dict[str, Any]) -> bool:
-    return configurable.get("reviewer_eval") is True or configurable.get("eval") is True
+    return await get_langsmith_trace_url(thread_id)
 
 
 async def _publish_review_eval_dry_run_async(
@@ -252,10 +212,10 @@ async def _publish_review_async(
     head_sha: str,
     token: str,
     severity_threshold: Severity,
-    cap: int,
+    cap: int | None,
     is_re_review: bool,
     langgraph_run_id: str | None = None,
-    trace_link_config_override: object = None,
+    trace_link_config_override: bool | None = None,
     state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     thread_id = get_thread_id_from_runtime()
@@ -263,7 +223,7 @@ async def _publish_review_async(
     # mid-run updated the live head in thread metadata. Prefer that so the
     # review anchors to (and last_reviewed_sha advances to) the commit actually
     # reviewed, not the stale one this run was created for.
-    head_sha = await resolve_review_head_sha(thread_id, {"head_sha": head_sha})
+    head_sha = await resolve_review_head_sha(thread_id, RunConfig(head_sha=head_sha))
     review_trace_url = await _resolve_review_trace_url(thread_id, trace_link_config_override)
     review_ui_url = dashboard_review_url(owner, repo, pr_number)
     findings = await _backfill_findings_from_pr_threads(
@@ -274,13 +234,11 @@ async def _publish_review_async(
         token=token,
     )
 
-    # Re-reviews only post NEW findings. Anything with a github_review_comment_id
-    # already lives on GitHub from a prior publish — reposting would create
+    # Re-reviews only post NEW findings. Anything with a recorded review comment
+    # id already lives on GitHub from a prior publish — reposting would create
     # duplicate inline comments and break the resolve-on-fix flow (only
     # whichever duplicate id we'd cache last would resolve later).
-    unpublished_findings = [
-        f for f in findings if not isinstance(f.get("github_review_comment_id"), int)
-    ]
+    unpublished_findings = [f for f in findings if not comment_ids_for_finding(f)]
     if is_re_review:
         unpublished_findings = [
             f for f in unpublished_findings if f.get("first_seen_sha") == head_sha
@@ -314,13 +272,13 @@ async def _publish_review_async(
         eligible_with_payload.append((finding, payload))
 
     # With nothing new to surface, skip the "no issues found" summary if Open
-    # Alephat has already reviewed this PR — the user already saw the previous
+    # SWE has already reviewed this PR — the user already saw the previous
     # result, and posting another summary on every push is noise. We can't rely
     # on the static re_review flag alone: a push that lands mid-run is delivered
     # as a queued message into the still-running first-review run, whose
     # configurable still says re_review=False, so that path would post a
     # duplicate "No issues found". Key off the actual PR state (an existing Open
-    # Alephat review summary) instead. Still resolve threads for findings that just
+    # SWE review summary) instead. Still resolve threads for findings that just
     # moved to resolved, and advance last_reviewed_sha so subsequent pushes
     # don't redo the same diff.
     if not inline_comments and await _alephat_already_reviewed(
@@ -339,6 +297,14 @@ async def _publish_review_async(
             findings=findings,
         )
         await set_reviewer_thread_metadata(thread_id, last_reviewed_sha=head_sha)
+        await _record_reviewer_usage(
+            thread_id=thread_id,
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            findings=await list_findings_async(thread_id),
+        )
         await clear_review_started_comment(thread_id=thread_id, owner=owner, repo=repo, token=token)
         conclusion, check_title, check_summary = review_check_conclusion(0)
         await settle_review_check_run(
@@ -525,6 +491,14 @@ async def _publish_review_async(
         )
 
     await set_reviewer_thread_metadata(thread_id, last_reviewed_sha=head_sha)
+    await _record_reviewer_usage(
+        thread_id=thread_id,
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        head_sha=head_sha,
+        findings=await list_findings_async(thread_id),
+    )
     await clear_review_started_comment(thread_id=thread_id, owner=owner, repo=repo, token=token)
     conclusion, check_title, check_summary = review_check_conclusion(len(inline_comments))
     await settle_review_check_run(
@@ -587,37 +561,7 @@ async def _alephat_already_reviewed(
 
 
 def _has_publication_identity(finding: Finding) -> bool:
-    return isinstance(finding.get("github_review_comment_id"), int) or isinstance(
-        finding.get("github_review_id"), int
-    )
-
-
-def _int_list(value: Any) -> list[int]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, int)]
-
-
-def _str_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, str) and item]
-
-
-def _comment_ids_for_finding(finding: Finding) -> list[int]:
-    comment_ids = _int_list(finding.get("github_review_comment_ids"))
-    comment_id = finding.get("github_review_comment_id")
-    if isinstance(comment_id, int) and comment_id not in comment_ids:
-        comment_ids.insert(0, comment_id)
-    return comment_ids
-
-
-def _thread_ids_for_finding(finding: Finding) -> list[str]:
-    thread_ids = _str_list(finding.get("github_review_thread_ids"))
-    thread_id = finding.get("github_review_thread_id")
-    if isinstance(thread_id, str) and thread_id and thread_id not in thread_ids:
-        thread_ids.insert(0, thread_id)
-    return thread_ids
+    return bool(comment_ids_for_finding(finding)) or review_id_for_finding(finding) is not None
 
 
 async def _backfill_findings_from_pr_threads(
@@ -652,9 +596,7 @@ def _missing_comment_ids_for_published_findings(
         if isinstance(finding.get("id"), str)
     }
     for finding in findings:
-        if finding.get("id") in finding_ids and not isinstance(
-            finding.get("github_review_comment_id"), int
-        ):
+        if finding.get("id") in finding_ids and not comment_ids_for_finding(finding):
             return True
     return False
 
@@ -667,12 +609,9 @@ def _apply_review_id(
 ) -> bool:
     updated = False
     for finding in findings:
-        if finding.get("id") in finding_ids and finding.get("github_review_id") != review_id:
+        if finding.get("id") in finding_ids and review_id_for_finding(finding) != review_id:
             finding["github_review_id"] = review_id
-            if isinstance(finding.get("id"), str):
-                surface = _coerce_surface(finding, str(finding["id"]))
-                surface["github_review_id"] = review_id
-                finding["surface"] = surface
+            mark_surfaced(finding)
             updated = True
     return updated
 
@@ -691,19 +630,11 @@ def _apply_comment_ids(
         comment_id = comment_id_by_finding_id.get(finding_id)
         if comment_id is None:
             continue
-        finding["github_review_comment_id"] = comment_id
-        comment_ids = _int_list(finding.get("github_review_comment_ids"))
+        comment_ids = comment_ids_for_finding(finding)
         if comment_id not in comment_ids:
             comment_ids.append(comment_id)
             finding["github_review_comment_ids"] = comment_ids
-        surface = _coerce_surface(finding, finding_id)
-        surface["state"] = "surfaced"
-        surface["github_review_comment_id"] = comment_id
-        surface["severity_threshold_at_publish"] = finding.get("severity")
-        surface["surfaced_at_sha"] = finding.get("last_confirmed_sha") or finding.get(
-            "first_seen_sha"
-        )
-        finding["surface"] = surface
+        mark_surfaced(finding)
         if langgraph_run_id:
             finding["github_review_run_id"] = langgraph_run_id
         updated = True
@@ -804,10 +735,8 @@ async def _resolve_diff_line_set(
         state_cached = state.get("diff_line_set")
         if isinstance(state_cached, dict):
             return state_cached
-    config = get_config()
-    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
-    cached = configurable.get("diff_line_set") if isinstance(configurable, dict) else None
-    if isinstance(cached, dict):
+    cached = RunConfig.from_runtime().diff_line_set
+    if cached is not None:
         return cached
 
     diff_text = await fetch_pr_diff(owner=owner, repo=repo, pr_number=pr_number, token=token)
@@ -898,7 +827,7 @@ async def _maybe_post_slack_completion_reply(
         review_url = f"{review_url}#pullrequestreview-{review_id}"
     text = f"{headline} <{review_url}|View review>"
 
-    await post_slack_thread_reply(channel_id, thread_ts, text)
+    await post_slack_thread_reply(channel_id, thread_ts, text, agent_thread_id=thread_id)
 
 
 async def _store_thread_ids_on_findings(
@@ -913,8 +842,8 @@ async def _store_thread_ids_on_findings(
     comment_ids_by_finding_id: dict[str, list[int]] = {}
     for finding in findings:
         finding_id = finding.get("id")
-        comment_ids = _comment_ids_for_finding(finding)
-        if isinstance(finding_id, str) and comment_ids and not _thread_ids_for_finding(finding):
+        comment_ids = comment_ids_for_finding(finding)
+        if isinstance(finding_id, str) and comment_ids and not thread_ids_for_finding(finding):
             comment_ids_by_finding_id[finding_id] = comment_ids
     if not comment_ids_by_finding_id:
         return
@@ -942,22 +871,14 @@ async def _store_thread_ids_on_findings(
         finding_id = finding.get("id")
         if not isinstance(finding_id, str):
             continue
-        thread_ids = _thread_ids_for_finding(finding)
+        thread_ids = thread_ids_for_finding(finding)
         for comment_id in comment_ids_by_finding_id.get(finding_id, []):
             github_thread_id = thread_id_by_comment_id.get(comment_id)
-            if not github_thread_id:
+            if not github_thread_id or github_thread_id in thread_ids:
                 continue
-            if not isinstance(finding.get("github_review_thread_id"), str):
-                finding["github_review_thread_id"] = github_thread_id
-                updated = True
-            if github_thread_id not in thread_ids:
-                thread_ids.append(github_thread_id)
-                finding["github_review_thread_ids"] = thread_ids
-                updated = True
-            surface = _coerce_surface(finding, finding_id)
-            surface["state"] = "surfaced"
-            surface["github_review_thread_id"] = github_thread_id
-            finding["surface"] = surface
+            thread_ids.append(github_thread_id)
+            finding["github_review_thread_ids"] = thread_ids
+            mark_surfaced(finding)
             updated = True
 
     if updated:
@@ -985,8 +906,8 @@ async def _resolve_threads_for_resolved_findings(
         if status not in {"resolved", "dismissed"}:
             continue
 
-        thread_node_ids = _thread_ids_for_finding(finding)
-        comment_ids = _comment_ids_for_finding(finding)
+        thread_node_ids = thread_ids_for_finding(finding)
+        comment_ids = comment_ids_for_finding(finding)
 
         for comment_id in comment_ids:
             thread_node_id = await fetch_review_thread_id_for_comment(
@@ -1002,10 +923,8 @@ async def _resolve_threads_for_resolved_findings(
         if not thread_node_ids:
             continue
 
-        resolved_thread_ids = _str_list(finding.get("github_resolved_thread_ids"))
-        posted_resolution_comment_ids = _int_list(
-            finding.get("github_posted_resolution_comment_ids")
-        )
+        resolved_thread_ids = resolved_thread_ids_for_finding(finding)
+        posted_resolution_comment_ids = posted_resolution_comment_ids_for_finding(finding)
 
         for idx, thread_node_id in enumerate(thread_node_ids):
             if thread_node_id in resolved_thread_ids:
@@ -1040,20 +959,11 @@ async def _resolve_threads_for_resolved_findings(
             finding["github_resolved_thread_ids"] = resolved_thread_ids
         if posted_resolution_comment_ids:
             finding["github_posted_resolution_comment_ids"] = posted_resolution_comment_ids
-        if thread_node_ids:
-            finding["github_review_thread_ids"] = thread_node_ids
-            if not isinstance(finding.get("github_review_thread_id"), str):
-                finding["github_review_thread_id"] = thread_node_ids[0]
-        if thread_node_ids and all(
-            thread_id in resolved_thread_ids for thread_id in thread_node_ids
-        ):
-            finding["github_thread_resolved"] = True
-            if isinstance(finding.get("id"), str):
-                surface = _coerce_surface(finding, str(finding["id"]))
-                surface["state"] = "resolved"
-                if thread_node_ids:
-                    surface["github_review_thread_id"] = thread_node_ids[0]
-                finding["surface"] = surface
+        finding["github_review_thread_ids"] = thread_node_ids
+        if all(thread_id in resolved_thread_ids for thread_id in thread_node_ids):
+            set_surface_state(finding, "resolved")
+        else:
+            mark_surfaced(finding)
 
     if mutated:
         thread_id = get_thread_id_from_runtime()
@@ -1063,10 +973,7 @@ async def _resolve_threads_for_resolved_findings(
 
 
 def _current_run_id(config: Mapping[str, Any]) -> str | None:
-    candidates = [config.get("run_id")]
-    configurable = config.get("configurable")
-    if isinstance(configurable, dict):
-        candidates.append(configurable.get("run_id"))
+    candidates = [config.get("run_id"), RunConfig.from_config(config).run_id]
     for candidate in candidates:
         if isinstance(candidate, str) and candidate:
             return candidate

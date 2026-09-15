@@ -1,13 +1,11 @@
 """FastAPI dashboard compatibility router."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -69,7 +67,7 @@ def _submitted_message_id(message: Any) -> uuid.UUID | None:
         return None
     try:
         return uuid.UUID(str(message.get("id")))
-    except (TypeError, ValueError, AttributeError):
+    except TypeError, ValueError, AttributeError:
         return None
 
 
@@ -86,7 +84,7 @@ def _command_configurable(params: Any) -> dict[str, Any]:
 async def _fetch_installed_github_repositories() -> tuple[
     list[dict[str, Any]], list[dict[str, Any]]
 ]:
-    from agent.utils.github_app import (
+    from agent.github.app import (
         GITHUB_APP_INSTALLATION_ID,
         get_github_app_installation_token,
     )
@@ -171,6 +169,7 @@ async def _get_task_by_id_or_thread_id(
 
 class DashboardMessageRequest(BaseModel):
     content: str
+    client_message_id: uuid.UUID | None = None
 
 
 class DashboardProfileUpdate(BaseModel):
@@ -517,7 +516,7 @@ async def create_agent_instructions(
     full_name = _normalize_repo_full_name(body.full_name)
     org = await _get_or_create_org_settings(db, auth.org_id)
     records = _agent_instruction_records(org)
-    if full_name not in records:
+    if org is None or full_name not in records:
         records[full_name] = _instruction_record(full_name, created_by=str(auth.user_id))
         values = dict(org.settings or {})
         values["agent_instructions"] = records
@@ -575,7 +574,7 @@ async def delete_agent_instructions(
     full_name = _normalize_repo_full_name(full_name)
     org = await db.get(OrgSettings, auth.org_id)
     records = _agent_instruction_records(org)
-    if full_name not in records:
+    if org is None or full_name not in records:
         raise HTTPException(status_code=404, detail="agent instructions not found")
     del records[full_name]
     values = dict(org.settings or {})
@@ -659,7 +658,7 @@ async def get_agent_usage_leaderboard(
         deletions += int(meta.get("deletions") or 0)
         prs_opened += int(bool(meta.get("pr_url")))
         merged_prs += int(bool(meta.get("pr_merged")))
-    favorite_model = max(model_counts, key=model_counts.get) if model_counts else ""
+    favorite_model = max(model_counts, key=model_counts.__getitem__) if model_counts else ""
     rows = []
     if tasks and limit > 0:
         rows.append(
@@ -963,6 +962,7 @@ def task_to_agent_thread(
     )
     return {
         "id": task.thread_id or str(task.task_id),
+        "backend": "platform",
         "title": task.title or f"Task on {task.repo or 'repository'}",
         "repo": task.repo.split("/")[-1] if task.repo else "",
         "repoFullName": task.repo or "",
@@ -1005,29 +1005,127 @@ async def get_sidebar_threads(
     }
 
 
+async def _dashboard_tasks(db: AsyncSession, auth: AuthContext) -> list[Task]:
+    result = await db.execute(select(Task).where(Task.org_id == auth.org_id))
+    return list(result.scalars().all())
+
+
+def _is_automation(task: Task) -> bool:
+    return task.source == "schedule" or bool((task.metadata_ or {}).get("schedule_id"))
+
+
+@router.get("/threads/projects")
+async def get_thread_projects(
+    include_resolved: bool = False,
+    include_automations: bool = False,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> list[dict[str, str | int]]:
+    projects: dict[str, dict[str, str | int]] = {}
+    tasks = sorted(await _dashboard_tasks(db, auth), key=lambda task: task.updated_at, reverse=True)
+    for task in tasks:
+        if not task.repo or (not include_resolved and (task.metadata_ or {}).get("resolved")):
+            continue
+        if not include_automations and _is_automation(task):
+            continue
+        projects.setdefault(
+            task.repo.casefold(),
+            {
+                "repoFullName": task.repo,
+                "name": task.repo.split("/")[-1],
+                "updatedAt": int(task.updated_at.replace(tzinfo=UTC).timestamp() * 1000),
+            },
+        )
+    return list(projects.values())
+
+
+@router.get("/threads/pinned")
+async def get_pinned_threads(
+    db: AsyncSession = Depends(get_db), auth: AuthContext = Depends(get_auth)
+) -> list[dict[str, object]]:
+    tasks = sorted(await _dashboard_tasks(db, auth), key=lambda task: task.updated_at, reverse=True)
+    return [
+        task_to_agent_thread(task)
+        for task in tasks
+        if str(auth.user_id) in (task.metadata_ or {}).get("pinned_by", [])
+    ]
+
+
 @router.get("/threads/page")
 async def get_threads_page(
     limit: int = 50,
     offset: int = 0,
+    resolved: bool | None = None,
+    viewed: bool | None = None,
+    source: str | None = None,
+    status: str | None = None,
+    q: str | None = None,
+    scope: Literal["all", "interactive", "automation"] = "all",
+    automation_id: str | None = None,
+    repo: str | None = None,
+    ownerless: bool = False,
+    sort_by: Literal["created_at", "updated_at"] = "updated_at",
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
-) -> dict[str, Any]:
-    result = await db.execute(
-        select(Task)
-        .where(Task.org_id == auth.org_id)
-        .order_by(Task.updated_at.desc())
-        .offset(offset)
-        .limit(limit)
+) -> dict[str, object]:
+    if limit < 1 or limit > 100 or offset < 0:
+        raise HTTPException(422, "limit must be between 1 and 100 and offset must be nonnegative")
+    tasks = sorted(
+        await _dashboard_tasks(db, auth),
+        key=lambda task: task.created_at if sort_by == "created_at" else task.updated_at,
+        reverse=True,
     )
-    tasks = list(result.scalars().all())
-    items = [task_to_agent_thread(t) for t in tasks]
+    items: list[dict[str, object]] = []
+    for task in tasks:
+        if repo is not None and (task.repo or "").casefold() != repo.casefold():
+            continue
+        if ownerless and task.repo:
+            continue
+        if scope != "all" and _is_automation(task) != (scope == "automation"):
+            continue
+        if automation_id and (task.metadata_ or {}).get("schedule_id") != automation_id:
+            continue
+        thread = task_to_agent_thread(task)
+        if resolved is not None and thread["resolved"] != resolved:
+            continue
+        if viewed is not None and thread["viewed"] != viewed:
+            continue
+        if source and thread["source"] != source:
+            continue
+        if status and thread["status"] != status:
+            continue
+        if q and q.casefold() not in f"{task.title or ''} {task.repo or ''}".casefold():
+            continue
+        items.append(thread)
     return {
-        "items": items,
+        "items": items[offset : offset + limit],
         "total": len(items),
         "limit": limit,
         "offset": offset,
-        "hasMore": False,
+        "hasMore": offset + limit < len(items),
     }
+
+
+@router.post("/threads/{thread_id}/pin", status_code=204)
+@router.delete("/threads/{thread_id}/pin", status_code=204)
+async def set_thread_pin(
+    thread_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> Response:
+    task = await _get_task_by_id_or_thread_id(db, auth.org_id, thread_id, for_update=True)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    metadata = dict(task.metadata_ or {})
+    pinned_by = set(metadata.get("pinned_by", []))
+    if request.method == "POST":
+        pinned_by.add(str(auth.user_id))
+    else:
+        pinned_by.discard(str(auth.user_id))
+    task.metadata_ = {**metadata, "pinned_by": sorted(pinned_by)}
+    await db.commit()
+    return Response(status_code=204)
 
 
 @router.get("/threads/{thread_id}")
@@ -1253,7 +1351,13 @@ async def post_thread_message(
         task.cancel_reason = None
         task.updated_at = datetime.now(UTC)
 
-    await add_message(db, task_id=task.task_id, content=body.content, kind="user_guidance")
+    await add_message(
+        db,
+        task_id=task.task_id,
+        content=body.content,
+        kind="user_guidance",
+        message_id=body.client_message_id,
+    )
     if should_enqueue:
         await enqueue_task_work(
             db,

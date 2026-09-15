@@ -80,6 +80,18 @@ spec:
                   name: alephat-secrets
                   key: PLATFORM_JWT_SECRET
                   optional: true
+            - name: ALLOWED_GITHUB_USERS
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-oauth
+                  key: ALLOWED_GITHUB_USERS
+                  optional: true
+            - name: ALLOWED_GITHUB_ORGS
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-oauth
+                  key: ALLOWED_GITHUB_ORGS
+                  optional: true
             - name: GITHUB_APP_CLIENT_ID
               valueFrom:
                 secretKeyRef:

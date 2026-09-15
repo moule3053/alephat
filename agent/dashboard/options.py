@@ -1,11 +1,11 @@
 """Supported models and reasoning efforts surfaced in the profile editor."""
 
-from __future__ import annotations
-
 from collections.abc import Callable, Mapping, Sequence
 from functools import cache, lru_cache
 from importlib import import_module
 from typing import NotRequired, TypedDict, cast
+
+from agent.config import ENV
 
 
 class ModelOption(TypedDict):
@@ -14,6 +14,7 @@ class ModelOption(TypedDict):
     efforts: list[str]
     default_effort: str
     supports_images: bool
+    can_be_default: NotRequired[bool]
     context_window: NotRequired[int | None]
 
 
@@ -26,13 +27,6 @@ SUPPORTED_MODELS: list[ModelOption] = [
         "supports_images": True,
     },
     {
-        "id": "anthropic:claude-opus-4-8",
-        "label": "Opus 4.8",
-        "efforts": ["low", "medium", "high", "xhigh", "max"],
-        "default_effort": "high",
-        "supports_images": True,
-    },
-    {
         "id": "anthropic:claude-sonnet-5",
         "label": "Sonnet 5",
         "efforts": ["low", "medium", "high", "xhigh", "max"],
@@ -40,16 +34,26 @@ SUPPORTED_MODELS: list[ModelOption] = [
         "supports_images": True,
     },
     {
-        "id": "anthropic:claude-fable-5",
-        "label": "Fable 5",
+        "id": "anthropic:claude-fable-5-1",
+        "label": "Fable 5.1",
         "efforts": ["low", "medium", "high", "xhigh", "max"],
         "default_effort": "high",
         "supports_images": True,
+        "can_be_default": False,
     },
     {
-        "id": "openai:gpt-5.5",
-        "label": "GPT-5.5",
-        "efforts": ["none", "low", "medium", "high", "xhigh"],
+        "id": "anthropic:claude-haiku-4-5",
+        "label": "Haiku 4.5",
+        # Haiku 4.5 predates the adaptive-thinking/effort params the other
+        # Claude entries rely on, so it is offered without reasoning.
+        "efforts": ["none"],
+        "default_effort": "none",
+        "supports_images": True,
+    },
+    {
+        "id": "openai:gpt-6-astra",
+        "label": "GPT-6 Astra",
+        "efforts": ["low", "medium", "high", "xhigh", "max"],
         "default_effort": "xhigh",
         "supports_images": True,
     },
@@ -70,21 +74,22 @@ SUPPORTED_MODELS: list[ModelOption] = [
     {
         "id": "openai:gpt-5.6-luna",
         "label": "GPT-5.6 Luna",
-        "efforts": ["none", "low", "medium", "high", "xhigh"],
+        "efforts": ["none", "low", "medium", "high", "xhigh", "max"],
         "default_effort": "xhigh",
         "supports_images": True,
     },
     {
-        "id": "google_genai:gemini-3.5-flash",
-        "label": "Gemini 3.5 Flash",
+        "id": "google_genai:gemini-3.8-flash",
+        "label": "Gemini 3.8 Flash",
         "efforts": ["minimal", "low", "medium", "high"],
         "default_effort": "medium",
         "supports_images": True,
     },
     {
-        "id": "fireworks:accounts/fireworks/models/kimi-k2p7-code",
-        "label": "Kimi K2.7",
-        "efforts": ["low", "medium", "high"],
+        "id": "fireworks:accounts/fireworks/models/kimi-k3",
+        "label": "Kimi K3",
+        # K3 always reasons and only accepts low/high/max — "medium" is rejected.
+        "efforts": ["low", "high", "max"],
         "default_effort": "high",
         "supports_images": False,
     },
@@ -96,11 +101,18 @@ SUPPORTED_MODELS: list[ModelOption] = [
         "supports_images": False,
     },
     {
-        "id": "fireworks:accounts/fireworks/models/glm-5p2",
-        "label": "GLM 5.2",
+        "id": "fireworks:accounts/fireworks/models/glm-5p3",
+        "label": "GLM 5.3",
         "efforts": ["none", "high", "max"],
         "default_effort": "high",
         "supports_images": False,
+    },
+    {
+        "id": "fireworks:accounts/fireworks/models/glm-5p3-flash",
+        "label": "GLM-5.3 Flash",
+        "efforts": ["low", "high", "max"],
+        "default_effort": "high",
+        "supports_images": True,
     },
 ]
 
@@ -109,17 +121,46 @@ SUPPORTED_MODEL_IDS: frozenset[str] = frozenset(m["id"] for m in SUPPORTED_MODEL
 FABLE_MODEL_IDS: frozenset[str] = frozenset(
     m["id"] for m in SUPPORTED_MODELS if m["id"].startswith("anthropic:claude-fable")
 )
+NON_DEFAULT_MODEL_IDS: frozenset[str] = frozenset(
+    m["id"] for m in SUPPORTED_MODELS if not m.get("can_be_default", True)
+)
+
+DEPRECATED_MODEL_IDS: frozenset[str] = frozenset(
+    {
+        "anthropic:claude-opus-4-8",
+        "anthropic:claude-fable-5",
+        "openai:gpt-5.5",
+        "google_genai:gemini-3.5-flash",
+        "google_genai:gemini-3.6-flash",
+        "google_genai:gemini-3.7-flash",
+        "fireworks:accounts/fireworks/models/kimi-k2p7-code",
+        "fireworks:accounts/fireworks/models/kimi-k3-code",
+        "fireworks:accounts/fireworks/models/glm-5p2",
+    }
+)
+
+DEPRECATED_MODEL_REPLACEMENTS: dict[str, str] = dict.fromkeys(DEPRECATED_MODEL_IDS, "")
 
 ProfileLoader = Callable[[str], Mapping[str, object]]
 
 # LangChain partner packages expose ``_get_default_model_profile`` — the same
-# accessor that populates ``ChatModel.profile`` from bundled models.dev data —
-# so context windows come from LangChain profiles instead of hardcoded numbers.
+# accessor that populates ``ChatModel.profile`` from bundled models.dev data.
 _PROFILE_LOADER_MODULES: dict[str, str] = {
     "anthropic": "langchain_anthropic.chat_models",
     "fireworks": "langchain_fireworks.chat_models",
     "google_genai": "langchain_google_genai.chat_models",
     "openai": "langchain_openai.chat_models.base",
+}
+CODEX_CONTEXT_WINDOW_OVERRIDES: dict[str, int] = {
+    "openai:gpt-6-astra": 272_000,
+    "openai:gpt-5.6-sol": 272_000,
+    "openai:gpt-5.6-terra": 272_000,
+    "openai:gpt-5.6-luna": 272_000,
+}
+_PROFILE_CONTEXT_WINDOW_FALLBACKS: dict[str, int] = {
+    "fireworks:accounts/fireworks/models/kimi-k3": 1_048_576,
+    "fireworks:accounts/fireworks/models/glm-5p3": 1_048_576,
+    "fireworks:accounts/fireworks/models/glm-5p3-flash": 1_048_576,
 }
 
 
@@ -138,19 +179,32 @@ def _profile_loader(provider: str) -> ProfileLoader | None:
     return cast(ProfileLoader, loader)
 
 
+def model_profile_with_context_override(model_id: str) -> dict[str, object] | None:
+    context_window = CODEX_CONTEXT_WINDOW_OVERRIDES.get(model_id)
+    if context_window is None:
+        return None
+    provider, _, model_name = model_id.partition(":")
+    loader = _profile_loader(provider)
+    profile = dict(loader(model_name)) if loader is not None else {}
+    profile["max_input_tokens"] = context_window
+    return profile
+
+
 @lru_cache(maxsize=512)
 def model_profile_context_window(model_id: str) -> int | None:
+    context_window = CODEX_CONTEXT_WINDOW_OVERRIDES.get(model_id)
+    if context_window is not None:
+        return context_window
     provider, _, model_name = model_id.partition(":")
     if not provider or not model_name:
         return None
     loader = _profile_loader(provider)
-    if loader is None:
-        return None
-    profile = loader(model_name)
-    context_window = profile.get("max_input_tokens")
-    if isinstance(context_window, int) and context_window > 0:
-        return context_window
-    return None
+    if loader is not None:
+        profile = loader(model_name)
+        context_window = profile.get("max_input_tokens")
+        if isinstance(context_window, int) and context_window > 0:
+            return context_window
+    return _PROFILE_CONTEXT_WINDOW_FALLBACKS.get(model_id)
 
 
 def models_with_profile_context_windows(models: Sequence[ModelOption]) -> list[ModelOption]:
@@ -163,6 +217,8 @@ def models_with_profile_context_windows(models: Sequence[ModelOption]) -> list[M
             "default_effort": model["default_effort"],
             "supports_images": model["supports_images"],
         }
+        if "can_be_default" in model:
+            option["can_be_default"] = model["can_be_default"]
         context_window = model_profile_context_window(model["id"])
         if context_window is not None:
             option["context_window"] = context_window
@@ -192,7 +248,11 @@ def gate_fable_model(
     return model_id, effort
 
 
-DEFAULT_MODEL_ID: str = "openai:gpt-5.5"
+DEFAULT_MODEL_ID: str = (
+    "anthropic:claude-opus-5"
+    if ENV.ANTHROPIC_API_KEY.optional() and not ENV.OPENAI_API_KEY.optional()
+    else "openai:gpt-5.6-sol"
+)
 DEFAULT_MODEL_EFFORT: str = "medium"
 
 
@@ -239,6 +299,25 @@ def _fallback_effort_for(model: ModelOption, effort: object) -> str | None:
     return None
 
 
+def is_deprecated_model(model_id: object) -> bool:
+    return isinstance(model_id, str) and model_id in DEPRECATED_MODEL_IDS
+
+
+def canonical_model_pair(model_id: object, effort: object = None) -> tuple[str, str] | None:
+    return None
+
+
+def normalize_model_choice(model_id: object, effort: object) -> tuple[str | None, str | None]:
+    if (
+        not isinstance(model_id, str)
+        or model_id not in SUPPORTED_MODEL_IDS
+        or not isinstance(effort, str)
+        or not model_supports_effort(model_id, effort)
+    ):
+        return None, None
+    return model_id, effort
+
+
 def provider_fallback_pair(model_id: object, effort: object = None) -> tuple[str, str] | None:
     """Newest supported ``(model_id, effort)`` for the same provider/family.
 
@@ -248,8 +327,10 @@ def provider_fallback_pair(model_id: object, effort: object = None) -> tuple[str
     cross-provider global default. Preserves ``effort`` when the fallback model
     supports it, otherwise uses that model's default effort. Returns ``None`` when
     no supported model shares the provider.
+
+    Explicitly deprecated ids inherit the team default instead.
     """
-    if not isinstance(model_id, str):
+    if not isinstance(model_id, str) or model_id in DEPRECATED_MODEL_IDS:
         return None
     provider = _provider_of(model_id)
     if provider is None:
@@ -266,13 +347,20 @@ def provider_fallback_pair(model_id: object, effort: object = None) -> tuple[str
 
 
 def default_model_pair() -> tuple[str, str]:
-    """Hardcoded fallback (model_id, reasoning_effort) used when no team default is set."""
-    if DEFAULT_MODEL_ID in SUPPORTED_MODEL_IDS and model_supports_effort(
-        DEFAULT_MODEL_ID, DEFAULT_MODEL_EFFORT
-    ):
-        return DEFAULT_MODEL_ID, DEFAULT_MODEL_EFFORT
-    first = SUPPORTED_MODELS[0]
-    return first["id"], first["default_effort"]
+    """Deployment fallback used when no team default is set."""
+    model_id = ENV.LLM_MODEL_ID.get(DEFAULT_MODEL_ID)
+    effort = ENV.LLM_REASONING_EFFORT.get()
+    for model in SUPPORTED_MODELS:
+        if model["id"] == model_id and model.get("can_be_default", True):
+            effort = (
+                effort
+                or _fallback_effort_for(model, DEFAULT_MODEL_EFFORT)
+                or model["default_effort"]
+            )
+            if effort not in model["efforts"]:
+                raise ValueError(f"Unsupported LLM_REASONING_EFFORT {effort!r} for {model_id!r}")
+            return model_id, effort
+    raise ValueError(f"Unsupported default LLM_MODEL_ID: {model_id!r}")
 
 
 def default_vision_model_pair() -> tuple[str, str]:

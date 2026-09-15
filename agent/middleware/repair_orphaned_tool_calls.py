@@ -13,16 +13,15 @@ This middleware scans the outgoing message list and inserts a synthetic error
 and can retry instead of dying.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, ToolMessage
+
+from agent.middleware.trace import AlephatMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +94,7 @@ def _repair_messages(messages: list[Any]) -> list[Any] | None:
     return repaired
 
 
-class RepairOrphanedToolCallsMiddleware(AgentMiddleware):
+class RepairOrphanedToolCallsMiddleware(AlephatMiddleware):
     """Insert synthetic tool results for interrupted tool calls before model calls."""
 
     async def awrap_model_call(

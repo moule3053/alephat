@@ -1,4 +1,4 @@
-import { useMemo } from "react"
+import { useMemo, useSyncExternalStore } from "react"
 import { preloadHighlighter } from "@pierre/diffs"
 import type {
   VirtualFileMetrics,
@@ -8,6 +8,61 @@ import type {
 import { useResolvedTheme } from "@/lib/theme"
 
 export type DiffStyle = "unified" | "split"
+export type DiffOverflow = "scroll" | "wrap"
+
+const DIFF_OVERFLOW_STORAGE_KEY = "alephat.diff.overflow"
+const diffOverflowListeners = new Set<() => void>()
+let storageListenerAttached = false
+
+export function readStoredDiffOverflow(): DiffOverflow {
+  if (typeof window === "undefined") return "scroll"
+  return window.localStorage.getItem(DIFF_OVERFLOW_STORAGE_KEY) === "wrap"
+    ? "wrap"
+    : "scroll"
+}
+
+function subscribeToDiffOverflow(listener: () => void): () => void {
+  diffOverflowListeners.add(listener)
+  if (typeof window !== "undefined" && !storageListenerAttached) {
+    window.addEventListener("storage", handleDiffOverflowStorage)
+    storageListenerAttached = true
+  }
+  return () => {
+    diffOverflowListeners.delete(listener)
+    if (
+      typeof window !== "undefined" &&
+      storageListenerAttached &&
+      diffOverflowListeners.size === 0
+    ) {
+      window.removeEventListener("storage", handleDiffOverflowStorage)
+      storageListenerAttached = false
+    }
+  }
+}
+
+function handleDiffOverflowStorage(event: StorageEvent): void {
+  if (event.key !== DIFF_OVERFLOW_STORAGE_KEY) return
+  diffOverflowListeners.forEach((listener) => listener())
+}
+
+export function writeStoredDiffOverflow(overflow: DiffOverflow): void {
+  if (typeof window === "undefined") return
+  if (readStoredDiffOverflow() === overflow) return
+  window.localStorage.setItem(DIFF_OVERFLOW_STORAGE_KEY, overflow)
+  diffOverflowListeners.forEach((listener) => listener())
+}
+
+export function useDiffOverflow(): [
+  DiffOverflow,
+  (next: DiffOverflow) => void,
+] {
+  const overflow = useSyncExternalStore(
+    subscribeToDiffOverflow,
+    readStoredDiffOverflow,
+    (): DiffOverflow => "scroll"
+  )
+  return [overflow, writeStoredDiffOverflow]
+}
 
 export const DIFF_UNSAFE_CSS = `
 [data-diffs-header],
@@ -15,52 +70,53 @@ export const DIFF_UNSAFE_CSS = `
 [data-file],
 [data-error-wrapper],
 [data-virtualizer-buffer] {
-  --diffs-bg: var(--ui-panel) !important;
-  --diffs-light-bg: var(--ui-panel) !important;
-  --diffs-dark-bg: var(--ui-panel) !important;
+  --diffs-surface: var(--panel-diff-bg, var(--card));
+  --diffs-bg: var(--diffs-surface) !important;
+  --diffs-light-bg: var(--diffs-surface) !important;
+  --diffs-dark-bg: var(--diffs-surface) !important;
   --diffs-token-light-bg: transparent;
   --diffs-token-dark-bg: transparent;
 
-  --diffs-bg-context-override: var(--ui-panel);
-  --diffs-bg-hover-override: var(--ui-panel-2);
-  --diffs-bg-separator-override: var(--ui-accent-bubble);
-  --diffs-bg-buffer-override: var(--ui-bg);
+  --diffs-bg-context-override: var(--diffs-surface);
+  --diffs-bg-hover-override: var(--accent);
+  --diffs-bg-separator-override: var(--accent);
+  --diffs-bg-buffer-override: var(--diffs-surface);
 
-  --diffs-bg-addition-override: color-mix(in srgb, var(--ui-panel) 80%, #22c55e);
-  --diffs-bg-addition-number-override: color-mix(in srgb, var(--ui-panel) 75%, #22c55e);
-  --diffs-bg-addition-hover-override: color-mix(in srgb, var(--ui-panel) 70%, #22c55e);
-  --diffs-bg-addition-emphasis-override: color-mix(in srgb, var(--ui-panel) 60%, #22c55e);
+  --diffs-bg-addition-override: color-mix(in srgb, var(--diffs-surface) 80%, #22c55e);
+  --diffs-bg-addition-number-override: color-mix(in srgb, var(--diffs-surface) 75%, #22c55e);
+  --diffs-bg-addition-hover-override: color-mix(in srgb, var(--diffs-surface) 70%, #22c55e);
+  --diffs-bg-addition-emphasis-override: color-mix(in srgb, var(--diffs-surface) 60%, #22c55e);
 
-  --diffs-bg-deletion-override: color-mix(in srgb, var(--ui-panel) 80%, #ef4444);
-  --diffs-bg-deletion-number-override: color-mix(in srgb, var(--ui-panel) 75%, #ef4444);
-  --diffs-bg-deletion-hover-override: color-mix(in srgb, var(--ui-panel) 70%, #ef4444);
-  --diffs-bg-deletion-emphasis-override: color-mix(in srgb, var(--ui-panel) 60%, #ef4444);
+  --diffs-bg-deletion-override: color-mix(in srgb, var(--diffs-surface) 80%, #ef4444);
+  --diffs-bg-deletion-number-override: color-mix(in srgb, var(--diffs-surface) 75%, #ef4444);
+  --diffs-bg-deletion-hover-override: color-mix(in srgb, var(--diffs-surface) 70%, #ef4444);
+  --diffs-bg-deletion-emphasis-override: color-mix(in srgb, var(--diffs-surface) 60%, #ef4444);
 
-  --diffs-fg-number-override: var(--ui-text-dim);
+  --diffs-fg-number-override: var(--muted-foreground);
   --diffs-font-size: 12px;
   --diffs-line-height: 1.5;
   --diffs-font-family: "SF Mono", "Fira Code", "Cascadia Code", Menlo, Monaco, monospace;
 
-  background-color: var(--ui-panel) !important;
+  background-color: var(--diffs-surface) !important;
 }
 
 [data-file-info] {
-  background-color: var(--ui-accent-bubble) !important;
-  border-block-color: var(--ui-border) !important;
-  color: var(--ui-text) !important;
+  background-color: var(--accent) !important;
+  border-block-color: var(--border) !important;
+  color: var(--foreground) !important;
 }
 
 [data-diffs-header] {
   position: sticky !important;
   top: 0;
   z-index: 4;
-  background-color: var(--ui-accent-bubble) !important;
-  border-bottom: 1px solid var(--ui-border) !important;
+  background-color: var(--accent) !important;
+  border-bottom: 1px solid var(--border) !important;
 }
 
 [data-separator] {
-  background-color: var(--ui-accent-bubble) !important;
-  color: var(--ui-text-dim) !important;
+  background-color: var(--accent) !important;
+  color: var(--muted-foreground) !important;
 }
 
 /* A selected line propagates [data-selected-line] onto its annotation row and
@@ -68,14 +124,11 @@ export const DIFF_UNSAFE_CSS = `
    Keep the code line highlighted, but hold the annotation row at the panel bg. */
 [data-line-annotation][data-selected-line],
 [data-gutter-buffer="annotation"][data-selected-line] {
-  --diffs-line-bg: var(--ui-panel) !important;
+  --diffs-line-bg: var(--diffs-surface, var(--card)) !important;
 }
+`
 
-/* Pin every code row to one exact, uniform height (kept in sync with
-   DIFF_VIRTUAL_METRICS.lineHeight below). In scroll mode code never wraps, so a
-   hard height won't clip content — it just makes the virtualizer's per-line
-   estimate match measured layout, so scroll-to lands precisely instead of
-   over/under-shooting as off-estimate rows reconcile while scrolling. */
+export const DIFF_FIXED_LINE_HEIGHT_CSS = `
 [data-line] {
   height: 18px !important;
   min-height: 18px !important;
@@ -90,7 +143,7 @@ export const diffOptions = {
   diffStyle: "unified" as const,
   overflow: "scroll" as const,
   disableFileHeader: true,
-  unsafeCSS: DIFF_UNSAFE_CSS,
+  unsafeCSS: `${DIFF_UNSAFE_CSS}${DIFF_FIXED_LINE_HEIGHT_CSS}`,
   collapsedContextThreshold: 4,
   lineDiffType: "word-alt" as const,
   maxLineDiffLength: 800,
@@ -98,12 +151,35 @@ export const diffOptions = {
   tokenizeMaxLength: 120_000,
 }
 
+export function buildDiffOptions(
+  diffStyle: DiffStyle,
+  overflow: DiffOverflow,
+  themeType: "light" | "dark"
+) {
+  return {
+    ...diffOptions,
+    themeType,
+    diffStyle,
+    overflow,
+    unsafeCSS:
+      overflow === "scroll"
+        ? `${DIFF_UNSAFE_CSS}${DIFF_FIXED_LINE_HEIGHT_CSS}`
+        : DIFF_UNSAFE_CSS,
+  }
+}
+
 export function useDiffOptions(diffStyle: DiffStyle = "unified") {
   const resolvedTheme = useResolvedTheme()
+  const [overflow] = useDiffOverflow()
   return useMemo(
-    () => ({ ...diffOptions, themeType: resolvedTheme, diffStyle }),
-    [resolvedTheme, diffStyle]
+    () => buildDiffOptions(diffStyle, overflow, resolvedTheme),
+    [resolvedTheme, diffStyle, overflow]
   )
+}
+
+export function useDiffWrap(): [boolean, (wrap: boolean) => void] {
+  const [overflow, setOverflow] = useDiffOverflow()
+  return [overflow === "wrap", (wrap) => setOverflow(wrap ? "wrap" : "scroll")]
 }
 
 // Shared virtualization + worker-pool config for <Virtualizer>/<MultiFileDiff>.
@@ -116,8 +192,8 @@ export const DIFF_VIRTUALIZER_CONFIG = {
 
 export const DIFF_VIRTUAL_METRICS = {
   hunkLineCount: 80,
-  // Must match the hard `[data-line]` height pinned in DIFF_UNSAFE_CSS so the
-  // virtualizer's pre-measurement estimate equals the measured row height.
+  // Exact in scroll mode; in wrap mode this seeds the estimate until Pierre
+  // measures the variable-height row and reconciles the virtualized layout.
   lineHeight: 18,
   diffHeaderHeight: 0,
   spacing: 8,

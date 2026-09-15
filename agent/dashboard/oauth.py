@@ -1,39 +1,82 @@
 """GitHub App OAuth code-exchange and signed-JWT session cookie."""
 
-from __future__ import annotations
-
+import base64
 import hashlib
 import hmac
 import logging
-import os
+import re
 import secrets
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
-import httpx
+import httpx2
 import jwt
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
+from fastapi.security import APIKeyCookie
+from starlette.requests import HTTPConnection
 
-from agent.utils.github_org_membership import is_user_active_org_member
-
-from ..utils.http import DEFAULT_HTTP_TIMEOUT
+from agent.config import ENV
+from agent.github.org_membership import is_user_active_org_member
+from agent.github.token_auth import bearer_github_token
+from agent.utils.dashboard_links import dashboard_base_url
+from agent.utils.http import DEFAULT_HTTP_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
 COOKIE_NAME = "alephat_session"
+SESSION_COOKIE = APIKeyCookie(name=COOKIE_NAME, scheme_name="DashboardSession", auto_error=False)
 STATE_COOKIE_NAME = "alephat_oauth_state"
+_DESKTOP_APP_ORIGIN = "alephat://app"
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 STATE_TTL_SECONDS = 600
+HANDOFF_TTL_SECONDS = 120
+TERMINAL_TICKET_TTL_SECONDS = 60
+TERMINAL_TICKET_AUDIENCE = "alephat-cloud-terminal"
 JWT_ALG = "HS256"
 
-GITHUB_APP_CLIENT_ID = os.environ.get("GITHUB_APP_CLIENT_ID", "")
-GITHUB_APP_CLIENT_SECRET = os.environ.get("GITHUB_APP_CLIENT_SECRET", "")
+
+def issue_terminal_ticket(*, login: str, email: str | None, thread_id: str) -> str:
+    now = int(time.time())
+    payload = {
+        "aud": TERMINAL_TICKET_AUDIENCE,
+        "sub": login,
+        "email": email,
+        "thread_id": thread_id,
+        "iat": now,
+        "exp": now + TERMINAL_TICKET_TTL_SECONDS,
+    }
+    return jwt.encode(payload, _secret(), algorithm=JWT_ALG)
+
+
+def decode_terminal_ticket(token: str, *, thread_id: str) -> dict[str, Any]:
+    try:
+        payload = jwt.decode(
+            token,
+            _secret(),
+            algorithms=[JWT_ALG],
+            audience=TERMINAL_TICKET_AUDIENCE,
+            options={"require": ["aud", "sub", "thread_id", "iat", "exp"]},
+        )
+    except jwt.PyJWTError as exc:
+        raise HTTPException(401, "invalid terminal ticket") from exc
+    login = payload.get("sub")
+    ticket_thread_id = payload.get("thread_id")
+    if not isinstance(login, str) or not login or not isinstance(ticket_thread_id, str):
+        raise HTTPException(401, "invalid terminal ticket")
+    if not hmac.compare_digest(ticket_thread_id, thread_id):
+        raise HTTPException(401, "invalid terminal ticket")
+    email = payload.get("email")
+    return {"sub": login, "email": email if isinstance(email, str) else None}
+
+
+GITHUB_APP_CLIENT_ID = ENV.GITHUB_APP_CLIENT_ID.get()
+GITHUB_APP_CLIENT_SECRET = ENV.GITHUB_APP_CLIENT_SECRET.get()
 
 
 def _secret() -> str:
-    s = os.environ.get("DASHBOARD_JWT_SECRET", "")
+    s = ENV.DASHBOARD_JWT_SECRET.get()
     if not s:
         raise HTTPException(500, "DASHBOARD_JWT_SECRET not configured")
     return s
@@ -47,10 +90,10 @@ def allowed_dashboard_origins() -> set[str]:
     else.
     """
     origins: set[str] = set()
-    base = os.environ.get("DASHBOARD_BASE_URL", "").strip()
+    base = dashboard_base_url()
     if base:
         origins.add(_origin_of(base))
-    for entry in os.environ.get("DASHBOARD_ALLOWED_ORIGINS", "").split(","):
+    for entry in ENV.DASHBOARD_ALLOWED_ORIGINS.get().split(","):
         entry = entry.strip()
         if entry:
             origins.add(_origin_of(entry))
@@ -88,7 +131,7 @@ def _is_blocked_redirect_path(path: str) -> bool:
 
 def sanitize_redirect_to(redirect_to: str | None) -> str:
     """Return a safe post-login redirect URL."""
-    fallback = os.environ.get("DASHBOARD_BASE_URL", "").strip()
+    fallback = dashboard_base_url()
     if not redirect_to:
         return fallback
     trimmed = redirect_to.strip()
@@ -114,35 +157,34 @@ def sanitize_redirect_to(redirect_to: str | None) -> str:
     return fallback
 
 
-def _allowed_login_orgs() -> frozenset[str]:
-    """Orgs whose members may log in to the dashboard.
-
-    Reuses the webhook-side ``ALLOWED_GITHUB_ORGS`` allowlist so deployments
-    configure a single org gate. When empty the dashboard login gate is
-    disabled (fail-open) to preserve existing deployments.
-    """
-    return frozenset(
-        org.strip().lower()
-        for org in os.environ.get("ALLOWED_GITHUB_ORGS", "").split(",")
-        if org.strip()
-    )
+def _allowed_login_orgs() -> tuple[str, ...]:
+    return tuple(dict.fromkeys(org.lower() for org in ENV.ALLOWED_GITHUB_ORGS.get_list()))
 
 
-async def enforce_org_login_gate(login: str) -> None:
-    """Reject dashboard login for users outside the allowed GitHub org(s).
+def _allowed_login_users() -> tuple[str, ...]:
+    return tuple(dict.fromkeys(user.lower() for user in ENV.ALLOWED_GITHUB_USERS.get_list()))
 
-    No-op when ``ALLOWED_GITHUB_ORGS`` is unset. Otherwise the user must be an
-    active member of at least one configured org; membership is checked with
-    the GitHub App installation token (fail-closed on any API error).
-    """
-    orgs = _allowed_login_orgs()
-    if not orgs:
+
+def validate_github_login_allowlist() -> None:
+    if ENV.ALEPHAT_LOCAL_AUTH_TOKEN.is_set() or _allowed_login_orgs() or _allowed_login_users():
         return
-    for org in orgs:
-        if await is_user_active_org_member(login, org):
+    message = "ALLOWED_GITHUB_ORGS or ALLOWED_GITHUB_USERS must be configured"
+    logger.error(message)
+    raise RuntimeError(message)
+
+
+async def enforce_github_login_gate(login: str) -> None:
+    normalized_login = login.strip().lower()
+    if any(hmac.compare_digest(normalized_login, user) for user in _allowed_login_users()):
+        return
+    for org in _allowed_login_orgs():
+        if await is_user_active_org_member(normalized_login, org):
             return
-    logger.warning("Rejected dashboard login for %r — not in allowed org(s)", login)
-    raise HTTPException(403, "your GitHub account is not a member of an authorized organization")
+    logger.warning(
+        "Rejected dashboard login",
+        extra={"github_login": login, "reason": "not in allowed users or orgs"},
+    )
+    raise HTTPException(403, "your GitHub account is not authorized")
 
 
 def issue_session(*, login: str, email: str | None, avatar_url: str | None) -> str:
@@ -180,7 +222,13 @@ def hash_state_nonce(nonce: str) -> str:
     return hmac.new(_secret().encode(), nonce.encode(), hashlib.sha256).hexdigest()
 
 
-def issue_state(*, redirect_to: str, nonce_hash: str) -> str:
+def issue_state(
+    *,
+    redirect_to: str,
+    nonce_hash: str,
+    handoff_challenge: str | None = None,
+    handoff_port: int | None = None,
+) -> str:
     now = int(time.time())
     payload: dict[str, Any] = {
         "nonce_hash": nonce_hash,
@@ -188,6 +236,9 @@ def issue_state(*, redirect_to: str, nonce_hash: str) -> str:
         "iat": now,
         "exp": now + STATE_TTL_SECONDS,
     }
+    if handoff_challenge and handoff_port:
+        payload["handoff_challenge"] = handoff_challenge
+        payload["handoff_port"] = handoff_port
     return jwt.encode(payload, _secret(), algorithm=JWT_ALG)
 
 
@@ -196,6 +247,119 @@ def decode_state(state: str) -> dict[str, Any]:
         return jwt.decode(state, _secret(), algorithms=[JWT_ALG])
     except jwt.PyJWTError as e:
         raise HTTPException(400, f"invalid state: {e}") from e
+
+
+_S256_CHALLENGE = re.compile(r"[A-Za-z0-9_-]{43}")
+
+
+def _s256(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode()).digest()
+    return base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+
+def valid_handoff_challenge(value: str | None) -> str | None:
+    """Return the desktop app's PKCE S256 challenge, or ``None`` when absent."""
+    if not value:
+        return None
+    if not _S256_CHALLENGE.fullmatch(value):
+        raise HTTPException(400, "invalid desktop handoff challenge")
+    return value
+
+
+def desktop_callback_url(port: int, code: str) -> str:
+    """Loopback redirect target for the desktop app's local login listener.
+
+    Only the port crosses the wire; the host and path are fixed here so this
+    can never be steered into an open redirect.
+    """
+    return f"http://127.0.0.1:{port}/callback?code={quote(code, safe='')}"
+
+
+def _mint_handoff(*, challenge: str, claims: dict[str, Any]) -> str:
+    """Sign a PKCE-bound code for the browser to hand back to the desktop app.
+
+    A JWT is signed but not encrypted, and this one rides in a URL the browser
+    records, so its claims have to be inert to whoever reads them: the identity
+    a session is minted from, never a session itself; what was connected, never
+    whose account to connect it to.
+    """
+    now = int(time.time())
+    return jwt.encode(
+        {**claims, "challenge": challenge, "iat": now, "exp": now + HANDOFF_TTL_SECONDS},
+        _secret(),
+        algorithm=JWT_ALG,
+    )
+
+
+def _decode_handoff(*, code: str, verifier: str) -> dict[str, Any]:
+    """Return a handoff code's claims, proving the caller holds the verifier.
+
+    The code reaches a loopback port through the user's browser, so redeeming
+    it also requires the verifier the challenge committed to — and that never
+    leaves the desktop app.
+    """
+    try:
+        payload = jwt.decode(code, _secret(), algorithms=[JWT_ALG])
+    except jwt.PyJWTError as e:
+        raise HTTPException(400, f"invalid handoff code: {e}") from e
+    challenge = payload.get("challenge")
+    if not isinstance(challenge, str):
+        raise HTTPException(400, "malformed handoff code")
+    if not hmac.compare_digest(_s256(verifier), challenge):
+        raise HTTPException(400, "handoff verifier mismatch")
+    return payload
+
+
+def issue_desktop_handoff(
+    *, login: str, email: str | None, avatar_url: str | None, challenge: str
+) -> str:
+    """Mint the code the browser hands back after a desktop login."""
+    return _mint_handoff(
+        challenge=challenge,
+        claims={"sub": login, "email": email, "avatar_url": avatar_url},
+    )
+
+
+def redeem_desktop_handoff(*, code: str, verifier: str) -> str:
+    """Mint the session a desktop handoff code was issued for."""
+    payload = _decode_handoff(code=code, verifier=verifier)
+    login = payload.get("sub")
+    if not isinstance(login, str) or not login:
+        raise HTTPException(400, "malformed handoff code")
+    email = payload.get("email")
+    avatar_url = payload.get("avatar_url")
+    return issue_session(
+        login=login,
+        email=email if isinstance(email, str) else None,
+        avatar_url=avatar_url if isinstance(avatar_url, str) else None,
+    )
+
+
+def issue_connect_handoff(*, provider: str, challenge: str, claims: dict[str, Any]) -> str:
+    """Mint the code the browser hands back after a desktop connect flow."""
+    return _mint_handoff(challenge=challenge, claims={**claims, "provider": provider})
+
+
+def redeem_connect_handoff(*, provider: str, code: str, verifier: str) -> dict[str, Any]:
+    """Return a connect code's claims, pinned to the provider that minted them.
+
+    Without the pin, a code from one connect flow could be redeemed by another
+    provider's endpoint.
+    """
+    payload = _decode_handoff(code=code, verifier=verifier)
+    code_provider = payload.get("provider")
+    if not isinstance(code_provider, str) or not hmac.compare_digest(code_provider, provider):
+        raise HTTPException(400, "handoff provider mismatch")
+    return payload
+
+
+def desktop_handoff_from_state(state_payload: dict[str, Any]) -> tuple[str, int] | None:
+    """Return the PKCE challenge and loopback port a desktop flow was started with."""
+    challenge = state_payload.get("handoff_challenge")
+    port = state_payload.get("handoff_port")
+    if isinstance(challenge, str) and isinstance(port, int):
+        return challenge, port
+    return None
 
 
 # Dashboard route where users manage their GitHub↔Slack link.
@@ -209,20 +373,22 @@ def build_settings_url() -> str | None:
     safe to share in a public Slack thread. The user signs in with GitHub from
     their own session and connects Slack via verified OIDC on the settings page.
     """
-    frontend_base = os.environ.get("DASHBOARD_BASE_URL", "").rstrip("/")
+    frontend_base = dashboard_base_url()
     if not frontend_base:
         return None
     return f"{frontend_base}{PROFILE_SETTINGS_PATH}"
 
 
-def require_session(request: Request) -> dict[str, Any]:
+def require_session(
+    request: HTTPConnection, _cookie: str | None = Depends(SESSION_COOKIE)
+) -> dict[str, Any]:
     token = request.cookies.get(COOKIE_NAME)
     if not token:
         raise HTTPException(401, "not authenticated")
     return decode_session(token)
 
 
-def request_origin(request: Request) -> str | None:
+def request_origin(request: HTTPConnection) -> str | None:
     """Return the request's origin (scheme + host + port), if present and valid."""
     raw_origin = request.headers.get("origin")
     if raw_origin is not None:
@@ -237,7 +403,7 @@ def request_origin(request: Request) -> str | None:
     return None
 
 
-def require_same_origin(request: Request) -> None:
+def require_same_origin(request: HTTPConnection) -> None:
     """Reject cross-site cookie-authenticated mutations (CSRF defense).
 
     No-op when no dashboard origins are configured (local setups without
@@ -246,19 +412,33 @@ def require_same_origin(request: Request) -> None:
     allowed = allowed_dashboard_origins()
     if not allowed:
         return
+    allowed.add(_DESKTOP_APP_ORIGIN)
+    request_base_origin = _origin_of(str(request.base_url))
+    if request_base_origin:
+        allowed.add(request_base_origin)
     origin = request_origin(request)
     if not origin or origin not in allowed:
         logger.warning(
             "Rejected %s %s — origin %r not in allowlist",
-            request.method,
+            request.scope.get("method", "WEBSOCKET"),
             request.url.path,
             origin,
         )
         raise HTTPException(403, "CSRF check failed")
 
 
-def require_same_origin_for_mutations(request: Request) -> None:
-    if request.method in {"GET", "HEAD", "OPTIONS"}:
+def require_same_origin_for_mutations(request: HTTPConnection) -> None:
+    if request.scope["type"] == "websocket":
+        require_same_origin(request)
+        return
+    if request.scope.get("method") in {"GET", "HEAD", "OPTIONS"}:
+        return
+    # The origin allowlist defends the ambient session cookie. A request whose
+    # only credential is an explicit bearer header can't be forged by a browser,
+    # so it has nothing to defend.
+    if not isinstance(request, Request):
+        raise HTTPException(400, "invalid request")
+    if bearer_github_token(request) and not request.cookies.get(COOKIE_NAME):
         return
     require_same_origin(request)
 
@@ -296,7 +476,7 @@ def is_unrecoverable_refresh_error(exc: BaseException) -> bool:
 async def _request_github_tokens(body: dict[str, str]) -> dict[str, Any]:
     if not GITHUB_APP_CLIENT_ID or not GITHUB_APP_CLIENT_SECRET:
         raise HTTPException(500, "GitHub App OAuth not configured")
-    async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as client:
+    async with httpx2.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as client:
         resp = await client.post(
             "https://github.com/login/oauth/access_token",
             headers={"Accept": "application/json"},
@@ -351,7 +531,7 @@ async def fetch_github_user(access_token: str) -> tuple[dict[str, Any], str | No
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as client:
+    async with httpx2.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as client:
         u = await client.get("https://api.github.com/user", headers=headers)
         u.raise_for_status()
         user = u.json()

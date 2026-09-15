@@ -1,0 +1,392 @@
+import asyncio
+import json
+from typing import Any, cast
+from unittest.mock import AsyncMock
+
+import pytest
+from fastapi import BackgroundTasks
+from starlette.requests import Request
+
+from agent.slack import events as slack_events
+from agent.slack import failures as slack_failures
+from agent.slack import routes as slack_routes
+from agent.slack import webhook as slack_service
+from agent.webhooks import common as webhook_common
+
+
+class _ConflictError(Exception):
+    pass
+
+
+class _FakeThreads:
+    def __init__(self) -> None:
+        self.ids: set[str] = set()
+        self.lock = asyncio.Lock()
+
+    async def create(self, *, thread_id: str, **_kwargs: Any) -> None:
+        async with self.lock:
+            if thread_id in self.ids:
+                raise _ConflictError
+            self.ids.add(thread_id)
+
+    async def get(self, thread_id: str) -> dict[str, str]:
+        if thread_id not in self.ids:
+            raise KeyError(thread_id)
+        return {"thread_id": thread_id}
+
+
+class _FakeClient:
+    def __init__(self) -> None:
+        self.threads = _FakeThreads()
+
+
+class _FakeBackgroundTasks:
+    def __init__(self) -> None:
+        self.tasks: list[tuple[Any, tuple[Any, ...]]] = []
+
+    def add_task(self, func: Any, *args: Any) -> None:
+        self.tasks.append((func, args))
+
+
+class _FakeRequest:
+    def __init__(self, payload: dict[str, Any], headers: dict[str, str] | None = None) -> None:
+        self.headers: dict[str, str] = headers or {}
+        self._body = json.dumps(payload).encode()
+
+    async def body(self) -> bytes:
+        return self._body
+
+
+def _mention_payload(event_id: str = "Ev1") -> dict[str, Any]:
+    return {
+        "type": "event_callback",
+        "event_id": event_id,
+        "authorizations": [{"user_id": "BOT"}],
+        "event": {
+            "type": "app_mention",
+            "channel": "C1",
+            "ts": "1786573369.551099",
+            "user": "U1",
+            "text": "<@BOT> hello?",
+        },
+    }
+
+
+def _channel_message_payload(event_id: str = "Ev2") -> dict[str, Any]:
+    payload = _mention_payload(event_id)
+    payload["event"] = {**payload["event"], "type": "message", "channel_type": "channel"}
+    return payload
+
+
+async def _post(
+    payload: dict[str, Any],
+    background_tasks: _FakeBackgroundTasks,
+    headers: dict[str, str] | None = None,
+) -> dict[str, str]:
+    return await slack_routes.slack_webhook(
+        cast(Request, _FakeRequest(payload, headers)),
+        cast(BackgroundTasks, background_tasks),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _patch_slack_webhook(monkeypatch: pytest.MonkeyPatch) -> _FakeClient:
+    slack_events.reset_slack_event_claims()
+    client = _FakeClient()
+
+    async def channel_context(_channel_id: str, *, use_cache: bool = True) -> dict[str, Any]:
+        return {"is_ext_shared": False, "is_pending_ext_shared": False}
+
+    async def repo_config(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        return {"owner": "langchain-ai", "name": "alephat"}
+
+    monkeypatch.setattr(slack_events, "get_client", lambda url: client)
+    monkeypatch.setattr(webhook_common, "verify_slack_signature", lambda **_kwargs: True)
+    monkeypatch.setattr(webhook_common, "resolve_slack_thread_id", AsyncMock(return_value="t1"))
+    monkeypatch.setattr(webhook_common, "resolve_slack_channel_context", channel_context)
+    monkeypatch.setattr(webhook_common, "get_slack_repo_config", repo_config)
+    return client
+
+
+async def test_redelivered_event_starts_only_one_run() -> None:
+    background_tasks = _FakeBackgroundTasks()
+
+    first = await _post(_mention_payload(), background_tasks)
+    second = await _post(_mention_payload(), background_tasks, {"X-Slack-Retry-Num": "1"})
+
+    assert first["status"] == "accepted"
+    assert second["status"] == "ignored"
+    assert [task[0] for task in background_tasks.tasks] == [slack_service.process_slack_mention]
+
+
+async def test_redelivered_event_without_retry_header_is_deduped() -> None:
+    background_tasks = _FakeBackgroundTasks()
+
+    await _post(_mention_payload(), background_tasks)
+    second = await _post(_mention_payload(), background_tasks)
+
+    assert second["status"] == "ignored"
+    assert len(background_tasks.tasks) == 1
+
+
+async def test_mention_and_message_deliveries_start_one_run(
+    monkeypatch: pytest.MonkeyPatch,
+    _patch_slack_webhook: _FakeClient,
+) -> None:
+    background_tasks = _FakeBackgroundTasks()
+    monkeypatch.setattr(webhook_common, "SLACK_BOT_USER_ID", "BOT")
+
+    first = await _post(_mention_payload("Ev1"), background_tasks)
+    slack_events.reset_slack_event_claims()
+    second = await _post(_channel_message_payload("Ev2"), background_tasks)
+
+    assert first["status"] == "accepted"
+    assert second["status"] == "ignored"
+    assert len(background_tasks.tasks) == 1
+    assert _patch_slack_webhook.threads.ids == {
+        slack_events._claim_thread_id("Ev1"),
+        slack_events._claim_thread_id("Ev2"),
+        slack_events._claim_thread_id("C1:1786573369.551099"),
+    }
+
+
+def _bot_payload(*, event_type: str = "message", with_user: bool = True) -> dict[str, Any]:
+    payload = _mention_payload()
+    payload.update({"team_id": "T123", "api_app_id": "AOWN"})
+    payload["event"].update(
+        {
+            "type": event_type,
+            "subtype": "bot_message",
+            "bot_id": "B123",
+            "app_id": "A123",
+            "user": "U123",
+        }
+    )
+    if not with_user:
+        payload["event"].pop("user")
+    return payload
+
+
+@pytest.mark.parametrize("event_type", ["message", "app_mention"])
+@pytest.mark.parametrize("with_user", [True, False])
+async def test_allowed_bot_mention_is_dispatched(
+    allowed_bot: None,
+    event_type: str,
+    with_user: bool,
+) -> None:
+    tasks = _FakeBackgroundTasks()
+    response = await _post(_bot_payload(event_type=event_type, with_user=with_user), tasks)
+    assert response["status"] == "accepted"
+    assert len(tasks.tasks) == 1
+    data = tasks.tasks[0][1][0]
+    assert data.triggering_bot_id == "B123"
+    assert data.team_id == "T123"
+    assert data.user_id == ("U123" if with_user else "")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"bot_id": "BOTHER"},
+        {"user": "UOTHER"},
+        {"app_id": "AOTHER"},
+        {"user": "BOT"},
+        {"app_id": "AOWN"},
+        {"text": "A status update"},
+        {"subtype": "message_deleted"},
+    ],
+)
+async def test_bot_must_be_allowed_and_explicitly_mention_us(
+    allowed_bot: None,
+    change: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(webhook_common, "is_code_channel", AsyncMock(return_value=True))
+    payload = _bot_payload()
+    payload["event"].update(change)
+    tasks = _FakeBackgroundTasks()
+    assert (await _post(payload, tasks))["status"] == "ignored"
+    assert tasks.tasks == []
+
+
+@pytest.mark.parametrize("team_id", ["", "TOTHER"])
+async def test_bot_allowlist_is_workspace_scoped(allowed_bot: None, team_id: str) -> None:
+    payload = _bot_payload()
+    payload["team_id"] = team_id
+    tasks = _FakeBackgroundTasks()
+    assert (await _post(payload, tasks))["status"] == "ignored"
+    assert tasks.tasks == []
+
+
+async def test_bot_authorization_is_workspace_owned(
+    allowed_bot: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CONFIGURED_ADMINS", "someone-else")
+    tasks = _FakeBackgroundTasks()
+    assert (await _post(_bot_payload(), tasks))["status"] == "accepted"
+    assert len(tasks.tasks) == 1
+
+
+async def test_allowed_bot_dual_delivery_starts_only_one_run(allowed_bot: None) -> None:
+    tasks = _FakeBackgroundTasks()
+    assert (await _post(_bot_payload(), tasks))["status"] == "accepted"
+    second = _bot_payload(event_type="app_mention")
+    second["event_id"] = "Ev2"
+    assert (await _post(second, tasks))["status"] == "ignored"
+    assert len(tasks.tasks) == 1
+
+
+async def test_removed_bot_cannot_start_another_run(allowed_bot: None, fake_store: Any) -> None:
+    tasks = _FakeBackgroundTasks()
+    assert (await _post(_bot_payload(), tasks))["status"] == "accepted"
+    await fake_store.delete_item(["allowed_slack_bots"], "T123:B123")
+    payload = _bot_payload()
+    payload["event_id"] = "Ev2"
+    payload["event"]["ts"] = "1786573370.551099"
+    assert (await _post(payload, tasks))["status"] == "ignored"
+    assert len(tasks.tasks) == 1
+
+
+async def test_distinct_messages_in_one_channel_both_run() -> None:
+    background_tasks = _FakeBackgroundTasks()
+
+    second_message = _mention_payload("Ev2")
+    second_message["event"] = {**second_message["event"], "ts": "1786573999.111222"}
+
+    first = await _post(_mention_payload("Ev1"), background_tasks)
+    second = await _post(second_message, background_tasks)
+
+    assert [first["status"], second["status"]] == ["accepted", "accepted"]
+    assert len(background_tasks.tasks) == 2
+
+
+async def test_retry_header_alone_does_not_drop_an_unseen_event() -> None:
+    background_tasks = _FakeBackgroundTasks()
+
+    response = await _post(_mention_payload("EvNew"), background_tasks, {"X-Slack-Retry-Num": "2"})
+
+    assert response["status"] == "accepted"
+    assert len(background_tasks.tasks) == 1
+
+
+async def test_concurrent_cross_instance_redeliveries_start_one_run() -> None:
+    background_tasks = _FakeBackgroundTasks()
+
+    async def post() -> dict[str, str]:
+        slack_events.reset_slack_event_claims()
+        return await _post(_mention_payload(), background_tasks)
+
+    responses = await asyncio.gather(*(post() for _ in range(3)))
+
+    assert [response["status"] for response in responses].count("accepted") == 1
+    assert len(background_tasks.tasks) == 1
+
+
+async def test_external_channel_refuses_without_starting_a_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    background_tasks = _FakeBackgroundTasks()
+    post_reply = AsyncMock(return_value=True)
+    resolve_thread = cast(AsyncMock, webhook_common.resolve_slack_thread_id)
+    monkeypatch.setattr(
+        webhook_common,
+        "resolve_slack_channel_context",
+        AsyncMock(return_value={"is_ext_shared": True}),
+    )
+    monkeypatch.setattr(webhook_common, "post_slack_thread_reply", post_reply)
+
+    response = await _post(_mention_payload(), background_tasks)
+
+    assert response == {"status": "ignored", "reason": "Slack channel is not eligible"}
+    assert len(background_tasks.tasks) == 1
+    await background_tasks.tasks[0][0](*background_tasks.tasks[0][1])
+    post_reply.assert_awaited_once_with(
+        "C1",
+        "1786573369.551099",
+        slack_routes._EXTERNAL_CHANNEL_REFUSAL,
+    )
+    resolve_thread.assert_not_awaited()
+
+
+async def test_unverified_channel_fails_closed_without_reply_or_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    background_tasks = _FakeBackgroundTasks()
+    post_reply = AsyncMock(return_value=True)
+    resolve_thread = cast(AsyncMock, webhook_common.resolve_slack_thread_id)
+    monkeypatch.setattr(
+        webhook_common,
+        "resolve_slack_channel_context",
+        AsyncMock(return_value={"is_ext_shared": None}),
+    )
+    monkeypatch.setattr(webhook_common, "post_slack_thread_reply", post_reply)
+
+    response = await _post(_mention_payload(), background_tasks)
+
+    assert response == {"status": "ignored", "reason": "Slack channel is not eligible"}
+    assert background_tasks.tasks == []
+    post_reply.assert_not_awaited()
+    resolve_thread.assert_not_awaited()
+
+
+async def test_preprocessing_failure_replies_and_does_not_claim_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    background_tasks = _FakeBackgroundTasks()
+    post_reply = AsyncMock(return_value=True)
+    monkeypatch.setattr(slack_failures, "post_slack_thread_reply", post_reply)
+
+    async def failed_repo_config(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        raise RuntimeError
+
+    original_repo_config = webhook_common.get_slack_repo_config
+    monkeypatch.setattr(webhook_common, "get_slack_repo_config", failed_repo_config)
+    response = await _post(_mention_payload(), background_tasks)
+
+    assert response["status"] == "error"
+    assert background_tasks.tasks == []
+    post_reply.assert_awaited_once()
+    await_args = post_reply.await_args
+    assert await_args is not None
+    assert await_args.args[:2] == ("C1", "1786573369.551099")
+    assert f"Error ID: `{response['error_id']}`" in await_args.args[2]
+
+    monkeypatch.setattr(webhook_common, "get_slack_repo_config", original_repo_config)
+    assert (await _post(_mention_payload(), background_tasks))["status"] == "accepted"
+
+
+async def test_mention_without_a_repository_is_still_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    background_tasks = _FakeBackgroundTasks()
+    post_reply = AsyncMock(return_value=True)
+    monkeypatch.setattr(slack_failures, "post_slack_thread_reply", post_reply)
+    monkeypatch.setattr(webhook_common, "get_slack_repo_config", AsyncMock(return_value=None))
+
+    response = await _post(_mention_payload(), background_tasks)
+
+    assert response["status"] == "accepted"
+    [(task, args)] = background_tasks.tasks
+    assert task is slack_service.process_slack_mention
+    assert args[1] is None
+    post_reply.assert_not_awaited()
+
+
+async def test_rejected_request_replies_with_its_own_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    background_tasks = _FakeBackgroundTasks()
+    post_reply = AsyncMock(return_value=True)
+    monkeypatch.setattr(slack_failures, "post_slack_thread_reply", post_reply)
+
+    async def no_repo(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        raise slack_failures.SlackRequestError("Pick a repository first.")
+
+    monkeypatch.setattr(webhook_common, "get_slack_repo_config", no_repo)
+    response = await _post(_mention_payload(), background_tasks)
+
+    assert response["status"] == "error"
+    await_args = post_reply.await_args
+    assert await_args is not None
+    assert await_args.args[2].startswith("⚠️ Pick a repository first.\nError ID: `")

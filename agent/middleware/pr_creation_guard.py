@@ -1,7 +1,5 @@
 """Block shell fallbacks that create pull requests outside open_pull_request."""
 
-from __future__ import annotations
-
 import json
 import os
 import re
@@ -9,10 +7,12 @@ import shlex
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
-from langchain.agents.middleware.types import AgentMiddleware, AgentState
+from langchain.agents.middleware.types import AgentState
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
+
+from agent.middleware.trace import AlephatMiddleware
 
 _SHELL_SEPARATORS = {";", "&&", "||", "|", "&"}
 _SHELL_EXECUTABLES = {"bash", "dash", "sh", "zsh"}
@@ -254,13 +254,13 @@ def _blocked_tool_message(request: ToolCallRequest, command: str) -> ToolMessage
     )
 
 
-class PullRequestCreationGuardMiddleware(AgentMiddleware):
+class PullRequestCreationGuardMiddleware(AlephatMiddleware):
     """Prevent attributed-PR failures from being hidden by shell fallbacks."""
 
     state_schema = AgentState
 
     def _blocked_message_for_request(self, request: ToolCallRequest) -> ToolMessage | None:
-        if _tool_name(request) != "execute":
+        if _tool_name(request) not in {"execute", "background_execute"}:
             return None
         command = _tool_args(request).get("command")
         if not isinstance(command, str) or not is_pr_creation_fallback_command(command):

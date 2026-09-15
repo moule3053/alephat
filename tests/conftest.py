@@ -1,10 +1,126 @@
 """Shared pytest fixtures."""
 
-from __future__ import annotations
+from collections.abc import Iterator, Sequence
+from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 import pytest
 
+from agent import store as agent_store
+from agent.dashboard.threads import access, api, diffs, listing, proxy, runs, summary
+from agent.utils import ttl_cache
 from agent.webhooks import common as webhook_common
+
+_THREAD_MODULES: tuple[ModuleType, ...] = (access, api, diffs, listing, proxy, runs, summary)
+
+
+def patch_thread_module(monkeypatch: pytest.MonkeyPatch, name: str, value: Any) -> None:
+    """Rebind ``name`` in every dashboard thread module that imports it.
+
+    The thread endpoints are split across modules that each hold their own
+    binding, so patching one would leave the others pointing at the real thing.
+    """
+    modules = [module for module in _THREAD_MODULES if hasattr(module, name)]
+    if not modules:
+        raise AttributeError(f"no dashboard thread module defines {name!r}")
+    for module in modules:
+        monkeypatch.setattr(module, name, value)
+
+
+class _FakeStoreNotFoundError(Exception):
+    status_code = 404
+
+
+class FakeStore:
+    """In-memory stand-in for the LangGraph Store, in the SDK's item shape.
+
+    Backs the real ``agent.store`` code path, so values round-trip through
+    ``model_dump``/``model_validate`` the way they do in production.
+    """
+
+    def __init__(self) -> None:
+        self.items: dict[tuple[str, ...], dict[str, dict[str, Any]]] = {}
+
+    def seed(self, namespace: Sequence[str], key: str, value: dict[str, Any]) -> None:
+        self.items.setdefault(tuple(namespace), {})[key] = dict(value)
+
+    def values(self, namespace: Sequence[str]) -> dict[str, dict[str, Any]]:
+        return self.items.get(tuple(namespace), {})
+
+    async def get_item(self, namespace: Sequence[str], key: str) -> dict[str, Any]:
+        value = self.values(namespace).get(key)
+        if value is None:
+            raise _FakeStoreNotFoundError
+        return {"value": dict(value)}
+
+    async def put_item(self, namespace: Sequence[str], key: str, value: dict[str, Any]) -> None:
+        self.seed(namespace, key, value)
+
+    async def delete_item(self, namespace: Sequence[str], key: str) -> None:
+        self.values(namespace).pop(key, None)
+
+    async def search_items(
+        self,
+        namespace: Sequence[str],
+        *,
+        filter: dict[str, Any] | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        matches = [
+            {"value": dict(value)}
+            for value in self.values(namespace).values()
+            if all(value.get(k) == expected for k, expected in (filter or {}).items())
+        ]
+        return {"items": matches[offset : offset + limit]}
+
+
+class FakeStoreClient:
+    def __init__(self) -> None:
+        self.store = FakeStore()
+
+
+@pytest.fixture
+def fake_store(monkeypatch: pytest.MonkeyPatch) -> FakeStore:
+    """Route every ``agent.store`` access to an in-memory store for this test."""
+    client = FakeStoreClient()
+    monkeypatch.setattr(agent_store, "store_client", lambda: client)
+    return client.store
+
+
+@pytest.fixture
+def allowed_bot(fake_store: FakeStore) -> dict[str, Any]:
+    bot = {
+        "team_id": "T123",
+        "bot_id": "B123",
+        "user_id": "U123",
+        "app_id": "A123",
+        "name": "Release bot",
+        "created_by": "alice",
+        "created_at": "2026-09-09",
+    }
+    fake_store.seed(["allowed_slack_bots"], "T123:B123", bot)
+    return bot
+
+
+@pytest.fixture(autouse=True)
+def _default_github_login_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALLOWED_GITHUB_USERS", "test-user,trusted-user,reviewer")
+
+
+@pytest.fixture(autouse=True)
+def _no_bundled_dashboard(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Serve no dashboard build by default, whatever ``ui/.output`` holds locally."""
+    monkeypatch.setenv("DASHBOARD_STATIC_DIR", str(tmp_path / "no-dashboard-build"))
+
+
+@pytest.fixture(autouse=True)
+def _reset_ttl_cache() -> Iterator[None]:
+    """Keep the process-global TTL cache from leaking team settings between tests."""
+    ttl_cache.clear()
+    yield
+    ttl_cache.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -22,3 +138,15 @@ def _default_enable_auto_review(monkeypatch: pytest.MonkeyPatch) -> None:
         return True
 
     monkeypatch.setattr(webhook_common, "is_review_repo_enabled", _enabled)
+
+
+@pytest.fixture
+def slack_api(monkeypatch: pytest.MonkeyPatch):
+    from agent.slack import client, code_channels, http
+    from tests.support.slack_api import slack_api_server
+
+    with slack_api_server() as api:
+        monkeypatch.setattr(http, "SLACK_API_BASE_URL", api.base_url)
+        monkeypatch.setattr(client, "SLACK_BOT_TOKEN", "test-slack-token")
+        monkeypatch.setattr(code_channels, "SLACK_BOT_TOKEN", "test-slack-token")
+        yield api

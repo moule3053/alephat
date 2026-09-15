@@ -1,37 +1,27 @@
-from __future__ import annotations
-
 from typing import Any
 
-from langgraph.config import get_config
-
-from ..review.findings import (
+from agent.github.thread_token import get_github_token
+from agent.review.findings import (
     FindingInteraction,
     ReviewerThreadMissingError,
     append_finding_interaction,
+    comment_ids_for_finding,
     get_finding,
     get_thread_id_from_runtime,
     thread_missing_tool_result,
     update_finding_fields,
 )
-from ..review.publish import reply_to_review_comment
-from ..utils.github_token import get_github_token
+from agent.review.publish import reply_to_review_comment
+from agent.run_config import RunConfig
 
 
 async def reply_to_finding_thread(finding_id: str, body: str) -> dict[str, Any]:
-    """Reply to the GitHub review thread for a tracked finding."""
+    """Implement the `reply_to_finding_thread` tool."""
     if not body.strip():
         return {"success": False, "error": "Reply body is required"}
 
-    config = get_config()
-    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
-    repo_config = configurable.get("repo") if isinstance(configurable, dict) else None
-    pr_number = configurable.get("pr_number") if isinstance(configurable, dict) else None
-    if (
-        not isinstance(repo_config, dict)
-        or not repo_config.get("owner")
-        or not repo_config.get("name")
-        or not isinstance(pr_number, int)
-    ):
+    cfg = RunConfig.from_runtime()
+    if not cfg.repo or cfg.pr_number is None:
         return {"success": False, "error": "Missing repo or PR info in run config"}
 
     token = get_github_token()
@@ -42,9 +32,9 @@ async def reply_to_finding_thread(finding_id: str, body: str) -> dict[str, Any]:
         return await _reply_to_finding_thread_async(
             finding_id=finding_id,
             body=body,
-            owner=str(repo_config["owner"]),
-            repo=str(repo_config["name"]),
-            pr_number=pr_number,
+            owner=cfg.repo.owner,
+            repo=cfg.repo.name,
+            pr_number=cfg.pr_number,
             token=token,
         )
     except ReviewerThreadMissingError as exc:
@@ -65,9 +55,10 @@ async def _reply_to_finding_thread_async(
     if finding is None:
         return {"success": False, "error": f"No finding found with id {finding_id}"}
 
-    comment_id = finding.get("github_review_comment_id")
-    if not isinstance(comment_id, int):
+    comment_ids = comment_ids_for_finding(finding)
+    if not comment_ids:
         return {"success": False, "error": "Finding has no GitHub review comment mapping"}
+    comment_id = comment_ids[0]
 
     response = await reply_to_review_comment(
         owner=owner,

@@ -1,14 +1,11 @@
 """Collect historical PR review samples from GitHub for style analysis."""
 
-from __future__ import annotations
-
 import logging
-import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
+import httpx2
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +15,6 @@ DEFAULT_MAX_SAMPLES_PER_REVIEWER = 6
 MIN_COMMENT_CHARS = 20
 GITHUB_API = "https://api.github.com"
 _BOT_SUFFIX = "[bot]"
-
-
-def generate_review_style_thread_id(owner: str, repo: str) -> str:
-    stable_key = f"{owner}/{repo}/review-style"
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, stable_key))
 
 
 @dataclass
@@ -56,7 +48,7 @@ def github_headers(token: str) -> dict[str, str]:
 
 
 async def _paginate(
-    client: httpx.AsyncClient,
+    client: httpx2.AsyncClient,
     url: str,
     *,
     headers: dict[str, str],
@@ -106,7 +98,7 @@ def _substantive_body(body: str | None) -> str | None:
 
 
 async def _recent_merged_prs(
-    client: httpx.AsyncClient,
+    client: httpx2.AsyncClient,
     *,
     owner: str,
     repo: str,
@@ -162,7 +154,7 @@ async def collect_review_samples(
     raw_entries: list[tuple[str, int, ReviewSample]] = []
     reviewer_counts: Counter[str] = Counter()
 
-    async with httpx.AsyncClient(timeout=90.0) as client:
+    async with httpx2.AsyncClient(timeout=90.0) as client:
         merged_prs = await _recent_merged_prs(
             client, owner=owner, repo=repo, headers=headers, max_prs=max_prs
         )
@@ -297,7 +289,7 @@ def format_samples_for_analyzer(samples: ReviewStyleSamples) -> str:
     if not samples.samples:
         lines.append(
             "Pre-collection found no substantive review text on recent merged PRs. "
-            "You must browse merged PRs yourself with `GH_TOKEN=dummy gh` (reviews, "
+            "You must browse merged PRs yourself with `gh` (reviews, "
             "pull comments, and issue comments) before saving."
         )
         return "\n".join(lines)

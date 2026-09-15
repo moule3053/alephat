@@ -13,12 +13,9 @@ This middleware drops the redundant legacy field from assistant messages before
 they reach the Fireworks serializer, mirroring the thinking-block sanitizer.
 """
 
-from __future__ import annotations
-
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage
 
@@ -26,6 +23,9 @@ try:
     from langchain_fireworks.chat_models import ChatFireworks
 except ImportError:  # pragma: no cover
     ChatFireworks = None  # type: ignore[assignment, misc]
+
+
+from agent.middleware.trace import AlephatMiddleware
 
 
 def _is_chat_fireworks(model: object) -> bool:
@@ -60,7 +60,7 @@ def _sanitize_messages(messages: list[Any]) -> None:
         additional_kwargs.pop("function_call", None)
 
 
-class SanitizeFireworksMessagesMiddleware(AgentMiddleware):
+class SanitizeFireworksMessagesMiddleware(AlephatMiddleware):
     """Drop legacy ``function_call`` fields before Fireworks provider calls."""
 
     async def awrap_model_call(

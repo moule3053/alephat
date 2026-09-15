@@ -1,0 +1,35 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "tasks": {
+    "dev": {
+      "cache": false,
+      "persistent": true,
+      "env": [
+        "DASHBOARD_API_URL",
+        "DASHBOARD_BASE_PATH",
+        "ALEPHAT_DEV_SESSION",
+        "PORT",
+        "E2E_HARNESS",
+        "VITE_*"
+      ]
+    },
+    "build": {
+      "outputs": [
+        ".output/**",
+        ".vercel/output/**",
+        "build/**"
+      ],
+      "env": [
+        "DASHBOARD_API_URL",
+        "VERCEL",
+        "E2E_HARNESS",
+        "VITE_*"
+      ]
+    },
+    "typecheck": {},
+    "test": {},
+    "check": {
+      "cache": false
+    }
+  }
+}

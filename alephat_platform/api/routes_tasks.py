@@ -1,7 +1,5 @@
 """Task API routes (/v1/tasks)."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 import uuid

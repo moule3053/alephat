@@ -1,11 +1,9 @@
-from __future__ import annotations
-
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 from fastapi import HTTPException
 
-from agent.dashboard import slack_oauth
+from agent.slack import oauth as slack_oauth
 
 
 def test_slack_oauth_configured(monkeypatch: pytest.MonkeyPatch) -> None:

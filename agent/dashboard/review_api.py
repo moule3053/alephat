@@ -6,8 +6,6 @@ endpoints surface that state plus live PR details/diff fetched from GitHub
 with the App installation token.
 """
 
-from __future__ import annotations
-
 import ipaddress
 import logging
 import re
@@ -16,22 +14,27 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 from urllib.parse import urljoin, urlparse
 
-import httpx
+import httpx2
 from fastapi import HTTPException, Response
 
-from ..review.findings import REVIEWER_THREAD_KIND
-from ..utils.github_app import get_github_app_installation_token
-from ..utils.github_checks import github_headers
-from ..utils.json_types import ThreadLike, as_json_object, thread_metadata
-from ..utils.thread_ops import langgraph_client
-from ..webhooks.common import fetch_github_pr_metadata
-from ..webhooks.github import trigger_pr_review_from_ref
-from .pr_diff import build_pr_diff_files
+from agent.github.app import get_github_app_installation_token
+from agent.github.checks import github_headers
+from agent.github.pull_request_diff import build_pr_diff_files
+from agent.github.webhook import trigger_pr_review_from_ref
+from agent.review.findings import (
+    REVIEWER_THREAD_KIND,
+    coerce_finding,
+    comment_ids_for_finding,
+    is_thread_resolved,
+)
+from agent.thread_ids import reviewer_thread_id
+from agent.utils.json_types import ThreadLike, as_json_object, thread_metadata
+from agent.utils.thread_ops import langgraph_client
 
 logger = logging.getLogger(__name__)
 
 _GITHUB_API = "https://api.github.com"
-_GITHUB_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
+_GITHUB_TIMEOUT = httpx2.Timeout(15.0, connect=5.0)
 
 
 async def _require_app_token() -> str:
@@ -47,7 +50,7 @@ async def _github_get(
     headers = github_headers(token)
     if accept:
         headers["Accept"] = accept
-    async with httpx.AsyncClient(timeout=_GITHUB_TIMEOUT) as client:
+    async with httpx2.AsyncClient(timeout=_GITHUB_TIMEOUT) as client:
         response = await client.get(f"{_GITHUB_API}{path}", headers=headers, params=params)
     if response.status_code == 404:
         raise HTTPException(404, "not found on GitHub")
@@ -59,7 +62,7 @@ async def _github_get(
     return response.json()
 
 
-def _github_error_message(response: httpx.Response) -> str:
+def _github_error_message(response: httpx2.Response) -> str:
     """Best-effort extraction of GitHub's error message for surfacing to the UI."""
     fallback = f"GitHub request failed ({response.status_code})"
     try:
@@ -82,25 +85,24 @@ def _github_error_message(response: httpx.Response) -> str:
     return message_str or detail or fallback
 
 
-async def _github_post(path: str, token: str, *, json: dict[str, Any]) -> Any:
-    async with httpx.AsyncClient(timeout=_GITHUB_TIMEOUT) as client:
-        response = await client.post(
-            f"{_GITHUB_API}{path}", headers=github_headers(token), json=json
+async def _github_write(
+    method: Literal["POST", "PATCH"], path: str, token: str, *, json: dict[str, Any]
+) -> Any:
+    async with httpx2.AsyncClient(timeout=_GITHUB_TIMEOUT) as client:
+        response = await client.request(
+            method, f"{_GITHUB_API}{path}", headers=github_headers(token), json=json
         )
     if response.status_code >= 400:
         message = _github_error_message(response)
-        logger.warning("GitHub POST %s failed: %s %s", path, response.status_code, message)
+        logger.warning("GitHub %s %s failed: %s %s", method, path, response.status_code, message)
         # Pass 4xx through verbatim (422 = line not in diff, 403 = perms); collapse
         # 5xx to a 502 so a GitHub outage doesn't masquerade as a client error.
         raise HTTPException(response.status_code if response.status_code < 500 else 502, message)
     return response.json()
 
 
-def reviewer_thread_id(owner: str, repo: str, pr_number: int) -> str:
-    import uuid
-
-    stable_key = f"{owner}/{repo}/pr/{pr_number}/reviewer"
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, stable_key))
+async def _github_post(path: str, token: str, *, json: dict[str, Any]) -> Any:
+    return await _github_write("POST", path, token, json=json)
 
 
 def _findings_list(metadata: dict[str, Any]) -> list[dict[str, Any]]:
@@ -111,6 +113,9 @@ def _findings_list(metadata: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _serialize_finding(finding: dict[str, Any], head_sha: str | None) -> dict[str, Any]:
+    # Records persisted by older revisions carry the legacy GitHub-identity
+    # fields; normalize before reading them through the accessors.
+    coerce_finding(finding)
     last_confirmed = finding.get("last_confirmed_sha")
     outdated = bool(
         head_sha
@@ -119,6 +124,7 @@ def _serialize_finding(finding: dict[str, Any], head_sha: str | None) -> dict[st
         and last_confirmed != head_sha
     )
     interactions = finding.get("interactions")
+    comment_ids = comment_ids_for_finding(finding)
     return {
         "id": finding.get("id"),
         "severity": finding.get("severity", "low"),
@@ -136,12 +142,8 @@ def _serialize_finding(finding: dict[str, Any], head_sha: str | None) -> dict[st
         "outdated": outdated,
         "resolution_note": finding.get("resolution_note"),
         "diff_hunk": finding.get("diff_hunk"),
-        "github_thread_resolved": bool(finding.get("github_thread_resolved")),
-        "github_review_comment_id": (
-            finding["github_review_comment_id"]
-            if isinstance(finding.get("github_review_comment_id"), int)
-            else None
-        ),
+        "github_thread_resolved": is_thread_resolved(finding),
+        "github_review_comment_id": comment_ids[0] if comment_ids else None,
         "interactions": interactions if isinstance(interactions, list) else [],
     }
 
@@ -445,6 +447,32 @@ async def create_review_comment(
     )
 
 
+async def update_review_comment(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    comment_id: int,
+    *,
+    token: str,
+    viewer_login: str,
+    body: str,
+) -> dict[str, Any]:
+    """Update an inline review comment owned by the signed-in user."""
+    path = f"/repos/{owner}/{repo}/pulls/comments/{comment_id}"
+    comment = as_json_object(await _github_get(path, token))
+    author = as_json_object(comment.get("user")).get("login")
+    pull_request_url = comment.get("pull_request_url")
+    expected_pr_url = f"{_GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}"
+    if (
+        not isinstance(author, str)
+        or author.lower() != viewer_login.lower()
+        or not isinstance(pull_request_url, str)
+        or pull_request_url.lower() != expected_pr_url.lower()
+    ):
+        raise HTTPException(403, "comment is not editable by this user")
+    return await _github_write("PATCH", path, token, json={"body": body})
+
+
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 # Inline comments the reviewer posts carry this hidden marker (see reviewer_publish).
 _ALEPHAT_COMMENT_RE = re.compile(r"<!--\s*alephat-review-comment\b")
@@ -565,7 +593,7 @@ async def get_review_diff(owner: str, repo: str, pr_number: int) -> dict[str, An
     is viewing the review. The client renders these with pierre's MultiFileDiff.
     """
     token = await _require_app_token()
-    async with httpx.AsyncClient(headers=github_headers(token), timeout=_GITHUB_TIMEOUT) as client:
+    async with httpx2.AsyncClient(headers=github_headers(token), timeout=_GITHUB_TIMEOUT) as client:
         diff = await build_pr_diff_files(client, f"{owner}/{repo}", pr_number)
     files = diff["files"]
     return {
@@ -658,7 +686,7 @@ async def proxy_pr_image(owner: str, repo: str, pr_number: int, url: str) -> Res
     headers = {"Authorization": f"Bearer {token}", "Accept": "image/*"}
 
     current_url = url
-    async with httpx.AsyncClient(timeout=_GITHUB_TIMEOUT, follow_redirects=False) as client:
+    async with httpx2.AsyncClient(timeout=_GITHUB_TIMEOUT, follow_redirects=False) as client:
         for _ in range(_MAX_IMAGE_REDIRECTS + 1):
             async with client.stream("GET", current_url, headers=headers) as response:
                 if response.is_redirect:
@@ -700,7 +728,7 @@ async def proxy_pr_image(owner: str, repo: str, pr_number: int, url: str) -> Res
 
 
 async def trigger_re_review(owner: str, repo: str, pr_number: int, login: str) -> dict[str, Any]:
-    from ..utils.slack import GitHubPrRef
+    from agent.slack.client import GitHubPrRef
 
     pr_ref = GitHubPrRef(
         owner=owner,
@@ -712,37 +740,3 @@ async def trigger_re_review(owner: str, repo: str, pr_number: int, login: str) -
     if not result.get("success"):
         raise HTTPException(502, str(result.get("error") or "could not trigger review"))
     return result
-
-
-async def dry_run_trace_resolution(owner: str, repo: str, pr_number: int) -> dict[str, Any]:
-    """Resolve a PR to its author coding-agent thread without running a review."""
-    from dataclasses import asdict
-
-    from ..review.trace_context import resolve_pr_trace
-    from ..utils.github_app import get_github_app_installation_token_with_expiry
-    from ..utils.slack import GitHubPrRef
-
-    pr_ref = GitHubPrRef(
-        owner=owner,
-        repo=repo,
-        number=pr_number,
-        url=f"https://github.com/{owner}/{repo}/pull/{pr_number}",
-    )
-    token, _ = await get_github_app_installation_token_with_expiry()
-    if not token:
-        raise HTTPException(502, "No GitHub App token available")
-    pr_metadata = await fetch_github_pr_metadata(pr_ref, token=token)
-    if not pr_metadata:
-        raise HTTPException(502, "Could not fetch pull request metadata")
-
-    head = pr_metadata.get("head") or {}
-    base = pr_metadata.get("base") or {}
-    configurable = {
-        "repo": {"owner": owner, "name": repo},
-        "pr_number": pr_number,
-        "pr_url": pr_metadata.get("html_url") or pr_ref.url,
-        "branch_name": head.get("ref", ""),
-        "head_sha": head.get("sha", ""),
-        "base_sha": base.get("sha", ""),
-    }
-    return asdict(await resolve_pr_trace(configurable=configurable))

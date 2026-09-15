@@ -1,7 +1,5 @@
 """HTTP/problem-style errors for platform services."""
 
-from __future__ import annotations
-
 from typing import Any
 
 

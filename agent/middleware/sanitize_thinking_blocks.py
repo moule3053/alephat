@@ -1,14 +1,13 @@
 """Middleware that removes malformed Anthropic thinking blocks before model calls."""
 
-from __future__ import annotations
-
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage
+
+from agent.middleware.trace import AlephatMiddleware
 
 
 def _is_chat_anthropic(model: object) -> bool:
@@ -45,7 +44,7 @@ def _sanitize_messages(messages: list[Any]) -> None:
             message.content = content
 
 
-class SanitizeThinkingBlocksMiddleware(AgentMiddleware):
+class SanitizeThinkingBlocksMiddleware(AlephatMiddleware):
     """Drop empty Anthropic thinking blocks before provider validation."""
 
     async def awrap_model_call(

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import hashlib
 import hmac
@@ -7,22 +5,41 @@ import importlib
 import json
 import logging
 from typing import cast
+from xml.etree import ElementTree
 
+import pytest
 from fastapi.testclient import TestClient
-from httpx import Response
 
 from agent.api.app import app
-from agent.tools import request_pr_review as request_pr_review_tool
-from agent.utils import slack as slack_utils
-from agent.utils.slack import GitHubPrRef
+from agent.github import webhook as github_webhooks
+from agent.slack import client as slack_utils
+from agent.slack import webhook as slack_webhooks
+from agent.slack.client import GitHubPrRef
+from agent.slack.request import SlackRequest
+from agent.slack.tools.request_pr_review import request_pr_review as request_pr_review_tool
+from agent.thread_ids import github_issue_thread_id
 from agent.webhooks import common as webhook_common
-from agent.webhooks import github as github_webhooks
-from agent.webhooks import slack as slack_webhooks
 
-request_pr_review_module = importlib.import_module("agent.tools.request_pr_review")
+request_pr_review_module = importlib.import_module("agent.slack.tools.request_pr_review")
 
 _TEST_WEBHOOK_SECRET = "test-secret-for-webhook"
 _TEST_SLACK_SECRET = "test-slack-secret"
+
+
+@pytest.fixture(autouse=True)
+def _explicit_slack_thread_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def resolve(*args: object, **kwargs: object) -> str:
+        return "mapped-slack-thread"
+
+    async def lookup(*args: object, **kwargs: object) -> None:
+        return None
+
+    async def channel_context(*args: object, **kwargs: object) -> dict[str, bool]:
+        return {"is_ext_shared": False, "is_pending_ext_shared": False}
+
+    monkeypatch.setattr(webhook_common, "resolve_slack_thread_id", resolve)
+    monkeypatch.setattr(webhook_common, "lookup_slack_thread_id", lookup)
+    monkeypatch.setattr(webhook_common, "resolve_slack_channel_context", channel_context)
 
 
 def _sign_body(body: bytes, secret: str = _TEST_WEBHOOK_SECRET) -> str:
@@ -31,9 +48,7 @@ def _sign_body(body: bytes, secret: str = _TEST_WEBHOOK_SECRET) -> str:
     return f"sha256={sig}"
 
 
-def _post_github_webhook(
-    client: TestClient, event_type: str, payload: dict[object, object]
-) -> Response:
+def _post_github_webhook(client: TestClient, event_type: str, payload: dict[object, object]):
     """Send a signed GitHub webhook POST request."""
     body = json.dumps(payload, separators=(",", ":")).encode()
     return client.post(
@@ -53,7 +68,7 @@ def _sign_slack_body(body: bytes, timestamp: str = "1700000000") -> str:
     return f"v0={sig}"
 
 
-def _post_slack_webhook(client: TestClient, payload: dict[object, object]) -> Response:
+def _post_slack_webhook(client: TestClient, payload: dict[object, object]):
     body = json.dumps(payload, separators=(",", ":")).encode()
     timestamp = "1700000000"
     return client.post(
@@ -67,33 +82,12 @@ def _post_slack_webhook(client: TestClient, payload: dict[object, object]) -> Re
     )
 
 
-def test_generate_thread_id_from_github_issue_is_deterministic() -> None:
-    first = webhook_common.generate_thread_id_from_github_issue("12345")
-    second = webhook_common.generate_thread_id_from_github_issue("12345")
+def test_github_issue_thread_id_is_deterministic() -> None:
+    first = github_issue_thread_id("12345")
+    second = github_issue_thread_id("12345")
 
     assert first == second
     assert len(first) == 36
-
-
-def test_build_github_issue_prompt_includes_issue_context() -> None:
-    prompt = github_webhooks.build_github_issue_prompt(
-        {"owner": "langchain-ai", "name": "alephat"},
-        42,
-        "12345",
-        "Fix the flaky test",
-        "The test is failing intermittently.",
-        [{"author": "octocat", "body": "Please take a look", "created_at": "2026-03-09T00:00:00Z"}],
-        github_login="octocat",
-        issue_url="https://github.com/moule3053/alephat/issues/42",
-    )
-
-    assert "Fix the flaky test" in prompt
-    assert "The test is failing intermittently." in prompt
-    assert "Please take a look" in prompt
-    assert "https://github.com/moule3053/alephat/issues/42" in prompt
-    assert "PR description links back to this issue" in prompt
-    assert "repository's PR conventions" in prompt
-    assert "GH_TOKEN=dummy gh issue comment" in prompt
 
 
 def test_build_github_issue_followup_prompt_only_includes_comment() -> None:
@@ -126,7 +120,7 @@ def test_auto_review_enablement_uses_dashboard_opt_in(monkeypatch) -> None:
 
     assert (
         asyncio.run(
-            webhook_common._is_repo_auto_review_enabled(
+            webhook_common.is_repo_auto_review_enabled(
                 {"owner": "langchain-ai", "name": "alephat-app"}
             )
         )
@@ -135,9 +129,7 @@ def test_auto_review_enablement_uses_dashboard_opt_in(monkeypatch) -> None:
     assert seen == {"owner": "langchain-ai", "name": "alephat-app"}
     assert (
         asyncio.run(
-            webhook_common._is_repo_auto_review_enabled(
-                {"owner": "langchain-ai", "name": "alephat"}
-            )
+            webhook_common.is_repo_auto_review_enabled({"owner": "langchain-ai", "name": "alephat"})
         )
         is False
     )
@@ -153,7 +145,7 @@ def test_github_webhook_skips_automatic_review_when_disabled(monkeypatch) -> Non
         nonlocal called
         called = True
 
-    monkeypatch.setattr(webhook_common, "_is_repo_auto_review_enabled", fake_auto_review_enabled)
+    monkeypatch.setattr(webhook_common, "is_repo_auto_review_enabled", fake_auto_review_enabled)
     monkeypatch.setattr(github_webhooks, "process_github_pr_ready", fake_process_github_pr_ready)
     monkeypatch.setattr(webhook_common, "GITHUB_WEBHOOK_SECRET", _TEST_WEBHOOK_SECRET)
 
@@ -287,7 +279,7 @@ def test_github_webhook_ignores_unmentioned_comment_without_info_log(monkeypatch
             "action": "created",
             "pull_request": {
                 "number": 1244,
-                "html_url": "https://github.com/moule3053/alephat/pull/1244",
+                "html_url": "https://github.com/langchain-ai/alephat/pull/1244",
                 "base": {"sha": "base-sha"},
                 "head": {"sha": "head-sha", "ref": "feature-branch"},
             },
@@ -297,12 +289,13 @@ def test_github_webhook_ignores_unmentioned_comment_without_info_log(monkeypatch
         },
     )
 
+    tags = webhook_common.describe_alephat_tags()
     assert response.status_code == 200
     assert response.json() == {
         "status": "ignored",
-        "reason": "Comment does not mention @alephat or @alephat",
+        "reason": f"Comment does not mention {tags}",
     }
-    assert "does not mention @alephat or @alephat" not in caplog.text
+    assert f"does not mention {tags}" not in caplog.text
 
 
 def test_github_webhook_routes_review_comment_reply_without_tag(monkeypatch) -> None:
@@ -322,7 +315,7 @@ def test_github_webhook_routes_review_comment_reply_without_tag(monkeypatch) -> 
         "process_github_review_finding_reply",
         fake_process_github_review_finding_reply,
     )
-    monkeypatch.setattr(webhook_common, "_is_repo_auto_review_enabled", fake_auto_review_enabled)
+    monkeypatch.setattr(webhook_common, "is_repo_auto_review_enabled", fake_auto_review_enabled)
     monkeypatch.setattr(webhook_common, "GITHUB_WEBHOOK_SECRET", _TEST_WEBHOOK_SECRET)
 
     client = TestClient(app)
@@ -394,7 +387,7 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
     class _FakeLangGraphClient:
         runs = _FakeRunsClient()
 
-    monkeypatch.setattr(webhook_common, "_get_thread_metadata_safe", fake_get_thread_metadata_safe)
+    monkeypatch.setattr(webhook_common, "get_thread_metadata_safe", fake_get_thread_metadata_safe)
     monkeypatch.setattr(
         webhook_common, "get_github_app_installation_token_with_expiry", fake_get_token_with_expiry
     )
@@ -403,7 +396,7 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
     monkeypatch.setattr(webhook_common, "reconcile_findings_with_review_threads", fake_reconcile)
     monkeypatch.setattr(webhook_common, "list_reviewer_findings", fake_list_findings)
     monkeypatch.setattr(webhook_common, "append_finding_interaction", fake_append_interaction)
-    monkeypatch.setattr(webhook_common, "_store_current_reviewer_run_id", fake_store_current_run_id)
+    monkeypatch.setattr(webhook_common, "store_current_reviewer_run_id", fake_store_current_run_id)
     monkeypatch.setattr(webhook_common, "get_client", lambda url: _FakeLangGraphClient())
 
     asyncio.run(
@@ -417,7 +410,7 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
                 },
                 "pull_request": {
                     "number": 1244,
-                    "html_url": "https://github.com/moule3053/alephat/pull/1244",
+                    "html_url": "https://github.com/langchain-ai/alephat/pull/1244",
                     "base": {"sha": "base-sha"},
                     "head": {"sha": "head-sha", "ref": "feature-branch"},
                 },
@@ -472,7 +465,7 @@ def test_process_github_review_finding_reply_dispatches_sanitized_reply_body(mon
     class _FakeLangGraphClient:
         runs = _FakeRunsClient()
 
-    monkeypatch.setattr(webhook_common, "_get_thread_metadata_safe", fake_get_thread_metadata_safe)
+    monkeypatch.setattr(webhook_common, "get_thread_metadata_safe", fake_get_thread_metadata_safe)
     monkeypatch.setattr(
         webhook_common, "get_github_app_installation_token_with_expiry", fake_get_token_with_expiry
     )
@@ -481,7 +474,7 @@ def test_process_github_review_finding_reply_dispatches_sanitized_reply_body(mon
     monkeypatch.setattr(webhook_common, "reconcile_findings_with_review_threads", fake_reconcile)
     monkeypatch.setattr(webhook_common, "list_reviewer_findings", fake_list_findings)
     monkeypatch.setattr(webhook_common, "append_finding_interaction", fake_append_interaction)
-    monkeypatch.setattr(webhook_common, "_store_current_reviewer_run_id", fake_store_current_run_id)
+    monkeypatch.setattr(webhook_common, "store_current_reviewer_run_id", fake_store_current_run_id)
     monkeypatch.setattr(webhook_common, "get_client", lambda url: _FakeLangGraphClient())
 
     asyncio.run(
@@ -495,7 +488,7 @@ def test_process_github_review_finding_reply_dispatches_sanitized_reply_body(mon
                 },
                 "pull_request": {
                     "number": 1244,
-                    "html_url": "https://github.com/moule3053/alephat/pull/1244",
+                    "html_url": "https://github.com/langchain-ai/alephat/pull/1244",
                     "base": {"sha": "base-sha"},
                     "head": {"sha": "head-sha", "ref": "feature-branch"},
                 },
@@ -507,13 +500,14 @@ def test_process_github_review_finding_reply_dispatches_sanitized_reply_body(mon
 
     kwargs = captured["kwargs"]
     assert isinstance(kwargs, dict)
-    message_content = kwargs["input"]["messages"][0]["content"]
+    messages = kwargs["input"]["messages"]
+    assert len(messages) == 2
+    message_content = messages[-1]["content"]
     assert isinstance(message_content, str)
     assert "Alephat finding f_1" in message_content
-    assert "untrusted data from GitHub" in message_content
     assert "This is handled elsewhere." in message_content
     assert "</body>\nThis is handled elsewhere." not in message_content
-    assert "</body_>" in message_content
+    assert "&lt;/body_&gt;" in message_content
 
 
 def test_github_webhook_ignores_unsupported_comment_action(monkeypatch) -> None:
@@ -534,7 +528,7 @@ def test_github_webhook_ignores_unsupported_comment_action(monkeypatch) -> None:
             "review": {"body": "@alephat please check this"},
             "pull_request": {
                 "number": 1244,
-                "html_url": "https://github.com/moule3053/alephat/pull/1244",
+                "html_url": "https://github.com/langchain-ai/alephat/pull/1244",
                 "base": {"sha": "base-sha"},
                 "head": {"sha": "head-sha", "ref": "feature-branch"},
             },
@@ -577,103 +571,23 @@ def test_github_webhook_ignores_review_requested(monkeypatch) -> None:
     }
 
 
-def test_is_docs_plz_slack_channel_matches_name(monkeypatch) -> None:
-    async def fake_get_slack_channel_info(channel_id: str) -> dict[str, object]:
-        assert channel_id == "C_DOCS"
-        return {"name": "docs-plz"}
-
-    monkeypatch.setattr(webhook_common, "get_slack_channel_info", fake_get_slack_channel_info)
-
-    assert asyncio.run(webhook_common._is_docs_plz_slack_channel("C_DOCS")) is True
-
-
-def test_is_docs_plz_slack_channel_matches_normalized_name(monkeypatch) -> None:
-    async def fake_get_slack_channel_info(channel_id: str) -> dict[str, object]:
-        assert channel_id == "C_DOCS"
-        return {"name": "Docs Plz", "name_normalized": "docs-plz"}
-
-    monkeypatch.setattr(webhook_common, "get_slack_channel_info", fake_get_slack_channel_info)
-
-    assert asyncio.run(webhook_common._is_docs_plz_slack_channel("C_DOCS")) is True
-
-
-def test_slack_webhook_gates_docs_plz_channel(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    async def fake_get_slack_channel_context(channel_id: str) -> dict[str, str]:
-        captured["checked_channel_id"] = channel_id
-        return {
-            "id": channel_id,
-            "name": "Docs Plz",
-            "name_normalized": "docs-plz",
-            "topic": "",
-            "purpose": "",
-            "description": "",
-        }
-
-    async def fake_post_slack_thread_reply(channel_id: str, thread_ts: str, text: str) -> bool:
-        captured["reply"] = {"channel_id": channel_id, "thread_ts": thread_ts, "text": text}
-        return True
-
-    async def fail_get_slack_repo_config(
-        channel_id: str, thread_ts: str, slack_user_id: str | None = None, **kwargs: object
-    ) -> dict[str, str]:
-        raise AssertionError("docs-plz gate should skip repo resolution")
-
-    async def fail_process_slack_mention(
-        event_data: dict[str, object], repo_config: dict[str, str]
-    ) -> None:
-        raise AssertionError("docs-plz gate should not start the agent")
-
-    monkeypatch.setattr(webhook_common, "SLACK_SIGNING_SECRET", _TEST_SLACK_SECRET)
-    monkeypatch.setattr(webhook_common, "SLACK_BOT_USER_ID", "UBOT")
-    monkeypatch.setattr(webhook_common, "SLACK_BOT_USERNAME", "alephat")
-    monkeypatch.setattr(slack_utils.time, "time", lambda: 1700000000)
-    monkeypatch.setattr(
-        webhook_common, "_get_slack_channel_context", fake_get_slack_channel_context
-    )
-    monkeypatch.setattr(webhook_common, "post_slack_thread_reply", fake_post_slack_thread_reply)
-    monkeypatch.setattr(webhook_common, "get_slack_repo_config", fail_get_slack_repo_config)
-    monkeypatch.setattr(slack_webhooks, "process_slack_mention", fail_process_slack_mention)
-
-    client = TestClient(app)
-    response = _post_slack_webhook(
-        client,
-        {
-            "type": "event_callback",
-            "event": {
-                "type": "app_mention",
-                "channel": "C_DOCS",
-                "ts": "1700000000.000100",
-                "user": "U123",
-                "text": "<@UBOT> please update docs",
-            },
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "accepted", "message": "Slack mention gated for docs-plz"}
-    assert captured["checked_channel_id"] == "C_DOCS"
-    assert captured["reply"] == {
-        "channel_id": "C_DOCS",
-        "thread_ts": "1700000000.000100",
-        "text": webhook_common.DOCS_PLZ_SLACK_GATE_REPLY,
-    }
-
-
-def test_slack_webhook_routes_review_command_to_agent(monkeypatch) -> None:
+def test_slack_webhook_routes_docs_plz_channel_to_agent(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     channel_context = {
         "id": "C123",
-        "name": "eng-alephat",
-        "name_normalized": "eng-alephat",
+        "name": "docs-plz",
+        "name_normalized": "docs-plz",
         "topic": "Coordinate work",
-        "purpose": "repo:moule3053/alephat",
-        "description": "Coordinate work\nrepo:moule3053/alephat",
+        "purpose": "repo:langchain-ai/alephat",
+        "description": "Coordinate work\nrepo:langchain-ai/alephat",
+        "is_ext_shared": False,
+        "is_pending_ext_shared": False,
     }
 
-    async def fake_get_slack_channel_context(channel_id: str) -> dict[str, str]:
+    async def fake_get_slack_channel_context(
+        channel_id: str, *, use_cache: bool = True
+    ) -> dict[str, str | bool]:
         captured["channel_context_request"] = channel_id
         return channel_context
 
@@ -682,6 +596,7 @@ def test_slack_webhook_routes_review_command_to_agent(monkeypatch) -> None:
         thread_ts: str,
         slack_user_id: str | None = None,
         channel_context: dict[str, str] | None = None,
+        **kwargs: object,
     ) -> dict[str, str]:
         captured["repo_config_request"] = {
             "channel_id": channel_id,
@@ -702,7 +617,7 @@ def test_slack_webhook_routes_review_command_to_agent(monkeypatch) -> None:
     monkeypatch.setattr(webhook_common, "SLACK_BOT_USERNAME", "alephat")
     monkeypatch.setattr(slack_utils.time, "time", lambda: 1700000000)
     monkeypatch.setattr(
-        webhook_common, "_get_slack_channel_context", fake_get_slack_channel_context
+        webhook_common, "resolve_slack_channel_context", fake_get_slack_channel_context
     )
     monkeypatch.setattr(webhook_common, "get_slack_repo_config", fake_get_slack_repo_config)
     monkeypatch.setattr(slack_webhooks, "process_slack_mention", fake_process_slack_mention)
@@ -717,7 +632,7 @@ def test_slack_webhook_routes_review_command_to_agent(monkeypatch) -> None:
                 "channel": "C123",
                 "ts": "1700000000.000100",
                 "user": "U123",
-                "text": "<@UBOT> review https://github.com/moule3053/alephat/pull/1244",
+                "text": "<@UBOT> please update docs",
             },
         },
     )
@@ -733,9 +648,9 @@ def test_slack_webhook_routes_review_command_to_agent(monkeypatch) -> None:
         "channel_context": channel_context,
     }
     event_data = captured["event_data"]
-    assert isinstance(event_data, dict)
-    assert event_data["channel_context"] == channel_context
-    assert event_data["text"] == "<@UBOT> review https://github.com/moule3053/alephat/pull/1244"
+    assert isinstance(event_data, SlackRequest)
+    assert event_data.channel_context == channel_context
+    assert event_data.text == "<@UBOT> please update docs"
 
 
 def test_slack_webhook_malformed_review_command_starts_agent(monkeypatch) -> None:
@@ -769,7 +684,7 @@ def test_slack_webhook_malformed_review_command_starts_agent(monkeypatch) -> Non
                 "channel": "C123",
                 "ts": "1700000000.000100",
                 "user": "U123",
-                "text": "<@UBOT> review https://github.com/moule3053/alephat/issues/1244",
+                "text": "<@UBOT> review https://github.com/langchain-ai/alephat/issues/1244",
             },
         },
     )
@@ -778,8 +693,8 @@ def test_slack_webhook_malformed_review_command_starts_agent(monkeypatch) -> Non
     assert response.json()["message"] == "Slack mention queued"
     assert captured["repo_config"] == {"owner": "langchain-ai", "name": "alephat"}
     event_data = captured["event_data"]
-    assert isinstance(event_data, dict)
-    assert event_data["text"] == "<@UBOT> review https://github.com/moule3053/alephat/issues/1244"
+    assert isinstance(event_data, SlackRequest)
+    assert event_data.text == "<@UBOT> review https://github.com/langchain-ai/alephat/issues/1244"
 
 
 def test_slack_webhook_non_pr_review_request_starts_agent(monkeypatch) -> None:
@@ -809,7 +724,7 @@ def test_slack_webhook_non_pr_review_request_starts_agent(monkeypatch) -> None:
     monkeypatch.setattr(slack_webhooks, "process_slack_mention", fake_process_slack_mention)
     monkeypatch.setattr(
         webhook_common,
-        "_is_repo_allowed",
+        "is_repo_allowed",
         lambda repo_config: (_ for _ in ()).throw(
             AssertionError("Slack webhook should not gate inferred repos with allowlists")
         ),
@@ -834,8 +749,8 @@ def test_slack_webhook_non_pr_review_request_starts_agent(monkeypatch) -> None:
     assert response.json()["message"] == "Slack mention queued"
     assert captured["repo_config"] == {"owner": "langchain-ai", "name": "alephat"}
     event_data = captured["event_data"]
-    assert isinstance(event_data, dict)
-    assert event_data["text"] == "<@UBOT> review this branch"
+    assert isinstance(event_data, SlackRequest)
+    assert event_data.text == "<@UBOT> review this branch"
 
 
 def test_slack_webhook_threaded_followup_uses_parent_thread_ts(monkeypatch) -> None:
@@ -888,9 +803,9 @@ def test_slack_webhook_threaded_followup_uses_parent_thread_ts(monkeypatch) -> N
         "slack_user_id": "U123",
     }
     event_data = captured["event_data"]
-    assert isinstance(event_data, dict)
-    assert event_data["thread_ts"] == "1700000000.000100"
-    assert event_data["event_ts"] == "1700000000.000200"
+    assert isinstance(event_data, SlackRequest)
+    assert event_data.thread_ts == "1700000000.000100"
+    assert event_data.event_ts == "1700000000.000200"
 
 
 def test_slack_webhook_accepts_unmentioned_direct_message(monkeypatch) -> None:
@@ -946,9 +861,9 @@ def test_slack_webhook_accepts_unmentioned_direct_message(monkeypatch) -> None:
         "slack_user_id": "U123",
     }
     event_data = captured["event_data"]
-    assert isinstance(event_data, dict)
-    assert event_data["text"] == "please check my branch"
-    assert event_data["treat_all_messages_as_mentions"] is True
+    assert isinstance(event_data, SlackRequest)
+    assert event_data.text == "please check my branch"
+    assert event_data.treat_all_messages_as_mentions is True
 
 
 def test_slack_webhook_accepts_unmentioned_ready_plan_reply(monkeypatch) -> None:
@@ -969,9 +884,7 @@ def test_slack_webhook_accepts_unmentioned_ready_plan_reply(monkeypatch) -> None
     monkeypatch.setattr(webhook_common, "SLACK_SIGNING_SECRET", _TEST_SLACK_SECRET)
     monkeypatch.setattr(webhook_common, "SLACK_BOT_USER_ID", "UBOT")
     monkeypatch.setattr(slack_utils.time, "time", lambda: 1700000000)
-    monkeypatch.setattr(
-        slack_webhooks, "_slack_user_can_reply_to_ready_plan", fake_ready_plan_reply
-    )
+    monkeypatch.setattr(slack_webhooks, "slack_user_can_reply_to_ready_plan", fake_ready_plan_reply)
     monkeypatch.setattr(webhook_common, "get_slack_repo_config", fake_get_slack_repo_config)
     monkeypatch.setattr(slack_webhooks, "process_slack_mention", fake_process_slack_mention)
 
@@ -994,7 +907,7 @@ def test_slack_webhook_accepts_unmentioned_ready_plan_reply(monkeypatch) -> None
     assert response.json()["message"] == "Slack mention queued"
     assert captured["plan_reply_check"] == ("C123", "1700000000.000100", "U123")
     event_data = cast(dict[str, object], captured["event_data"])
-    assert event_data["text"] == "looks good, go ahead"
+    assert event_data.text == "looks good, go ahead"
 
 
 def test_slack_webhook_ignores_unmentioned_non_plan_reply(monkeypatch) -> None:
@@ -1004,9 +917,7 @@ def test_slack_webhook_ignores_unmentioned_non_plan_reply(monkeypatch) -> None:
     monkeypatch.setattr(webhook_common, "SLACK_SIGNING_SECRET", _TEST_SLACK_SECRET)
     monkeypatch.setattr(webhook_common, "SLACK_BOT_USER_ID", "UBOT")
     monkeypatch.setattr(slack_utils.time, "time", lambda: 1700000000)
-    monkeypatch.setattr(
-        slack_webhooks, "_slack_user_can_reply_to_ready_plan", fake_ready_plan_reply
-    )
+    monkeypatch.setattr(slack_webhooks, "slack_user_can_reply_to_ready_plan", fake_ready_plan_reply)
 
     response = _post_slack_webhook(
         TestClient(app),
@@ -1086,7 +997,7 @@ def test_process_github_pr_ready_creates_reviewer_run(monkeypatch) -> None:
                 "action": "opened",
                 "pull_request": {
                     "number": 1244,
-                    "html_url": "https://github.com/moule3053/alephat/pull/1244",
+                    "html_url": "https://github.com/langchain-ai/alephat/pull/1244",
                     "base": {"sha": "base-sha", "ref": "main"},
                     "head": {"sha": "head-sha", "ref": "feature-branch"},
                 },
@@ -1098,7 +1009,7 @@ def test_process_github_pr_ready_creates_reviewer_run(monkeypatch) -> None:
 
     kwargs = cast(dict[str, object], captured["kwargs"])
     input_data = cast(dict[str, object], kwargs["input"])
-    prompt = cast(list[dict[str, str]], input_data["messages"])[0]["content"]
+    prompt = cast(list[dict[str, str]], input_data["messages"])[-1]["content"]
     config = cast(dict[str, object], cast(dict[str, object], kwargs["config"])["configurable"])
 
     assert captured["graph"] == "reviewer"
@@ -1106,9 +1017,9 @@ def test_process_github_pr_ready_creates_reviewer_run(monkeypatch) -> None:
         "thread_id": captured["thread_id"],
         "if_exists": "do_nothing",
     }
-    assert "https://github.com/moule3053/alephat/pull/1244" in prompt
-    assert "Base SHA: base-sha" in prompt
-    assert "Head SHA: head-sha" in prompt
+    assert "https://github.com/langchain-ai/alephat/pull/1244" in prompt
+    assert "<base_sha>base-sha</base_sha>" in prompt
+    assert "<head_sha>head-sha</head_sha>" in prompt
     assert config["source"] == "github"
     assert config["repo"] == {"owner": "langchain-ai", "name": "alephat"}
     assert config["pr_number"] == 1244
@@ -1165,7 +1076,7 @@ def test_trigger_pr_review_from_ref_creates_reviewer_run(monkeypatch) -> None:
         captured["set_metadata_thread_id"] = thread_id
         captured["set_metadata_kwargs"] = kwargs
 
-    monkeypatch.setattr(webhook_common, "_is_repo_auto_review_enabled", fake_auto_review_enabled)
+    monkeypatch.setattr(webhook_common, "is_repo_auto_review_enabled", fake_auto_review_enabled)
     monkeypatch.setattr(
         webhook_common, "get_github_app_installation_token", fake_get_github_app_installation_token
     )
@@ -1195,7 +1106,7 @@ def test_trigger_pr_review_from_ref_creates_reviewer_run(monkeypatch) -> None:
                 owner="langchain-ai",
                 repo="alephat",
                 number=1244,
-                url="https://github.com/moule3053/alephat/pull/1244",
+                url="https://github.com/langchain-ai/alephat/pull/1244",
             ),
             source="slack",
             slack_channel_id="C123",
@@ -1205,7 +1116,7 @@ def test_trigger_pr_review_from_ref_creates_reviewer_run(monkeypatch) -> None:
 
     kwargs = cast(dict[str, object], captured["kwargs"])
     input_data = cast(dict[str, object], kwargs["input"])
-    prompt = cast(list[dict[str, str]], input_data["messages"])[0]["content"]
+    prompt = cast(list[dict[str, str]], input_data["messages"])[-1]["content"]
     config = cast(dict[str, object], cast(dict[str, object], kwargs["config"])["configurable"])
     assert result["success"] is True
     assert auto_review_checked is False
@@ -1215,8 +1126,8 @@ def test_trigger_pr_review_from_ref_creates_reviewer_run(monkeypatch) -> None:
         "if_exists": "do_nothing",
     }
     assert captured["metadata_token"] == "app-token"
-    assert "Base SHA: base-sha" in prompt
-    assert "Head SHA: head-sha" in prompt
+    assert "<base_sha>base-sha</base_sha>" in prompt
+    assert "<head_sha>head-sha</head_sha>" in prompt
     assert config["source"] == "slack"
     assert config["repo"] == {"owner": "langchain-ai", "name": "alephat"}
     assert config["pr_number"] == 1244
@@ -1270,7 +1181,7 @@ async def test_request_pr_review_tool_uses_shared_trigger(monkeypatch) -> None:
         },
     )
 
-    result = await request_pr_review_tool("https://github.com/moule3053/alephat/pull/1244")
+    result = await request_pr_review_tool("https://github.com/langchain-ai/alephat/pull/1244")
 
     pr_ref = captured["pr_ref"]
     assert isinstance(pr_ref, GitHubPrRef)
@@ -1294,7 +1205,7 @@ def test_process_github_pr_comment_without_email_skips(
             1244,
             "alephat/00000000-0000-0000-0000-000000000001",
             "external-user",
-            "https://github.com/moule3053/alephat/pull/1244",
+            "https://github.com/langchain-ai/alephat/pull/1244",
             9,
             None,
         )
@@ -1316,7 +1227,7 @@ def test_process_github_pr_comment_without_email_skips(
     )
     monkeypatch.setattr(webhook_common, "react_to_github_comment", fake_react)
     monkeypatch.setattr(webhook_common, "fetch_pr_comments_since_last_tag", fake_fetch_comments)
-    monkeypatch.setattr(webhook_common, "_trigger_or_queue_run", fake_trigger_or_queue_run)
+    monkeypatch.setattr(webhook_common, "trigger_or_queue_run", fake_trigger_or_queue_run)
 
     asyncio.run(
         github_webhooks.process_github_pr_comment(
@@ -1370,14 +1281,14 @@ def test_process_github_issue_uses_resolved_user_token_for_reaction(monkeypatch)
 
     monkeypatch.setattr(
         webhook_common,
-        "_get_or_resolve_thread_github_token",
+        "get_or_resolve_thread_github_token",
         fake_get_or_resolve_thread_github_token,
     )
     monkeypatch.setattr(
         webhook_common, "get_github_app_installation_token", fake_get_github_app_installation_token
     )
     monkeypatch.setattr(
-        webhook_common, "_thread_exists", lambda thread_id: asyncio.sleep(0, result=False)
+        webhook_common, "thread_exists", lambda thread_id: asyncio.sleep(0, result=False)
     )
     monkeypatch.setattr(webhook_common, "react_to_github_comment", fake_react_to_github_comment)
     monkeypatch.setattr(webhook_common, "fetch_issue_comments", fake_fetch_issue_comments)
@@ -1398,7 +1309,7 @@ def test_process_github_issue_uses_resolved_user_token_for_reaction(monkeypatch)
                     "number": 42,
                     "title": "Fix the flaky test",
                     "body": "The test is failing intermittently.",
-                    "html_url": "https://github.com/moule3053/alephat/issues/42",
+                    "html_url": "https://github.com/langchain-ai/alephat/issues/42",
                 },
                 "comment": {"id": 999, "body": "@alephat please handle this"},
                 "repository": {"owner": {"login": "langchain-ai"}, "name": "alephat"},
@@ -1444,20 +1355,20 @@ def test_process_github_issue_existing_thread_uses_followup_prompt(monkeypatch) 
 
     class _FakeRunsClient:
         async def create(self, *args, **kwargs) -> None:
-            captured["prompt"] = kwargs["input"]["messages"][0]["content"]
+            captured["messages"] = kwargs["input"]["messages"]
 
     class _FakeLangGraphClient:
         runs = _FakeRunsClient()
 
     monkeypatch.setattr(
         webhook_common,
-        "_get_or_resolve_thread_github_token",
+        "get_or_resolve_thread_github_token",
         fake_get_or_resolve_thread_github_token,
     )
     monkeypatch.setattr(
         webhook_common, "get_github_app_installation_token", fake_get_github_app_installation_token
     )
-    monkeypatch.setattr(webhook_common, "_thread_exists", fake_thread_exists)
+    monkeypatch.setattr(webhook_common, "thread_exists", fake_thread_exists)
     monkeypatch.setattr(webhook_common, "react_to_github_comment", fake_react_to_github_comment)
     monkeypatch.setattr(webhook_common, "fetch_issue_comments", fake_fetch_issue_comments)
     monkeypatch.setattr(webhook_common, "get_client", lambda url: _FakeLangGraphClient())
@@ -1481,7 +1392,7 @@ def test_process_github_issue_existing_thread_uses_followup_prompt(monkeypatch) 
                     "number": 42,
                     "title": "Fix the flaky test",
                     "body": "The test is failing intermittently.",
-                    "html_url": "https://github.com/moule3053/alephat/issues/42",
+                    "html_url": "https://github.com/langchain-ai/alephat/issues/42",
                 },
                 "comment": {
                     "id": 999,
@@ -1495,9 +1406,13 @@ def test_process_github_issue_existing_thread_uses_followup_prompt(monkeypatch) 
         )
     )
 
-    assert captured["prompt"] == "**octocat:**\n@alephat please handle this"
-    prompt = cast(str, captured["prompt"])
-    assert "## Repository" not in prompt
+    messages = cast(list[dict[str, str]], captured["messages"])
+    assert len(messages) == 2
+    entity = ElementTree.fromstring(messages[0]["content"])
+    request = ElementTree.fromstring(messages[1]["content"])
+    assert entity.attrib["id"] == "github:octocat"
+    assert request.findtext("content") == "**octocat:**\n@alephat please handle this"
+    assert request.find("repository") is None
 
 
 def test_github_webhook_routes_pr_comment_review_to_agent(monkeypatch) -> None:

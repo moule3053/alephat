@@ -9,18 +9,17 @@ tool list is recomputed on every model call), rather than only affecting a futur
 run.
 """
 
-from __future__ import annotations
-
 from collections.abc import Awaitable, Callable
 from typing import Any, NotRequired
 
 from langchain.agents.middleware.types import (
-    AgentMiddleware,
     AgentState,
     ModelRequest,
     ModelResponse,
 )
 from langchain_core.tools import BaseTool
+
+from agent.middleware.trace import AlephatMiddleware
 
 
 class PlanModeState(AgentState):
@@ -37,7 +36,7 @@ def _tool_name(tool: BaseTool | dict[str, Any] | Any) -> str | None:
     return name if isinstance(name, str) else None
 
 
-class PlanModeMiddleware(AgentMiddleware):
+class PlanModeMiddleware(AlephatMiddleware):
     """Strip disallowed tools from each model request while plan mode is active."""
 
     state_schema = PlanModeState

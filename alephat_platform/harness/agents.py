@@ -1,13 +1,11 @@
 """Agent type registry — extensible Deep Agents / coding loop entrypoints."""
 
-from __future__ import annotations
-
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
-from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware import AgentMiddleware, AgentState
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages import message_to_dict as langchain_message_to_dict
 from langchain_core.messages.utils import messages_from_dict
@@ -19,6 +17,11 @@ from alephat_platform.harness.mcp_runtime import McpSession
 from alephat_platform.harness.sandboxes import ExecResult, SandboxProviderBase, SandboxRef
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AgentRuntimeContext:
+    mcp_sessions: list[McpSession]
 
 
 class AgentCancelledError(RuntimeError):
@@ -57,7 +60,7 @@ def _context_message(message: dict[str, Any]) -> HumanMessage | AIMessage:
     return HumanMessage(**kwargs)
 
 
-class HarnessBoundaryMiddleware(AgentMiddleware):
+class HarnessBoundaryMiddleware(AgentMiddleware[AgentState, AgentRuntimeContext]):
     tools = ()
 
     def __init__(self, ctx: RunContext, on_step: Any, on_boundary: Any) -> None:
@@ -105,13 +108,13 @@ class HarnessBoundaryMiddleware(AgentMiddleware):
             next(
                 (
                     tool.server_id
-                    for session in request.runtime.context.get("mcp_sessions", [])
+                    for session in request.runtime.context.mcp_sessions
                     for tool in session.tools
                     if tool.namespaced == name
                 ),
                 None,
             )
-            if isinstance(request.runtime.context, dict)
+            if isinstance(request.runtime.context, AgentRuntimeContext)
             else None
         )
         if server_id:
@@ -534,14 +537,14 @@ class CodingAgentRunner:
             tools=[request_plan_approval, request_user_guidance, *mcp_tools],
             backend=sandbox_ref.handle,
             middleware=[middleware],
-            context_schema=dict,
+            context_schema=AgentRuntimeContext,
             checkpointer=False,
         )
         try:
             result = await graph.ainvoke(
                 {"messages": history},
                 config={"recursion_limit": 100},
-                context={"mcp_sessions": mcp_sessions},
+                context=AgentRuntimeContext(mcp_sessions=mcp_sessions),
             )
         except AgentCancelledError:
             return AgentResult(
@@ -591,25 +594,21 @@ class ReviewerAgentRunner(CodingAgentRunner):
     """Reviewer agent — same loop, different system framing via prompt prefix."""
 
     async def run(self, ctx: RunContext, **kwargs: Any) -> AgentResult:
-        ctx = RunContext(
-            **{
-                **ctx.__dict__,
-                "prompt": (
-                    f"[REVIEW MODE]\n{ctx.prompt or ''}\n"
-                    "Review the change; finish with DONE: findings summary."
-                ),
-            }
+        ctx = replace(
+            ctx,
+            prompt=(
+                f"[REVIEW MODE]\n{ctx.prompt or ''}\n"
+                "Review the change; finish with DONE: findings summary."
+            ),
         )
         return await super().run(ctx, **kwargs)
 
 
 class AnalyzerAgentRunner(CodingAgentRunner):
     async def run(self, ctx: RunContext, **kwargs: Any) -> AgentResult:
-        ctx = RunContext(
-            **{
-                **ctx.__dict__,
-                "prompt": f"[ANALYZER MODE]\n{ctx.prompt or ''}\nFinish with DONE: style notes.",
-            }
+        ctx = replace(
+            ctx,
+            prompt=f"[ANALYZER MODE]\n{ctx.prompt or ''}\nFinish with DONE: style notes.",
         )
         return await super().run(ctx, **kwargs)
 

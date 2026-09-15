@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import importlib
 import sys
@@ -7,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from deepagents.middleware.filesystem import FilesystemMiddleware
 from fastapi import HTTPException
 
 from agent.dashboard import review_chat_api
@@ -14,13 +13,13 @@ from agent.dashboard import review_chat_api
 # `agent.tools.__init__` rebinds these names to the tool *functions*, shadowing
 # the submodules. Import the real modules so we can monkeypatch their globals.
 list_review_findings = importlib.import_module("agent.tools.list_review_findings")
-read_repo_file = importlib.import_module("agent.tools.read_repo_file")
-search_repo_code = importlib.import_module("agent.tools.search_repo_code")
+read_repo_file = importlib.import_module("agent.github.tools.read_repo_file")
+search_repo_code = importlib.import_module("agent.github.tools.search_repo_code")
 web_search = importlib.import_module("agent.tools.web_search")
 
 
 def _fake_async_client(handler):
-    """Build a fake ``httpx.AsyncClient`` factory whose ``get`` calls ``handler``.
+    """Build a fake ``httpx2.AsyncClient`` factory whose ``get`` calls ``handler``.
 
     ``handler(url, headers=..., params=...)`` returns the response object.
     """
@@ -212,9 +211,7 @@ async def test_assert_chat_thread_access_rejects_unauthorized(monkeypatch, metad
 @pytest.mark.asyncio
 async def test_list_review_findings_compacts_and_filters(monkeypatch) -> None:
     monkeypatch.setattr(
-        list_review_findings,
-        "get_config",
-        lambda: {"configurable": {"reviewer_thread_id": "rt-1"}},
+        "agent.run_config.get_config", lambda: {"configurable": {"reviewer_thread_id": "rt-1"}}
     )
 
     async def fake_list(thread_id: str) -> list[dict[str, Any]]:
@@ -225,7 +222,7 @@ async def test_list_review_findings_compacts_and_filters(monkeypatch) -> None:
                 "title": "Open one",
                 "status": "open",
                 "severity": "high",
-                "github_review_comment_id": 999,
+                "github_review_comment_ids": [999],
             },
             {"id": "f2", "title": "Closed one", "status": "resolved", "severity": "low"},
         ]
@@ -237,12 +234,12 @@ async def test_list_review_findings_compacts_and_filters(monkeypatch) -> None:
     finding = result["findings"][0]
     assert finding["id"] == "f1"
     # compact view drops GitHub plumbing fields
-    assert "github_review_comment_id" not in finding
+    assert "github_review_comment_ids" not in finding
 
 
 @pytest.mark.asyncio
 async def test_list_review_findings_requires_reviewer_thread(monkeypatch) -> None:
-    monkeypatch.setattr(list_review_findings, "get_config", lambda: {"configurable": {}})
+    monkeypatch.setattr("agent.run_config.get_config", lambda: {"configurable": {}})
     result = await list_review_findings.list_review_findings()
     assert result["count"] == 0
     assert "reviewer thread" in result["error"]
@@ -253,8 +250,7 @@ async def test_read_repo_file_decodes_file(monkeypatch) -> None:
     import base64
 
     monkeypatch.setattr(
-        read_repo_file,
-        "get_config",
+        "agent.run_config.get_config",
         lambda: {
             "configurable": {
                 "chat_repo_owner": "acme",
@@ -275,7 +271,7 @@ async def test_read_repo_file_decodes_file(monkeypatch) -> None:
             json=lambda: {"type": "file", "content": base64.b64encode(b"hello\nworld").decode()},
         )
 
-    monkeypatch.setattr(read_repo_file.httpx, "AsyncClient", _fake_async_client(fake_get))
+    monkeypatch.setattr(read_repo_file.httpx2, "AsyncClient", _fake_async_client(fake_get))
 
     result = await read_repo_file.read_repo_file("src/app.py")
     assert result["success"] is True
@@ -287,8 +283,7 @@ async def test_read_repo_file_decodes_file(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_read_repo_file_lists_directory(monkeypatch) -> None:
     monkeypatch.setattr(
-        read_repo_file,
-        "get_config",
+        "agent.run_config.get_config",
         lambda: {
             "configurable": {
                 "chat_repo_owner": "acme",
@@ -307,24 +302,32 @@ async def test_read_repo_file_lists_directory(monkeypatch) -> None:
             ],
         )
 
-    monkeypatch.setattr(read_repo_file.httpx, "AsyncClient", _fake_async_client(fake_get))
+    monkeypatch.setattr(read_repo_file.httpx2, "AsyncClient", _fake_async_client(fake_get))
     result = await read_repo_file.read_repo_file("src")
     assert result["success"] is True
     assert {e["name"] for e in result["entries"]} == {"a.py", "sub"}
 
 
 @pytest.mark.asyncio
-async def test_read_repo_file_missing_context(monkeypatch) -> None:
-    monkeypatch.setattr(read_repo_file, "get_config", lambda: {"configurable": {}})
+async def test_repo_tools_require_context_and_token(monkeypatch) -> None:
+    monkeypatch.setattr("agent.run_config.get_config", lambda: {"configurable": {}})
     result = await read_repo_file.read_repo_file("src/app.py")
     assert result["success"] is False
+
+    config = {"configurable": {"chat_repo_owner": "acme", "chat_repo_name": "repo"}}
+    monkeypatch.setattr("agent.run_config.get_config", lambda: config)
+    for tool, args in (
+        (read_repo_file.read_repo_file, ("src/app.py",)),
+        (search_repo_code.search_repo_code, ("foo",)),
+    ):
+        result = await tool(*args)
+        assert result["error"] == "GitHub credentials unavailable; repository source was not read"
 
 
 @pytest.mark.asyncio
 async def test_search_repo_code_scopes_to_repo(monkeypatch) -> None:
     monkeypatch.setattr(
-        search_repo_code,
-        "get_config",
+        "agent.run_config.get_config",
         lambda: {
             "configurable": {
                 "chat_repo_owner": "acme",
@@ -345,7 +348,7 @@ async def test_search_repo_code_scopes_to_repo(monkeypatch) -> None:
             },
         )
 
-    monkeypatch.setattr(search_repo_code.httpx, "AsyncClient", _fake_async_client(fake_get))
+    monkeypatch.setattr(search_repo_code.httpx2, "AsyncClient", _fake_async_client(fake_get))
     result = await search_repo_code.search_repo_code("foo")
     assert result["success"] is True
     assert "repo:acme/repo" in captured["params"]["q"]
@@ -641,6 +644,26 @@ async def test_proxy_state_rejects_foreign_thread(monkeypatch) -> None:
 
 
 # --- graph factory guard -----------------------------------------------------
+
+
+def test_chat_excludes_mutating_filesystem_tools() -> None:
+    from agent.chat import _EXCLUDED_TOOLS
+
+    assert {"write_file", "edit_file", "delete", "execute"} <= _EXCLUDED_TOOLS
+
+
+def test_chat_general_purpose_subagent_is_read_only() -> None:
+    from agent.chat import _chat_general_purpose_subagent
+
+    spec = _chat_general_purpose_subagent()
+
+    assert spec["name"] == "general-purpose"
+    fs_middleware = [m for m in spec.get("middleware", []) if isinstance(m, FilesystemMiddleware)]
+    assert len(fs_middleware) == 1
+    enabled = fs_middleware[0]._enabled_tools
+    assert enabled is not None
+    assert {"write_file", "edit_file", "delete", "execute"}.isdisjoint(enabled)
+    assert {"read_file", "ls", "glob", "grep"} <= enabled
 
 
 @pytest.mark.asyncio

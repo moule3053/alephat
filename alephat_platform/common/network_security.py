@@ -1,7 +1,5 @@
 """Network boundary checks for user-configured remote MCP endpoints."""
 
-from __future__ import annotations
-
 import asyncio
 import ipaddress
 from urllib.parse import urlparse

@@ -38,7 +38,7 @@ esac
 export DASHBOARD_BASE_URL="$UI"
 export DASHBOARD_ALLOWED_ORIGINS="$UI"
 
-[ -d ui/node_modules ] || (cd ui && bun install)
+[ -d ui/node_modules ] || pnpm install --filter alephat-dashboard...
 
 echo
 echo "┌──────────────────────────────────────────────────────────────────────┐"

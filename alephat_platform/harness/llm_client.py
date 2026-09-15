@@ -14,8 +14,6 @@ Model id forms for direct mode:
   - bare name → ``DEFAULT_LLM_PROVIDER`` (default ``openai``)
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import os
@@ -41,7 +39,7 @@ async def _post_with_retry(
     for attempt in range(attempts):
         try:
             response = await client.post(url, **kwargs)
-        except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError):
+        except httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError:
             if attempt + 1 >= attempts:
                 raise
         else:

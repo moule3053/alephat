@@ -1,9 +1,8 @@
 """GitHub OAuth routes for the platform dashboard."""
 
-from __future__ import annotations
-
 import hmac
 import os
+from typing import Literal
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Request
@@ -15,7 +14,7 @@ from agent.dashboard.oauth import (
     STATE_COOKIE_NAME,
     STATE_TTL_SECONDS,
     decode_state,
-    enforce_org_login_gate,
+    enforce_github_login_gate,
     exchange_code,
     fetch_github_user,
     hash_state_nonce,
@@ -35,7 +34,7 @@ def _dashboard_url(name: str) -> str:
     return value
 
 
-def _cookie_security() -> tuple[bool, str]:
+def _cookie_security() -> tuple[bool, Literal["none", "lax"]]:
     if os.environ.get("DASHBOARD_API_BASE_URL", "").startswith("https://"):
         return True, "none"
     return False, "lax"
@@ -121,7 +120,7 @@ async def auth_callback(request: Request, code: str, state: str) -> RedirectResp
     login = user.get("login")
     if not isinstance(login, str) or not login:
         raise HTTPException(400, "could not resolve GitHub login")
-    await enforce_org_login_gate(login)
+    await enforce_github_login_gate(login)
 
     redirect_to = sanitize_redirect_to(state_payload.get("redirect_to")) or _dashboard_url(
         "DASHBOARD_BASE_URL"

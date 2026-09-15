@@ -48,7 +48,8 @@ function UsagePage() {
     queryKey: ["usageLeaderboard", activePeriod],
     queryFn: () => api.usageLeaderboard(activePeriod, 10),
     enabled: !!session.data,
-    staleTime: 5 * 60 * 1000,
+    staleTime: 60 * 1000,
+    refetchInterval: 60 * 1000,
   })
 
   if (session.isLoading) {
@@ -64,7 +65,7 @@ function UsagePage() {
     <AppShell user={session.data} title="Usage" className="max-w-5xl">
       <SettingsSection
         title="Agent leaderboard"
-        description="Ranked by merged PRs, then agent lines of code, PRs opened, and agent runs."
+        description="Ranked by merged PRs, then agent lines of code, PRs opened, and invocations. A thread can contain multiple invocations."
         action={
           <Select
             value={activePeriod}
@@ -135,6 +136,11 @@ function UsagePage() {
           </div>
         )}
       </SettingsSection>
+      {leaderboard.data?.generated_at_ms ? (
+        <p className="text-right text-xs text-muted-foreground">
+          Updated {formatTime(leaderboard.data.generated_at_ms)}
+        </p>
+      ) : null}
     </AppShell>
   )
 }
@@ -148,13 +154,18 @@ function UsageTable({
 }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[760px] text-xs">
+      <table className="w-full min-w-[1040px] text-xs">
         <thead className="border-b border-border text-xs text-muted-foreground">
           <tr>
             <th className="w-14 px-4 py-3 text-left font-normal">Rank</th>
             <th className="px-2 py-3 text-left font-normal">User</th>
             <th className="px-2 py-3 text-left font-normal">Favorite Model</th>
-            <th className="px-2 py-3 text-right font-normal">Agent Runs</th>
+            <th className="px-2 py-3 text-right font-normal">Invocations</th>
+            <th className="px-2 py-3 text-right font-normal">Tokens</th>
+            <th className="px-2 py-3 text-right font-normal">Cost</th>
+            <th className="px-2 py-3 text-right font-normal">
+              Avg Invocation Duration
+            </th>
             <th className="px-2 py-3 text-right font-normal">PRs Opened</th>
             <th className="px-2 py-3 text-right font-normal">Merged PRs</th>
             <th className="px-4 py-3 text-right font-normal">Agent LOC</th>
@@ -173,7 +184,16 @@ function UsageTable({
                 {row.favorite_model}
               </td>
               <td className="px-2 py-3 text-right tabular-nums">
-                {formatNumber(row.agent_runs)}
+                {formatNumber(row.invocations)}
+              </td>
+              <td className="px-2 py-3 text-right tabular-nums">
+                {formatNumber(row.total_tokens)}
+              </td>
+              <td className="px-2 py-3 text-right tabular-nums">
+                {formatCurrency(row.total_cost_usd)}
+              </td>
+              <td className="px-2 py-3 text-right tabular-nums">
+                {formatDuration(row.avg_invocation_seconds)}
               </td>
               <td className="px-2 py-3 text-right tabular-nums">
                 {formatNumber(row.prs_opened)}
@@ -326,8 +346,29 @@ function initialsFor(name: string): string {
   return `${first[0] ?? ""}${second[0] ?? ""}`.toUpperCase()
 }
 
+function formatTime(value: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(value)
+}
+
 function formatNumber(value: number): string {
   return new Intl.NumberFormat().format(value)
+}
+
+function formatCurrency(value: number): string {
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value)
+}
+
+function formatDuration(value: number): string {
+  if (value < 60) return `${Math.round(value)}s`
+  return `${Math.round(value / 60)}m`
 }
 
 function formatPercent(value: number): string {

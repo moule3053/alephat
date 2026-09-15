@@ -1,5 +1,6 @@
 import type { ModelOption } from "@/lib/api"
-import { useOptions, useProfile } from "@/lib/profile"
+import { useOptions } from "@/lib/profile"
+import { useSession } from "@/lib/session"
 
 export interface ModelSelection {
   modelId: string
@@ -12,47 +13,58 @@ export interface ModelOptionsResult {
   isLoading: boolean
 }
 
-function toSupportedSelection(
+const STORAGE_KEY = "alephat.agents.model-selection"
+
+function storedSelection(
   models: Array<ModelOption>,
-  modelId?: string | null,
-  effort?: string | null
+  login: string
 ): ModelSelection | null {
-  if (!modelId || !effort) return null
-  const supported = models.some(
-    (model) => model.id === modelId && model.efforts.includes(effort)
-  )
-  return supported ? { modelId, effort } : null
+  if (typeof window === "undefined" || !login) return null
+  try {
+    const selection = JSON.parse(
+      window.localStorage.getItem(STORAGE_KEY) ?? "null"
+    ) as (Partial<ModelSelection> & { login?: string; mode?: string }) | null
+    if (selection?.login === login && selection.mode === "auto") return null
+    return selection?.login === login &&
+      models.some(
+        (model) =>
+          model.id === selection.modelId &&
+          model.efforts.includes(selection.effort ?? "")
+      )
+      ? (selection as ModelSelection)
+      : null
+  } catch {
+    return null
+  }
+}
+
+export function persistModelSelection(
+  selection: ModelSelection | null,
+  login: string
+): void {
+  if (typeof window === "undefined" || !login) return
+  try {
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify(
+        selection ? { ...selection, login } : { mode: "auto", login }
+      )
+    )
+  } catch {}
 }
 
 export function useModelOptions(): ModelOptionsResult {
   const optionsQuery = useOptions()
-  const profileQuery = useProfile()
-
+  const session = useSession()
   const models = optionsQuery.data?.models ?? []
-  const profile = profileQuery.data
-  const profileSelection = toSupportedSelection(
-    models,
-    profile?.default_model,
-    profile?.reasoning_effort
-  )
-  const teamDefaultSelection = toSupportedSelection(
-    models,
-    optionsQuery.data?.default_agent_model,
-    optionsQuery.data?.default_agent_reasoning_effort
-  )
-  const firstModel = models[0]
-  const firstSelection = firstModel
-    ? { modelId: firstModel.id, effort: firstModel.default_effort }
+  const defaultSelection = optionsQuery.data
+    ? storedSelection(models, session.data?.login ?? "")
     : null
-  const defaultSelection =
-    optionsQuery.data && !profileQuery.isLoading
-      ? (profileSelection ?? teamDefaultSelection ?? firstSelection)
-      : null
 
   return {
     models,
     defaultSelection,
-    isLoading: optionsQuery.isLoading || profileQuery.isLoading,
+    isLoading: optionsQuery.isLoading || session.isLoading,
   }
 }
 
@@ -62,17 +74,20 @@ const EFFORT_LABELS: Record<string, string> = {
   low: "Low",
   medium: "Medium",
   high: "High",
-  xhigh: "XHigh",
+  xhigh: "Extra High",
   max: "Max",
+}
+
+export function formatEffort(effort: string): string {
+  return EFFORT_LABELS[effort] ?? effort
 }
 
 export function formatModelSelection(
   models: Array<ModelOption>,
   selection: ModelSelection | null
 ): string {
-  if (!selection) return "Default"
+  if (!selection) return "Auto"
   const model = models.find((m) => m.id === selection.modelId)
   const modelLabel = model?.label ?? selection.modelId
-  const effortLabel = EFFORT_LABELS[selection.effort] ?? selection.effort
-  return `${modelLabel} ${effortLabel}`
+  return `${modelLabel} ${formatEffort(selection.effort)}`
 }

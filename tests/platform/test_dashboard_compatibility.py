@@ -1,7 +1,5 @@
 """Tests for the dashboard compatibility layer."""
 
-from __future__ import annotations
-
 import uuid
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -555,6 +553,7 @@ def test_normalized_ai_message_preserves_usage_metadata():
 
 @pytest.mark.asyncio
 async def test_message_arriving_after_terminal_transition_starts_follow_up_run():
+    message_id = uuid.uuid4()
     auth = AuthContext(org_id=uuid.uuid4(), user_id=uuid.uuid4())
     task = Task(
         task_id=uuid.uuid4(),
@@ -587,13 +586,14 @@ async def test_message_arriving_after_terminal_transition_starts_follow_up_run()
     ):
         response = await post_thread_message(
             task.thread_id,
-            DashboardMessageRequest(content="One more question"),
+            DashboardMessageRequest(content="One more question", client_message_id=str(message_id)),
             db,
             auth,
         )
 
     assert task.status == "queued"
     add_message.assert_awaited_once()
+    assert add_message.await_args.kwargs["message_id"] == message_id
     assert enqueue.await_args.kwargs["reason"] == "follow_up_race"
     assert response["status"] == "running"
 

@@ -1,7 +1,5 @@
 """Resolve model, sandbox provider, and MCP servers for a task."""
 
-from __future__ import annotations
-
 import uuid
 from dataclasses import dataclass
 from typing import Any

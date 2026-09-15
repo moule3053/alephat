@@ -1,0 +1,4 @@
+provider: github
+owner: langchain-ai
+repo: alephat
+updaterCacheDirName: alephat-desktop-updater

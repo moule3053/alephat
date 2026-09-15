@@ -1,7 +1,5 @@
 """Normalize provider webhooks into ingress commands."""
 
-from __future__ import annotations
-
 import hashlib
 import hmac
 import re
