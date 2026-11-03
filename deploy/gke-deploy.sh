@@ -13,6 +13,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+  while IFS='=' read -r k v; do
+    [[ -z "${k}" || "${k}" =~ ^# ]] && continue
+    case "${k}" in
+      OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|FIREWORKS_API_KEY|\
+      GITHUB_APP_ID|GITHUB_APP_CLIENT_ID|GITHUB_APP_CLIENT_SECRET|GITHUB_APP_INSTALLATION_ID|\
+      GITHUB_APP_PRIVATE_KEY|ALLOWED_GITHUB_USERS|ALLOWED_GITHUB_ORGS|GITHUB_WEBHOOK_SECRET|\
+      TOKEN_ENCRYPTION_KEY|DASHBOARD_JWT_SECRET|PLATFORM_API_TOKEN|PLATFORM_JWT_SECRET)
+        if [[ -z "${!k:-}" && -n "${v}" ]]; then
+          export "${k}=${v}"
+        fi
+        ;;
+    esac
+  done < "${SCRIPT_DIR}/.env"
+fi
+
 # ---------------------------------------------------------------------------
 # Defaults (latest tested versions)
 # ---------------------------------------------------------------------------
@@ -627,13 +643,21 @@ kubectl apply -f "${REPO_ROOT}/deploy/k8s/harness-keda.yaml"
 # 9. Optional Traefik Public Ingress & TLS
 # ---------------------------------------------------------------------------
 if [[ "${WITH_TRAEFIK}" == "true" ]]; then
-  if [[ -z "${ALEPHAT_HOST}" || -z "${ACME_EMAIL}" ]]; then
-    echo "Error: --with-traefik requires --host <fqdn> and --acme-email <email>." >&2
+  if [[ -z "${ACME_EMAIL}" ]]; then
+    ACME_EMAIL="$(gcloud config get-value account 2>/dev/null || true)"
+  fi
+  if [[ -z "${ACME_EMAIL}" ]]; then
+    echo "Error: --with-traefik requires --acme-email <email> (or an active gcloud account)." >&2
     exit 1
   fi
   gcloud compute addresses describe "${TRAEFIK_IP_NAME}" --region "${REGION}" >/dev/null 2>&1 || \
     gcloud compute addresses create "${TRAEFIK_IP_NAME}" --region "${REGION}" --network-tier PREMIUM
   TRAEFIK_IP="$(gcloud compute addresses describe "${TRAEFIK_IP_NAME}" --region "${REGION}" --format='value(address)')"
+
+  if [[ -z "${ALEPHAT_HOST}" || "${ALEPHAT_HOST}" == "auto" ]]; then
+    ALEPHAT_HOST="alephat.${TRAEFIK_IP}.sslip.io"
+  fi
+  echo "Using Traefik hostname: ${ALEPHAT_HOST} (IP: ${TRAEFIK_IP})"
 
   helm repo add traefik https://traefik.github.io/charts --force-update
   helm repo update traefik
@@ -667,6 +691,7 @@ if [[ "${WITH_TRAEFIK}" == "true" ]]; then
     --type merge \
     --patch "{\"data\":{\"DASHBOARD_BASE_URL\":\"${ALEPHAT_ORIGIN}\",\"DASHBOARD_API_BASE_URL\":\"${ALEPHAT_ORIGIN}\",\"DASHBOARD_ALLOWED_ORIGINS\":\"${ALEPHAT_ORIGIN}\",\"CORS_ORIGINS\":\"${ALEPHAT_ORIGIN}\"}}"
   kubectl -n "${PLATFORM_NAMESPACE}" rollout restart deployment/alephat-api deployment/alephat-webhook deployment/alephat-harness
+  echo "Public HTTPS URL: ${ALEPHAT_ORIGIN}"
 fi
 
 echo "Deployment complete!"
