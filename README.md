@@ -133,6 +133,9 @@ The checked-in configuration uses the open-source editions of Agent Sandbox (`v1
 
 # Preview rendered SandboxTemplate and LiteLLM config without applying
 ./deploy/gke-deploy.sh --dry-run --sandbox-runtime gvisor --region europe-west1
+
+# Tear down the cluster, static IP, and optional Artifact Registry / IAM resources
+./deploy/gke-teardown.sh --project your-gcp-project-id --region us-central1 --delete-images --delete-iam
 ```
 
 You still pay for GKE and model usage, and you must supply normal authentication credentials: a GitHub App plus an API key for each model provider you enable.
