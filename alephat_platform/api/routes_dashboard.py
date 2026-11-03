@@ -976,6 +976,7 @@ def task_to_agent_thread(
         else "idle"
     )
     experience = meta.get("experience")
+    pull_requests = meta.get("pull_requests")
     return {
         "id": task.thread_id or str(task.task_id),
         "backend": "platform",
@@ -983,7 +984,7 @@ def task_to_agent_thread(
         "title": task.title or f"Task on {task.repo or 'repository'}",
         "repo": task.repo.split("/")[-1] if task.repo else "",
         "repoFullName": task.repo or "",
-        "branch": task.base_ref or "main",
+        "branch": meta.get("head_branch") or task.base_ref or "main",
         "model": task.model,
         "effort": meta.get("agent_effort"),
         "planMode": meta.get("plan_mode") is True,
@@ -995,6 +996,7 @@ def task_to_agent_thread(
         "createdAt": int(task.created_at.replace(tzinfo=UTC).timestamp() * 1000),
         "updatedAt": int(task.updated_at.replace(tzinfo=UTC).timestamp() * 1000),
         "messages": messages,
+        "pullRequests": pull_requests if isinstance(pull_requests, list) else [],
     }
 
 
@@ -1649,13 +1651,19 @@ async def reject_workflow_push_fingerprint(
 
 
 @router.get("/threads/{thread_id}/pr-diff")
+@router.get("/threads/{thread_id}/branch-diff")
 async def get_thread_pr_diff(
     thread_id: str,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
 ) -> dict[str, Any]:
+    task = await _get_task_by_id_or_thread_id(db, auth.org_id, thread_id)
+    meta = dict((task.metadata_ if task else None) or {})
+    pr_number = meta.get("pr_number")
     return {
-        "prNumber": 1,
+        "prNumber": pr_number if isinstance(pr_number, int) else 1,
+        "baseRef": (task.base_ref if task else None) or "main",
+        "headRef": meta.get("head_branch") or (task.base_ref if task else None) or "main",
         "baseSha": "base",
         "headSha": "head",
         "truncated": False,
@@ -1663,8 +1671,97 @@ async def get_thread_pr_diff(
     }
 
 
+@router.get("/threads/{thread_id}/working-tree-diff")
+async def get_thread_working_tree_diff(
+    thread_id: str,
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    del thread_id, auth
+    return {
+        "status": "ready",
+        "truncated": False,
+        "summary": {"files": 0, "additions": 0, "deletions": 0},
+        "files": [],
+    }
+
+
+@router.get("/threads/{thread_id}/pull-request-status")
+async def get_thread_pull_request_status(
+    thread_id: str,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    task = await _get_task_by_id_or_thread_id(db, auth.org_id, thread_id)
+    meta = dict((task.metadata_ if task else None) or {})
+    prs = meta.get("pull_requests")
+    if not isinstance(prs, list):
+        return {"pullRequests": []}
+    return {
+        "pullRequests": [
+            {
+                "repoFullName": pr.get("repoFullName"),
+                "number": pr.get("number"),
+                "url": pr.get("url"),
+                "statusAvailable": True,
+                "state": "open" if pr.get("state") in {"draft", "open"} else pr.get("state"),
+                "isDraft": pr.get("state") == "draft",
+                "mergeConflictState": "mergeable",
+                "checksAvailable": True,
+                "failingChecks": [],
+                "pendingCheckCount": 0,
+                "inconclusiveCheckCount": 0,
+                "commentsAvailable": True,
+                "unresolvedReviewThreadCount": 0,
+                "unresolvedReviewThreads": [],
+            }
+            for pr in prs
+            if isinstance(pr, dict)
+        ]
+    }
+
+
+@router.post("/threads/pull-request-checks")
+async def post_pull_request_checks(
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    del auth
+    return {}
+
+
+@router.post("/threads/{thread_id}/viewed")
+async def post_thread_viewed(
+    thread_id: str,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    task = await _get_task_by_id_or_thread_id(db, auth.org_id, thread_id, for_update=True)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    viewed_at = int(datetime.now(UTC).timestamp() * 1000)
+    meta = dict(task.metadata_ or {})
+    meta["last_viewed_at_ms"] = viewed_at
+    if task.active_run_id:
+        meta["last_viewed_run_id"] = str(task.active_run_id)
+    task.metadata_ = meta
+    await db.commit()
+    return {
+        "runId": str(task.active_run_id) if task.active_run_id else None,
+        "viewed": True,
+        "viewedAt": viewed_at,
+    }
+
+
 @router.get("/threads/{thread_id}/queued-messages")
 async def get_thread_queued_messages(
+    thread_id: str,
+    auth: AuthContext = Depends(get_auth),
+) -> list[dict[str, Any]]:
+    del thread_id, auth
+    return []
+
+
+@router.get("/threads/{thread_id}/runs")
+async def get_thread_runs(
     thread_id: str,
     auth: AuthContext = Depends(get_auth),
 ) -> list[dict[str, Any]]:

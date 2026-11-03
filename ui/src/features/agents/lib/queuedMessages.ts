@@ -3,6 +3,7 @@ import type { SubmissionQueueEntry } from "@langchain/react"
 import type { QueuedTurn } from "@/features/agents/lib/transcript/reducer"
 import type {
   AnyImageChunk,
+  Author,
   Chunk,
   ImageChunk,
   Message,
@@ -234,20 +235,31 @@ export async function materializeImages(
   return { images: materialized, failed: settled.length - materialized.length }
 }
 
+function normalizeAuthor(author: Author | { name?: Author }): Author {
+  if (typeof author === "object" && author !== null) {
+    return author.name ?? "agent"
+  }
+  return author
+}
+
 export function reconcileMessages(
   live: Array<Message>,
   persisted: Array<Message>,
   running: boolean
 ): Array<Message> {
-  if (persisted.length === 0) return live
-  if (live.length === 0 || !running) return persisted
+  const normalizedPersisted = persisted.map((message) => {
+    const author = normalizeAuthor(message.author as Author | { name?: Author })
+    return author === message.author ? message : { ...message, author }
+  })
+  if (normalizedPersisted.length === 0) return live
+  if (live.length === 0 || !running) return normalizedPersisted
   const liveIds = messageIds(live)
   const liveText = new Set(
     live.map((message) => `${message.author}:${messageText(message)}`)
   )
   return [
     ...live,
-    ...persisted.filter((message) => {
+    ...normalizedPersisted.filter((message) => {
       if (liveIds.has(message.id)) return false
       const text = messageText(message)
       return !text || !liveText.has(`${message.author}:${text}`)

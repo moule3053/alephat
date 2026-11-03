@@ -1,4 +1,5 @@
 import os
+import shutil
 from pathlib import Path
 
 from deepagents.backends import LocalShellBackend
@@ -37,6 +38,35 @@ def _scoped_git_config_env(root_dir: str) -> dict[str, str]:
     return {"GIT_CONFIG_GLOBAL": str(scoped)}
 
 
+def _scoped_gh_wrapper_env(root_dir: str, base_path: str) -> dict[str, str]:
+    real_gh = shutil.which("gh", path=base_path)
+    if not real_gh:
+        return {}
+    resolved = Path(root_dir).resolve()
+    bin_dir = resolved.parent / f".bin-{resolved.name}"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    wrapper = bin_dir / "gh"
+    if not wrapper.exists():
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            'if [ -z "${GH_TOKEN:-}" ]; then\n'
+            '  auth_header="$(git config --get http.https://github.com/.extraheader || true)"\n'
+            '  case "$auth_header" in\n'
+            '    "Authorization: Basic "*)\n'
+            '      encoded="${auth_header#Authorization: Basic }"\n'
+            '      credentials="$(printf \'%s\' "$encoded" | base64 -d 2>/dev/null || printf \'%s\' "$encoded" | base64 -D 2>/dev/null || true)"\n'
+            '      GH_TOKEN="${credentials#x-access-token:}"\n'
+            "      export GH_TOKEN\n"
+            "      ;;\n"
+            "  esac\n"
+            "fi\n"
+            f'exec "{real_gh}" "$@"\n'
+        )
+        wrapper.chmod(0o755)
+    return {"PATH": f"{bin_dir}:{base_path}"}
+
+
 def create_local_sandbox(
     sandbox_id: str | None = None, *, root_dir: str | None = None
 ) -> LocalShellBackend:
@@ -51,6 +81,7 @@ def create_local_sandbox(
     env = {key: value for key, value in os.environ.items() if key not in LOCAL_SHELL_ENV_EXCLUDE}
     if not ENV.GIT_CONFIG_GLOBAL.optional():
         env.update(_scoped_git_config_env(root_dir))
+    env.update(_scoped_gh_wrapper_env(root_dir, env.get("PATH", os.defpath)))
 
     return LocalShellBackend(
         root_dir=root_dir,

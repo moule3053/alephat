@@ -83,9 +83,80 @@ def _repository_setup_command(repo: str, base_ref: str | None, token: str | None
             f"  git {clone_config}clone --branch {q_branch} --single-branch {q_clone_url} .",
             "fi",
             configure_auth,
+            'git config user.name "$(git config user.name || echo Alephat)"',
+            'git config user.email "$(git config user.email || echo alephat@users.noreply.github.com)"',
             "git rev-parse --show-toplevel >/dev/null",
         ]
     )
+
+
+async def _collect_repo_outcome(
+    provider: SandboxProviderBase,
+    sandbox_ref: SandboxRef,
+    *,
+    repo: str | None,
+) -> dict[str, Any]:
+    if not repo:
+        return {}
+    script = "\n".join(
+        [
+            'branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"',
+            'if [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then',
+            '  gh pr view "$branch" --json number,title,url,state,isDraft,headRefName,baseRefName,createdAt,additions,deletions,changedFiles 2>/dev/null || true',
+            "fi",
+        ]
+    )
+    try:
+        res = await provider.exec(sandbox_ref, script, timeout=30)
+    except Exception:
+        return {}
+    raw = (res.stdout or "").strip()
+    if not raw.startswith("{"):
+        return {}
+    try:
+        pr = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(pr, dict) or not isinstance(pr.get("number"), int) or not pr.get("url"):
+        return {}
+    state_raw = str(pr.get("state") or "OPEN").lower()
+    state = (
+        "draft"
+        if pr.get("isDraft") is True and state_raw == "open"
+        else (
+            "merged" if state_raw == "merged" else ("closed" if state_raw == "closed" else "open")
+        )
+    )
+    additions = int(pr.get("additions") or 0)
+    deletions = int(pr.get("deletions") or 0)
+    changed_files = int(pr.get("changedFiles") or 0)
+    head_ref = str(pr.get("headRefName") or "main")
+    base_ref = str(pr.get("baseRefName") or "main")
+    pr_record = {
+        "number": pr["number"],
+        "title": str(pr.get("title") or f"PR #{pr['number']}"),
+        "state": state,
+        "headRef": head_ref,
+        "baseRef": base_ref,
+        "url": str(pr["url"]),
+        "repoFullName": repo,
+        "author": "moule3053",
+        "authorAvatarUrl": "https://github.com/moule3053.png",
+        "createdAt": pr.get("createdAt"),
+        "diffStats": {
+            "files": changed_files,
+            "additions": additions,
+            "deletions": deletions,
+        },
+    }
+    return {
+        "pr_url": str(pr["url"]),
+        "pr_number": pr["number"],
+        "head_branch": head_ref,
+        "additions": additions,
+        "deletions": deletions,
+        "pull_requests": [pr_record],
+    }
 
 
 async def _prepare_task_repository(
@@ -573,6 +644,12 @@ class HarnessWorker:
             except asyncio.CancelledError:
                 pass
 
+        repo_outcome = (
+            await _collect_repo_outcome(provider, sandbox_ref, repo=ctx.repo)
+            if result.success and ctx.repo
+            else {}
+        )
+
         async with factory() as session:
             if result.checkpoint_blob:
                 await save_checkpoint(
@@ -585,6 +662,8 @@ class HarnessWorker:
                 select(Task).where(Task.task_id == task_id).with_for_update()
             )
             task_row = task_result.scalar_one()
+            if repo_outcome:
+                task_row.metadata_ = {**(task_row.metadata_ or {}), **repo_outcome}
             pending_result = await session.execute(
                 select(Message.message_id)
                 .where(Message.task_id == task_id, Message.seq > ctx.last_message_seq)
