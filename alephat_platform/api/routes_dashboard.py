@@ -1032,11 +1032,13 @@ def _is_automation(task: Task) -> bool:
 
 
 @router.get("/threads/projects")
+@router.get("/threads/repos")
 async def get_thread_projects(
     include_resolved: bool = False,
     include_automations: bool = False,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
+    experience: Literal["coding", "agent_workspace"] | None = None,
 ) -> list[dict[str, str | int]]:
     projects: dict[str, dict[str, str | int]] = {}
     tasks = sorted(await _dashboard_tasks(db, auth), key=lambda task: task.updated_at, reverse=True)
@@ -1045,6 +1047,11 @@ async def get_thread_projects(
             continue
         if not include_automations and _is_automation(task):
             continue
+        if experience is not None:
+            task_exp = (task.metadata_ or {}).get("experience")
+            normalized_exp = task_exp if task_exp in {"coding", "agent_workspace"} else "coding"
+            if normalized_exp != experience:
+                continue
         projects.setdefault(
             task.repo.casefold(),
             {
@@ -1480,20 +1487,23 @@ async def stream_thread(
             "alephat_platform.common.db", fromlist=["get_session_factory"]
         ).get_session_factory()
 
+        yield ": keep-alive\n\n"
         last_msg_json = None
         announced_running = False
+        idle_ticks = 0
         while True:
             if await request.is_disconnected():
                 return
 
             payloads: list[dict[str, Any]] = []
-            terminal = False
-            task_found = False
             async with factory() as session:
                 task = await _get_task_by_id_or_thread_id(session, auth.org_id, thread_id)
                 if task is not None and task.org_id == auth.org_id:
-                    task_found = True
-                    if "lifecycle" in requested_channels and not announced_running:
+                    is_running = task.status in {
+                        TaskStatus.QUEUED.value,
+                        TaskStatus.RUNNING.value,
+                    }
+                    if "lifecycle" in requested_channels and is_running and not announced_running:
                         payloads.append(_protocol_event("lifecycle", {"event": "running"}))
                         announced_running = True
 
@@ -1505,17 +1515,20 @@ async def stream_thread(
                             payloads.append(_protocol_event("values", {"messages": messages}))
 
                     lifecycle = _terminal_lifecycle(task.status)
-                    if lifecycle is not None:
-                        terminal = True
+                    if lifecycle is not None and announced_running:
+                        announced_running = False
                         if "lifecycle" in requested_channels:
                             payloads.append(_protocol_event("lifecycle", lifecycle))
 
-            for payload in payloads:
-                yield _sse_data(payload)
-            if terminal:
-                return
-            if not task_found:
-                yield ": keep-alive\n\n"
+            if payloads:
+                idle_ticks = 0
+                for payload in payloads:
+                    yield _sse_data(payload)
+            else:
+                idle_ticks += 1
+                if idle_ticks >= 40:
+                    idle_ticks = 0
+                    yield ": keep-alive\n\n"
             await asyncio.sleep(0.25)
 
     return StreamingResponse(
@@ -1657,6 +1670,15 @@ async def get_thread_queued_messages(
 ) -> list[dict[str, Any]]:
     del thread_id, auth
     return []
+
+
+@router.get("/threads/{thread_id}/background-work")
+async def get_thread_background_work(
+    thread_id: str,
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, list[Any]]:
+    del thread_id, auth
+    return {"tasks": [], "monitors": []}
 
 
 @router.get("/analytics/config")
