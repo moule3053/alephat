@@ -2295,24 +2295,656 @@ async def put_my_preferences(
     return prefs
 
 
+class SkillCreateBody(BaseModel):
+    name: str
+    description: str = ""
+    instructions: str = ""
+
+
+class SkillUpdateBody(BaseModel):
+    description: str = ""
+    instructions: str = ""
+
+
+def _stored_skills(values: dict[str, Any] | None, key: str) -> dict[str, dict[str, str]]:
+    raw = (values or {}).get(key)
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(k): {
+            "name": str(v.get("name") or k),
+            "description": str(v.get("description") or ""),
+            "instructions": str(v.get("instructions") or ""),
+            "created_at": str(v.get("created_at") or ""),
+            "updated_at": str(v.get("updated_at") or ""),
+        }
+        for k, v in raw.items()
+        if isinstance(v, dict)
+    }
+
+
 @router.get("/skills")
 async def list_skills(
     limit: int = 100,
     offset: int = 0,
+    db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
 ) -> dict[str, Any]:
-    del limit, offset, auth
-    return {"items": [], "next_offset": None}
+    row = await db.get(UserSettings, auth.user_id)
+    records = sorted(
+        _stored_skills(row.settings if row else None, "skills").values(),
+        key=lambda item: item["name"].casefold(),
+    )
+    sliced = records[offset : offset + limit]
+    next_offset = offset + limit if offset + limit < len(records) else None
+    return {"items": sliced, "next_offset": next_offset}
+
+
+@router.post("/skills")
+async def create_skill(
+    body: SkillCreateBody,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, str]:
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Skill name is required")
+    row = await db.get(UserSettings, auth.user_id)
+    if row is None:
+        row = UserSettings(user_id=auth.user_id, settings={})
+        db.add(row)
+    settings_dict = dict(row.settings or {})
+    skills = _stored_skills(settings_dict, "skills")
+    if name in skills:
+        raise HTTPException(status_code=409, detail=f"Skill '{name}' already exists")
+    now = datetime.now(UTC).isoformat()
+    record = {
+        "name": name,
+        "description": body.description,
+        "instructions": body.instructions,
+        "created_at": now,
+        "updated_at": now,
+    }
+    skills[name] = record
+    settings_dict["skills"] = skills
+    row.settings = settings_dict
+    row.updated_at = datetime.now(UTC)
+    await db.flush()
+    return record
+
+
+@router.put("/skills/{name}")
+async def update_skill(
+    name: str,
+    body: SkillUpdateBody,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, str]:
+    row = await db.get(UserSettings, auth.user_id)
+    if row is None:
+        row = UserSettings(user_id=auth.user_id, settings={})
+        db.add(row)
+    settings_dict = dict(row.settings or {})
+    skills = _stored_skills(settings_dict, "skills")
+    existing = skills.get(name)
+    now = datetime.now(UTC).isoformat()
+    record = {
+        "name": name,
+        "description": body.description,
+        "instructions": body.instructions,
+        "created_at": existing["created_at"] if existing else now,
+        "updated_at": now,
+    }
+    skills[name] = record
+    settings_dict["skills"] = skills
+    row.settings = settings_dict
+    row.updated_at = datetime.now(UTC)
+    await db.flush()
+    return record
+
+
+@router.delete("/skills/{name}", status_code=204)
+async def delete_skill(
+    name: str,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> Response:
+    row = await db.get(UserSettings, auth.user_id)
+    if row is not None:
+        settings_dict = dict(row.settings or {})
+        skills = _stored_skills(settings_dict, "skills")
+        if name in skills:
+            del skills[name]
+            settings_dict["skills"] = skills
+            row.settings = settings_dict
+            row.updated_at = datetime.now(UTC)
+            await db.flush()
+    return Response(status_code=204)
 
 
 @router.get("/organization-skills")
 async def list_organization_skills(
     limit: int = 100,
     cursor: str | None = None,
+    db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
 ) -> dict[str, Any]:
-    del limit, cursor, auth
-    return {"items": [], "next_cursor": None}
+    del limit, cursor
+    org = await db.get(OrgSettings, auth.org_id)
+    records = sorted(
+        _stored_skills(org.settings if org else None, "organization_skills").values(),
+        key=lambda item: item["name"].casefold(),
+    )
+    return {"items": records, "next_cursor": None}
+
+
+@router.post("/organization-skills")
+async def create_organization_skill(
+    body: SkillCreateBody,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, str]:
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Skill name is required")
+    org = await _get_or_create_org_settings(db, auth.org_id)
+    settings_dict = dict(org.settings or {})
+    skills = _stored_skills(settings_dict, "organization_skills")
+    if name in skills:
+        raise HTTPException(status_code=409, detail=f"Skill '{name}' already exists")
+    now = datetime.now(UTC).isoformat()
+    record = {
+        "name": name,
+        "description": body.description,
+        "instructions": body.instructions,
+        "created_at": now,
+        "updated_at": now,
+    }
+    skills[name] = record
+    settings_dict["organization_skills"] = skills
+    org.settings = settings_dict
+    org.updated_at = datetime.now(UTC)
+    await db.flush()
+    return record
+
+
+@router.put("/organization-skills/{name}")
+async def update_organization_skill(
+    name: str,
+    body: SkillUpdateBody,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, str]:
+    org = await _get_or_create_org_settings(db, auth.org_id)
+    settings_dict = dict(org.settings or {})
+    skills = _stored_skills(settings_dict, "organization_skills")
+    existing = skills.get(name)
+    now = datetime.now(UTC).isoformat()
+    record = {
+        "name": name,
+        "description": body.description,
+        "instructions": body.instructions,
+        "created_at": existing["created_at"] if existing else now,
+        "updated_at": now,
+    }
+    skills[name] = record
+    settings_dict["organization_skills"] = skills
+    org.settings = settings_dict
+    org.updated_at = datetime.now(UTC)
+    await db.flush()
+    return record
+
+
+@router.delete("/organization-skills/{name}", status_code=204)
+async def delete_organization_skill(
+    name: str,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> Response:
+    org = await db.get(OrgSettings, auth.org_id)
+    if org is not None:
+        settings_dict = dict(org.settings or {})
+        skills = _stored_skills(settings_dict, "organization_skills")
+        if name in skills:
+            del skills[name]
+            settings_dict["organization_skills"] = skills
+            org.settings = settings_dict
+            org.updated_at = datetime.now(UTC)
+            await db.flush()
+    return Response(status_code=204)
+
+
+class ScheduleCreateBody(BaseModel):
+    prompt: str
+    triggers: list[dict[str, Any]] = []
+    name: str | None = None
+    admin_thread: bool = False
+    model_id: str | None = None
+    effort: str | None = None
+    workspace: str = "default"
+
+
+class ScheduleUpdateBody(BaseModel):
+    prompt: str | None = None
+    triggers: list[dict[str, Any]] | None = None
+    name: str | None = None
+    admin_thread: bool | None = None
+    model_id: str | None = None
+    effort: str | None = None
+    enabled: bool | None = None
+    workspace: str | None = None
+
+
+def _stored_schedules(org: OrgSettings | None) -> dict[str, dict[str, Any]]:
+    raw = (org.settings or {}).get("schedules") if org else None
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): dict(v) for k, v in raw.items() if isinstance(v, dict)}
+
+
+def _normalize_triggers(triggers: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str | None]:
+    normalized: list[dict[str, Any]] = []
+    cron_value: str | None = None
+    for item in triggers:
+        if not isinstance(item, dict):
+            continue
+        tid = str(item.get("id") or uuid.uuid4())
+        entry = {**item, "id": tid}
+        if entry.get("kind") == "schedule" and isinstance(entry.get("cron"), str):
+            cron_value = cron_value or entry["cron"]
+        normalized.append(entry)
+    return normalized, cron_value
+
+
+@router.get("/schedules")
+async def list_schedules(
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> list[dict[str, Any]]:
+    org = await db.get(OrgSettings, auth.org_id)
+    records = list(_stored_schedules(org).values())
+    return sorted(records, key=lambda item: str(item.get("createdAt") or ""), reverse=True)
+
+
+@router.post("/schedules")
+async def create_schedule(
+    body: ScheduleCreateBody,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    org = await _get_or_create_org_settings(db, auth.org_id)
+    settings_dict = dict(org.settings or {})
+    schedules = _stored_schedules(org)
+    schedule_id = str(uuid.uuid4())
+    now = datetime.now(UTC).isoformat()
+    triggers, cron_value = _normalize_triggers(body.triggers)
+    default_model = org.default_model or get_settings().default_model
+    record: dict[str, Any] = {
+        "id": schedule_id,
+        "name": (body.name or "").strip() or body.prompt.strip()[:60] or "Automation",
+        "prompt": body.prompt,
+        "schedule": cron_value,
+        "triggers": triggers,
+        "scope": "workspace",
+        "workspace": body.workspace or "default",
+        "adminThread": body.admin_thread,
+        "model": body.model_id or default_model,
+        "effort": body.effort or "medium",
+        "enabled": True,
+        "cronId": None,
+        "lastThreadId": None,
+        "lastRunId": None,
+        "lastTriggeredAt": None,
+        "lastError": None,
+        "lastErrorAt": None,
+        "createdBy": auth.github_login or "moule3053",
+        "updatedBy": auth.github_login or "moule3053",
+        "createdAt": now,
+        "updatedAt": now,
+    }
+    schedules[schedule_id] = record
+    settings_dict["schedules"] = schedules
+    org.settings = settings_dict
+    org.updated_at = datetime.now(UTC)
+    await db.flush()
+    return record
+
+
+@router.patch("/schedules/{schedule_id}")
+async def update_schedule(
+    schedule_id: str,
+    body: ScheduleUpdateBody,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    org = await _get_or_create_org_settings(db, auth.org_id)
+    settings_dict = dict(org.settings or {})
+    schedules = _stored_schedules(org)
+    record = schedules.get(schedule_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    if body.name is not None:
+        record["name"] = body.name.strip() or record["name"]
+    if body.prompt is not None:
+        record["prompt"] = body.prompt
+    if body.triggers is not None:
+        triggers, cron_value = _normalize_triggers(body.triggers)
+        record["triggers"] = triggers
+        record["schedule"] = cron_value
+    if body.admin_thread is not None:
+        record["adminThread"] = body.admin_thread
+    if body.model_id is not None:
+        record["model"] = body.model_id
+    if body.effort is not None:
+        record["effort"] = body.effort
+    if body.enabled is not None:
+        record["enabled"] = body.enabled
+    if body.workspace is not None:
+        record["workspace"] = body.workspace
+    record["updatedBy"] = auth.github_login or "moule3053"
+    record["updatedAt"] = datetime.now(UTC).isoformat()
+    schedules[schedule_id] = record
+    settings_dict["schedules"] = schedules
+    org.settings = settings_dict
+    org.updated_at = datetime.now(UTC)
+    await db.flush()
+    return record
+
+
+@router.post("/schedules/{schedule_id}/trigger")
+async def trigger_schedule(
+    schedule_id: str,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    from alephat_platform.api.routes_tasks import create_task
+
+    org = await _get_or_create_org_settings(db, auth.org_id)
+    settings_dict = dict(org.settings or {})
+    schedules = _stored_schedules(org)
+    record = schedules.get(schedule_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    thread_id = str(uuid.uuid4())
+    repo = next(
+        (
+            str(t.get("repo"))
+            for t in (record.get("triggers") or [])
+            if isinstance(t, dict) and isinstance(t.get("repo"), str) and t.get("repo")
+        ),
+        None,
+    )
+    settings = get_settings()
+    task = await create_task(
+        db,
+        org_id=auth.org_id,
+        user_id=auth.user_id,
+        title=str(record.get("name") or "Scheduled Run")[:100],
+        prompt=str(record.get("prompt") or ""),
+        prompt_message_id=None,
+        repo=repo,
+        base_ref="main",
+        source="schedule",
+        source_ref=schedule_id,
+        thread_id=thread_id,
+        agent_type="coding",
+        model=record.get("model"),
+        sandbox_provider=None,
+        mcp_server_ids=[],
+        mcp_mode="inherit",
+        metadata={
+            "schedule_id": schedule_id,
+            "agent_effort": record.get("effort"),
+            "experience": "coding" if repo else "agent_workspace",
+        },
+        platform_default_model=settings.default_model,
+        platform_default_sandbox_provider=settings.default_sandbox_provider,
+    )
+    now = datetime.now(UTC).isoformat()
+    run_id = str(task.active_run_id or task.task_id)
+    record["lastThreadId"] = thread_id
+    record["lastRunId"] = run_id
+    record["lastTriggeredAt"] = now
+    record["updatedAt"] = now
+    schedules[schedule_id] = record
+    settings_dict["schedules"] = schedules
+    org.settings = settings_dict
+    org.updated_at = datetime.now(UTC)
+    await db.commit()
+    return {
+        "status": "started",
+        "schedule_id": schedule_id,
+        "thread_id": thread_id,
+        "run_id": run_id,
+    }
+
+
+@router.delete("/schedules/{schedule_id}", status_code=204)
+async def delete_schedule(
+    schedule_id: str,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> Response:
+    org = await db.get(OrgSettings, auth.org_id)
+    if org is not None:
+        settings_dict = dict(org.settings or {})
+        schedules = _stored_schedules(org)
+        if schedule_id in schedules:
+            del schedules[schedule_id]
+            settings_dict["schedules"] = schedules
+            org.settings = settings_dict
+            org.updated_at = datetime.now(UTC)
+            await db.flush()
+    return Response(status_code=204)
+
+
+def _github_pr_item_to_open_pr(full_name: str, pr: dict[str, Any]) -> dict[str, Any]:
+    state = "merged" if pr.get("merged_at") else str(pr.get("state") or "open")
+    return {
+        "repo": full_name,
+        "number": int(pr.get("number") or 0),
+        "title": str(pr.get("title") or ""),
+        "state": state if state in {"open", "closed", "merged"} else "open",
+        "draft": bool(pr.get("draft")),
+        "additions": pr.get("additions") if isinstance(pr.get("additions"), int) else None,
+        "deletions": pr.get("deletions") if isinstance(pr.get("deletions"), int) else None,
+        "mergeable": pr.get("mergeable") if isinstance(pr.get("mergeable"), bool) else True,
+        "mergeState": str(pr.get("mergeable_state") or "clean"),
+        "autoMerge": pr.get("auto_merge") is not None,
+        "headSha": (pr.get("head") or {}).get("sha"),
+        "headRef": (pr.get("head") or {}).get("ref"),
+        "reviewDecision": "none",
+        "reviewers": [],
+        "reviewRequired": False,
+        "statusAvailable": True,
+        "createdAt": pr.get("created_at"),
+        "updatedAt": pr.get("updated_at"),
+        "ci": "none",
+        "requiredChecksPassing": True,
+        "failingChecks": [],
+        "pendingChecks": [],
+        "missingChecks": [],
+        "unresolvedThreads": 0,
+    }
+
+
+@router.get("/pull-requests")
+async def list_open_pull_requests_route(
+    repo: str = "",
+    lightweight: bool = True,
+    sort: str = "updated",
+    direction: str = "desc",
+    page: int = 1,
+    scope: str = "mine",
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    del lightweight, page
+    login = (auth.github_login or "moule3053").casefold()
+    requested_repos = [r.strip() for r in repo.split(",") if r.strip()]
+    if not requested_repos:
+        try:
+            _, installed = await _fetch_installed_github_repositories()
+            requested_repos = [
+                str(item["full_name"])
+                for item in installed
+                if isinstance(item.get("full_name"), str) and item["full_name"]
+            ]
+        except Exception:
+            requested_repos = []
+
+    pull_requests: list[dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        for full_name in requested_repos:
+            owner, sep, repo_name = full_name.partition("/")
+            if not sep or not owner or not repo_name:
+                continue
+            try:
+                headers = await _github_repo_headers(repo_name)
+                resp = await client.get(
+                    f"https://api.github.com/repos/{owner}/{repo_name}/pulls",
+                    headers=headers,
+                    params={
+                        "state": "open",
+                        "sort": "created" if sort == "created" else "updated",
+                        "direction": "asc" if direction == "asc" else "desc",
+                        "per_page": 30,
+                    },
+                )
+                if resp.status_code != 200 or not isinstance(resp.json(), list):
+                    continue
+                for pr in resp.json():
+                    if not isinstance(pr, dict):
+                        continue
+                    raw_user = pr.get("user")
+                    user_dict: dict[str, Any] = raw_user if isinstance(raw_user, dict) else {}
+                    author_login = str(user_dict.get("login") or "").casefold()
+                    if scope == "review-requested":
+                        reviewers = [
+                            str(r.get("login") or "").casefold()
+                            for r in (pr.get("requested_reviewers") or [])
+                            if isinstance(r, dict)
+                        ]
+                        if login not in reviewers:
+                            continue
+                    elif scope == "mine" and author_login and author_login != login:
+                        # Include both user's PRs and bot-opened PRs in the user's repos
+                        if not author_login.endswith("[bot]") and owner.casefold() != login:
+                            continue
+                    pull_requests.append(_github_pr_item_to_open_pr(full_name, pr))
+            except Exception:
+                continue
+
+    return {
+        "pullRequests": pull_requests,
+        "nextPage": None,
+        "incomplete": False,
+        "updatedAt": datetime.now(UTC).isoformat(),
+    }
+
+
+@router.get("/review-assignments")
+async def list_review_assignments(
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    del auth
+    return {
+        "pullRequests": [],
+        "nextPage": None,
+        "incomplete": False,
+        "updatedAt": datetime.now(UTC).isoformat(),
+    }
+
+
+@router.get("/pull-requests/search")
+async def search_pull_requests_route(
+    q: str = "",
+    offset: int = 0,
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    del offset
+    listing = await list_open_pull_requests_route(auth=auth)
+    query_lower = q.strip().casefold()
+    results = []
+    for pr in listing.get("pullRequests", []):
+        if not isinstance(pr, dict):
+            continue
+        haystack = f"{pr.get('repo', '')} #{pr.get('number', '')} {pr.get('title', '')}".casefold()
+        if not query_lower or query_lower in haystack:
+            results.append(
+                {
+                    "repo": pr["repo"],
+                    "number": pr["number"],
+                    "url": f"https://github.com/{pr['repo']}/pull/{pr['number']}",
+                    "title": pr["title"],
+                    "state": "draft" if pr.get("draft") else pr.get("state", "open"),
+                }
+            )
+    return {"pull_requests": results, "has_more": False}
+
+
+class ReviewSummariesBody(BaseModel):
+    pullRequests: list[dict[str, Any]] = []
+
+
+@router.post("/reviews/summaries")
+async def post_review_summaries(
+    body: ReviewSummariesBody,
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    del auth
+    return {
+        f"{item.get('repo')}#{item.get('number')}": None
+        for item in body.pullRequests
+        if isinstance(item, dict) and item.get("repo") and item.get("number") is not None
+    }
+
+
+class EnabledReviewRepoBody(BaseModel):
+    full_name: str
+    enabled: bool
+
+
+@router.get("/enabled-review-repos")
+async def get_enabled_review_repos(
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, list[str]]:
+    org = await db.get(OrgSettings, auth.org_id)
+    raw = (org.settings or {}).get("enabled_review_repos") if org else None
+    repos = [str(r) for r in raw if isinstance(r, str)] if isinstance(raw, list) else []
+    return {"repos": sorted(set(repos))}
+
+
+@router.put("/enabled-review-repos")
+async def put_enabled_review_repos(
+    body: EnabledReviewRepoBody,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, list[str]]:
+    org = await _get_or_create_org_settings(db, auth.org_id)
+    settings_dict = dict(org.settings or {})
+    raw = settings_dict.get("enabled_review_repos")
+    repos = {str(r) for r in raw if isinstance(r, str)} if isinstance(raw, list) else set()
+    if body.enabled:
+        repos.add(body.full_name)
+    else:
+        repos.discard(body.full_name)
+    sorted_repos = sorted(repos)
+    settings_dict["enabled_review_repos"] = sorted_repos
+    org.settings = settings_dict
+    org.updated_at = datetime.now(UTC)
+    await db.flush()
+    return {"repos": sorted_repos}
+
+
+@router.get("/repos/{owner}/{repo}/merge-methods")
+async def get_repo_merge_methods(
+    owner: str,
+    repo: str,
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, list[str]]:
+    del owner, repo, auth
+    return {"mergeMethods": ["squash", "merge", "rebase"]}
 
 
 @router.get("/ui-invalidations")
