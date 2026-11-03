@@ -1650,6 +1650,48 @@ async def reject_workflow_push_fingerprint(
     return {"status": "rejected", "fingerprint": fingerprint}
 
 
+async def _github_repo_headers(repo_name: str) -> dict[str, str]:
+    from openswe.github.app import get_github_app_installation_token
+
+    token = await get_github_app_installation_token(
+        repositories=[repo_name] if repo_name else None,
+        log_errors=False,
+    )
+    if not token:
+        raise HTTPException(status_code=503, detail="GitHub App credentials are not configured")
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+async def _fetch_github_pr(owner: str, repo: str, number: int) -> dict[str, Any]:
+    headers = await _github_repo_headers(repo)
+    url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{number}"
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.get(url, headers=headers)
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail="Pull request not found")
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="Unexpected GitHub PR response")
+    return data
+
+
+async def _fetch_github_pr_files(owner: str, repo: str, number: int) -> list[dict[str, Any]]:
+    headers = await _github_repo_headers(repo)
+    url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{number}/files"
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.get(url, headers=headers, params={"per_page": 100})
+    if resp.status_code == 404:
+        return []
+    resp.raise_for_status()
+    data = resp.json()
+    return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+
+
 @router.get("/threads/{thread_id}/pr-diff")
 @router.get("/threads/{thread_id}/branch-diff")
 async def get_thread_pr_diff(
@@ -1660,14 +1702,416 @@ async def get_thread_pr_diff(
     task = await _get_task_by_id_or_thread_id(db, auth.org_id, thread_id)
     meta = dict((task.metadata_ if task else None) or {})
     pr_number = meta.get("pr_number")
+    base_ref = (task.base_ref if task else None) or "main"
+    head_ref = meta.get("head_branch") or base_ref
+    if task and task.repo and isinstance(pr_number, int):
+        owner, _, repo = task.repo.partition("/")
+        try:
+            pr_data = await _fetch_github_pr(owner, repo, pr_number)
+            raw_files = await _fetch_github_pr_files(owner, repo, pr_number)
+            base_sha = str((pr_data.get("base") or {}).get("sha") or "base")
+            head_sha = str((pr_data.get("head") or {}).get("sha") or "head")
+            return {
+                "prNumber": pr_number,
+                "baseRef": str((pr_data.get("base") or {}).get("ref") or base_ref),
+                "headRef": str((pr_data.get("head") or {}).get("ref") or head_ref),
+                "baseSha": base_sha,
+                "headSha": head_sha,
+                "truncated": False,
+                "files": [
+                    {
+                        "path": str(f["filename"]),
+                        "previousPath": f.get("previous_filename"),
+                        "status": str(f.get("status") or "modified"),
+                        "additions": int(f.get("additions") or 0),
+                        "deletions": int(f.get("deletions") or 0),
+                        "originalContent": None,
+                        "modifiedContent": None,
+                        "patch": f.get("patch"),
+                        "unrenderable": f.get("patch") is None,
+                    }
+                    for f in raw_files
+                    if isinstance(f.get("filename"), str)
+                ],
+            }
+        except Exception:
+            pass
     return {
         "prNumber": pr_number if isinstance(pr_number, int) else 1,
-        "baseRef": (task.base_ref if task else None) or "main",
-        "headRef": meta.get("head_branch") or (task.base_ref if task else None) or "main",
+        "baseRef": base_ref,
+        "headRef": head_ref,
         "baseSha": "base",
         "headSha": "head",
         "truncated": False,
         "files": [],
+    }
+
+
+@router.get("/repos/{owner}/{repo}/pulls/{number}")
+async def get_repo_pull_request_details(
+    owner: str,
+    repo: str,
+    number: int,
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    del auth
+    pr = await _fetch_github_pr(owner, repo, number)
+    state = "merged" if pr.get("merged_at") else str(pr.get("state") or "open")
+    return {
+        "repo": f"{owner}/{repo}",
+        "number": number,
+        "title": str(pr.get("title") or f"PR #{number}"),
+        "state": state if state in {"open", "closed", "merged"} else "open",
+        "draft": bool(pr.get("draft")),
+        "additions": int(pr.get("additions") or 0),
+        "deletions": int(pr.get("deletions") or 0),
+        "mergeable": pr.get("mergeable"),
+        "mergeState": str(pr.get("mergeable_state") or "clean"),
+        "autoMerge": pr.get("auto_merge") is not None,
+        "headSha": (pr.get("head") or {}).get("sha"),
+        "headRef": (pr.get("head") or {}).get("ref"),
+        "reviewDecision": "none",
+        "reviewers": [],
+        "reviewRequired": False,
+        "statusAvailable": True,
+        "createdAt": pr.get("created_at"),
+        "updatedAt": pr.get("updated_at"),
+        "ci": "none",
+        "requiredChecksPassing": True,
+        "failingChecks": [],
+        "pendingChecks": [],
+        "missingChecks": [],
+        "unresolvedThreads": 0,
+    }
+
+
+@router.get("/repos/{owner}/{repo}/pulls/{number}/thread")
+async def get_repo_pull_request_thread(
+    owner: str,
+    repo: str,
+    number: int,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    full_name = f"{owner}/{repo}"
+    tasks = sorted(await _dashboard_tasks(db, auth), key=lambda t: t.updated_at, reverse=True)
+    for task in tasks:
+        if (task.repo or "").casefold() != full_name.casefold():
+            continue
+        meta = dict(task.metadata_ or {})
+        if meta.get("pr_number") == number:
+            return {
+                "thread_id": task.thread_id or str(task.task_id),
+                "already_running": task.status
+                in {TaskStatus.QUEUED.value, TaskStatus.RUNNING.value},
+            }
+    return {"thread_id": "", "already_running": False}
+
+
+@router.get("/reviews/{owner}/{repo}/{number}")
+async def get_review_detail(
+    owner: str,
+    repo: str,
+    number: int,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    del db, auth
+    pr = await _fetch_github_pr(owner, repo, number)
+    raw_user = pr.get("user")
+    user: dict[str, Any] = raw_user if isinstance(raw_user, dict) else {}
+    raw_state = "merged" if pr.get("merged_at") else str(pr.get("state") or "open")
+    pr_state = "draft" if pr.get("draft") and raw_state == "open" else raw_state
+    head_sha = str((pr.get("head") or {}).get("sha") or "")
+    head_ref = str((pr.get("head") or {}).get("ref") or "")
+    base_ref = str((pr.get("base") or {}).get("ref") or "main")
+    return {
+        "thread_id": None,
+        "trace_url": None,
+        "owner": owner,
+        "repo": repo,
+        "full_name": f"{owner}/{repo}",
+        "number": number,
+        "title": str(pr.get("title") or f"PR #{number}"),
+        "url": str(pr.get("html_url") or f"https://github.com/{owner}/{repo}/pull/{number}"),
+        "head_ref": head_ref,
+        "base_ref": base_ref,
+        "author": str(user.get("login") or ""),
+        "head_sha": head_sha,
+        "watch": False,
+        "status": "none",
+        "counts": {"open": 0, "resolved": 0, "dismissed": 0, "bugs": 0, "flags": 0},
+        "updated_at": pr.get("updated_at"),
+        "assessment": None,
+        "pr": {
+            "state": pr_state,
+            "title": str(pr.get("title") or ""),
+            "body": str(pr.get("body") or ""),
+            "description_pull_requests": [],
+            "additions": int(pr.get("additions") or 0),
+            "deletions": int(pr.get("deletions") or 0),
+            "changed_files": int(pr.get("changed_files") or 0),
+            "commits": int(pr.get("commits") or 0),
+            "head_sha": head_sha,
+            "head_ref": head_ref,
+            "base_ref": base_ref,
+            "author": (
+                {"login": str(user.get("login") or ""), "avatar_url": user.get("avatar_url")}
+                if user
+                else None
+            ),
+            "created_at": pr.get("created_at"),
+            "merged_at": pr.get("merged_at"),
+            "assignees": [
+                {"login": str(a.get("login") or ""), "avatar_url": a.get("avatar_url")}
+                for a in (pr.get("assignees") or [])
+                if isinstance(a, dict)
+            ],
+            "requested_reviewers": [
+                {"login": str(r.get("login") or ""), "avatar_url": r.get("avatar_url")}
+                for r in (pr.get("requested_reviewers") or [])
+                if isinstance(r, dict)
+            ],
+            "labels": [
+                {"name": str(lbl.get("name") or ""), "color": lbl.get("color")}
+                for lbl in (pr.get("labels") or [])
+                if isinstance(lbl, dict)
+            ],
+        },
+        "checks": [],
+        "findings": [],
+        "walkthrough": None,
+        "walkthrough_running": False,
+        "walkthrough_error": None,
+        "walkthrough_scout_thread_id": None,
+        "walkthrough_progress": None,
+        "review_error": None,
+    }
+
+
+@router.get("/reviews/{owner}/{repo}/{number}/diff")
+async def get_review_diff(
+    owner: str,
+    repo: str,
+    number: int,
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    del auth
+    pr = await _fetch_github_pr(owner, repo, number)
+    raw_files = await _fetch_github_pr_files(owner, repo, number)
+    base_sha = str((pr.get("base") or {}).get("sha") or "")
+    head_sha = str((pr.get("head") or {}).get("sha") or "")
+    files = [
+        {
+            "baseSha": base_sha,
+            "headSha": head_sha,
+            "path": str(f["filename"]),
+            "previousPath": f.get("previous_filename"),
+            "status": (
+                f["status"]
+                if f.get("status") in {"added", "removed", "modified", "renamed"}
+                else "modified"
+            ),
+            "additions": int(f.get("additions") or 0),
+            "deletions": int(f.get("deletions") or 0),
+            "patch": f.get("patch"),
+            "unrenderable": f.get("patch") is None,
+        }
+        for f in raw_files
+        if isinstance(f.get("filename"), str)
+    ]
+    return {
+        "files": files,
+        "total_additions": sum(int(f.get("additions") or 0) for f in raw_files),
+        "total_deletions": sum(int(f.get("deletions") or 0) for f in raw_files),
+        "truncated": False,
+    }
+
+
+@router.get("/reviews/{owner}/{repo}/{number}/file-contents")
+async def get_review_file_contents(
+    owner: str,
+    repo: str,
+    number: int,
+    path: str,
+    base_sha: str,
+    head_sha: str,
+    status: str = "modified",
+    previous_path: str | None = None,
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, str | None]:
+    del number, auth
+    headers = {**(await _github_repo_headers(repo)), "Accept": "application/vnd.github.raw+json"}
+    original_content: str | None = None
+    modified_content: str | None = None
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        if status != "added" and base_sha:
+            orig_path = previous_path or path
+            r_orig = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}/contents/{orig_path}",
+                headers=headers,
+                params={"ref": base_sha},
+            )
+            if r_orig.status_code == 200:
+                original_content = r_orig.text
+        if status != "removed" and head_sha:
+            r_mod = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}/contents/{path}",
+                headers=headers,
+                params={"ref": head_sha},
+            )
+            if r_mod.status_code == 200:
+                modified_content = r_mod.text
+    return {"originalContent": original_content, "modifiedContent": modified_content}
+
+
+@router.get("/reviews/{owner}/{repo}/{number}/conversation")
+async def get_review_conversation(
+    owner: str,
+    repo: str,
+    number: int,
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    del auth
+    headers = await _github_repo_headers(repo)
+    items: list[dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        commits_resp = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls/{number}/commits",
+            headers=headers,
+            params={"per_page": 100},
+        )
+        if commits_resp.status_code == 200 and isinstance(commits_resp.json(), list):
+            for c in commits_resp.json():
+                if not isinstance(c, dict):
+                    continue
+                author_user = c.get("author") if isinstance(c.get("author"), dict) else None
+                raw_commit = c.get("commit")
+                commit_obj: dict[str, Any] = raw_commit if isinstance(raw_commit, dict) else {}
+                raw_committer = commit_obj.get("author")
+                committer_info: dict[str, Any] = (
+                    raw_committer if isinstance(raw_committer, dict) else {}
+                )
+                items.append(
+                    {
+                        "kind": "commit",
+                        "sha": str(c.get("sha") or ""),
+                        "author": (
+                            {
+                                "login": str(author_user.get("login") or ""),
+                                "avatar_url": str(author_user.get("avatar_url") or ""),
+                                "bot": str(author_user.get("type") or "").lower() == "bot",
+                            }
+                            if author_user
+                            else None
+                        ),
+                        "created_at": str(committer_info.get("date") or ""),
+                        "message": str(commit_obj.get("message") or ""),
+                        "html_url": str(c.get("html_url") or ""),
+                    }
+                )
+        comments_resp = await client.get(
+            f"https://api.github.com/repos/{owner}/{repo}/issues/{number}/comments",
+            headers=headers,
+            params={"per_page": 100},
+        )
+        if comments_resp.status_code == 200 and isinstance(comments_resp.json(), list):
+            for cm in comments_resp.json():
+                if not isinstance(cm, dict):
+                    continue
+                u = cm.get("user") if isinstance(cm.get("user"), dict) else None
+                items.append(
+                    {
+                        "kind": "comment",
+                        "id": int(cm.get("id") or 0),
+                        "author": (
+                            {
+                                "login": str(u.get("login") or ""),
+                                "avatar_url": str(u.get("avatar_url") or ""),
+                                "bot": str(u.get("type") or "").lower() == "bot",
+                            }
+                            if u
+                            else None
+                        ),
+                        "created_at": str(cm.get("created_at") or ""),
+                        "body": str(cm.get("body") or ""),
+                        "html_url": str(cm.get("html_url") or ""),
+                    }
+                )
+    return {"items": items, "threads": []}
+
+
+@router.get("/reviews/{owner}/{repo}/{number}/pending-review")
+async def get_pending_review(
+    owner: str,
+    repo: str,
+    number: int,
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    del owner, repo, number, auth
+    return {"id": 0, "node_id": "", "comments": []}
+
+
+@router.get("/reviews/{owner}/{repo}/{number}/chat")
+async def get_review_chat_meta(
+    owner: str,
+    repo: str,
+    number: int,
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    del owner, repo, number, auth
+    return {"available": False, "assistant_id": "agent", "thread_id": ""}
+
+
+@router.post("/reviews/{owner}/{repo}/{number}/viewed", status_code=204)
+async def post_review_viewed(
+    owner: str,
+    repo: str,
+    number: int,
+    auth: AuthContext = Depends(get_auth),
+) -> Response:
+    del owner, repo, number, auth
+    return Response(status_code=204)
+
+
+@router.get("/reviews/{owner}/{repo}/{number}/preview")
+async def get_review_preview(
+    owner: str,
+    repo: str,
+    number: int,
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    del auth
+    pr = await _fetch_github_pr(owner, repo, number)
+    raw_files = await _fetch_github_pr_files(owner, repo, number)
+    raw_user = pr.get("user")
+    user: dict[str, Any] = raw_user if isinstance(raw_user, dict) else {}
+    return {
+        "title": str(pr.get("title") or ""),
+        "body": str(pr.get("body") or ""),
+        "author": user.get("login"),
+        "author_avatar_url": user.get("avatar_url"),
+        "state": "merged" if pr.get("merged_at") else str(pr.get("state") or "open"),
+        "draft": bool(pr.get("draft")),
+        "head_ref": str((pr.get("head") or {}).get("ref") or ""),
+        "base_ref": str((pr.get("base") or {}).get("ref") or "main"),
+        "commits": int(pr.get("commits") or 0),
+        "additions": int(pr.get("additions") or 0),
+        "deletions": int(pr.get("deletions") or 0),
+        "changed_files": int(pr.get("changed_files") or 0),
+        "files": [
+            {
+                "path": str(f["filename"]),
+                "status": str(f.get("status") or "modified"),
+                "additions": int(f.get("additions") or 0),
+                "deletions": int(f.get("deletions") or 0),
+            }
+            for f in raw_files
+            if isinstance(f.get("filename"), str)
+        ],
+        "unresolved": [],
+        "checks": [],
+        "human_input": "",
     }
 
 
