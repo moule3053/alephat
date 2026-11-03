@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Self
 
 from fastapi import HTTPException
+from fastapi.responses import RedirectResponse
 from pydantic import ValidationError
 
 from openswe.dashboard.oauth import (
