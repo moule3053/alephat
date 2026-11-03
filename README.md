@@ -104,11 +104,36 @@ Alephat is licensed under the [MIT License](LICENSE).
 That license covers this repository's own code only.
 It does not cover anything under [`vendor/`](vendor/README.md), which is not licensed by this repository at all.
 
-## Standalone GKE deployment: Kata, Agent Sandbox, LiteLLM, and KEDA
+## Standalone GKE deployment: Kata or gVisor, Agent Sandbox, LiteLLM, and KEDA
 
 This fork can run Alephat's API, webhook receiver, dashboard, worker harness, PostgreSQL, NATS JetStream, LiteLLM gateway, and code sandboxes on Kubernetes.
 It does **not** require a LangSmith deployment, a commercial sandbox account, or any Alephat license key.
-The checked-in configuration uses the open-source editions of Agent Sandbox, Kata Containers, KEDA, NATS, PostgreSQL, and LiteLLM.
+The checked-in configuration uses the open-source editions of Agent Sandbox (`v1.0.9`), Kata Containers (`4.3.1`) or gVisor, KEDA (`2.21.0`), NATS (`2.12`), PostgreSQL (`17`), and LiteLLM (`1.106.6`).
+
+### Automated one-command deployment (`./deploy/gke-deploy.sh`)
+
+`./deploy/gke-deploy.sh` provisions the GKE cluster (choosing either **Kata** with Ubuntu + nested virtualization or **gVisor** with Container-Optimized OS + a gVisor sandbox node pool), installs Agent Sandbox and KEDA, deploys LiteLLM with your chosen `--models`, builds and pushes the images, and deploys the Alephat platform and harness:
+
+```bash
+# Deploy with Kata Containers (default) and Gemini 4 Argon + OpenAI + Anthropic in LiteLLM
+./deploy/gke-deploy.sh \
+  --project your-gcp-project-id \
+  --region us-central1 \
+  --sandbox-runtime kata \
+  --node-size n2-standard-4 \
+  --models "google:gemini-4-argon,google_genai:gemini-4-argon,openai:gpt-4o-mini,anthropic:claude-3-5-sonnet"
+
+# Or deploy with gVisor instead of Kata
+./deploy/gke-deploy.sh \
+  --project your-gcp-project-id \
+  --region us-central1 \
+  --sandbox-runtime gvisor \
+  --node-size e2-standard-4 \
+  --models "google:gemini-4-argon,openai:gpt-4o-mini"
+
+# Preview rendered SandboxTemplate and LiteLLM config without applying
+./deploy/gke-deploy.sh --dry-run --sandbox-runtime gvisor --region europe-west1
+```
 
 You still pay for GKE and model usage, and you must supply normal authentication credentials: a GitHub App plus an API key for each model provider you enable.
 Those are service credentials, not license keys.
@@ -219,10 +244,10 @@ Review and pin a newer tested release deliberately before upgrading; changing th
 ### 3. Install Agent Sandbox and the Kata sandbox template
 
 This fork calls the `v1beta1` Agent Sandbox APIs.
-The tested `v0.5.3` release serves `v1beta1` and includes the extensions controller used by `SandboxTemplate`:
+The tested `v1.0.9` release serves `v1beta1` and includes the extensions controller used by `SandboxTemplate`:
 
 ```bash
-export AGENT_SANDBOX_VERSION="v0.5.3"
+export AGENT_SANDBOX_VERSION="v1.0.9"
 
 kubectl apply -f \
   "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}/sandbox-with-extensions.yaml"
@@ -251,7 +276,7 @@ helm repo update
 helm upgrade --install keda kedacore/keda \
   --namespace keda \
   --create-namespace \
-  --version 2.20.0
+  --version 2.21.0
 
 kubectl -n keda rollout status deployment/keda-operator --timeout=5m
 kubectl get crd scaledobjects.keda.sh
@@ -307,7 +332,7 @@ kubectl -n "$PLATFORM_NAMESPACE" annotate serviceaccount alephat-litellm \
 helm upgrade --install alephat-platform \
   oci://ghcr.io/berriai/litellm-helm \
   --namespace "$PLATFORM_NAMESPACE" \
-  --version 1.90.2 \
+  --version 1.106.6 \
   --values deploy/k8s/litellm-values.yaml \
   --set-string postgresql.auth.password="$LITELLM_DB_PASSWORD" \
   --set-string postgresql.auth.postgresPassword="$LITELLM_DB_PASSWORD" \
@@ -554,7 +579,7 @@ helm repo update
 helm upgrade --install traefik traefik/traefik \
   --namespace traefik \
   --create-namespace \
-  --version 41.2.0 \
+  --version 42.3.0 \
   --values deploy/k8s/traefik-values.yaml \
   --set-string "service.spec.loadBalancerIP=${TRAEFIK_IP}" \
   --set-string "certificatesResolvers.letsencrypt.acme.email=${ACME_EMAIL}" \

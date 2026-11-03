@@ -14,7 +14,7 @@ data:
   LITELLM_ENABLED: "true"
   LITELLM_BASE_URL: "http://alephat-platform-litellm:4000"
   LITELLM_API_KEY: "sk-litellm"
-  DEFAULT_MODEL: "gemini-5.6-flash"
+  DEFAULT_MODEL: "google:gemini-4-argon"
   DEFAULT_SANDBOX_PROVIDER: "agent_sandbox"
   BOOTSTRAP_DEV_DEFAULTS: "true"
   AGENT_SANDBOX_NAMESPACE: "alephat-sandboxes"
