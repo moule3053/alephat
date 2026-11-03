@@ -22,13 +22,15 @@ LOCAL_SHELL_ENV_EXCLUDE = {
 
 
 def _scoped_git_config_env(root_dir: str) -> dict[str, str]:
-    """Point `git config --global` at a sandbox-local file.
+    """Point `git config --global` at a sandbox-local file outside the repo tree.
 
     Local sandboxes run on the host, so the bot identity every run writes would
     otherwise overwrite the developer's own `~/.gitconfig` user.name/email. The
-    scoped file includes the real one so credential helpers and aliases survive.
+    scoped file includes the real one so credential helpers and aliases survive,
+    and lives next to `root_dir` so `root_dir` stays empty for `git clone .`.
     """
-    scoped = Path(root_dir) / SANDBOX_GITCONFIG
+    resolved = Path(root_dir).resolve()
+    scoped = resolved.parent / f"{SANDBOX_GITCONFIG}-{resolved.name}"
     if not scoped.exists():
         host = Path.home() / ".gitconfig"
         scoped.write_text(f"[include]\n\tpath = {host}\n" if host.exists() else "")

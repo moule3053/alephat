@@ -69,6 +69,7 @@ def _repository_setup_command(repo: str, base_ref: str | None, token: str | None
         [
             "set -eu",
             "export GIT_TERMINAL_PROMPT=0",
+            "rm -f .gitconfig-sandbox",
             "if [ -d .git ]; then",
             '  actual_origin="$(git remote get-url origin)"',
             f'  if [ "$actual_origin" != {q_clone_url} ] && [ "$actual_origin" != {q_ssh_url} ]; then',
