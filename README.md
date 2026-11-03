@@ -27,11 +27,14 @@ It also reviews pull requests, learns repository-specific review preferences, mo
 Built on Open SWE and Deep Agents by LangChain, it is open source and deployable in your infrastructure.
 
 > [!NOTE]
-> Alephat is under active development. APIs, setup, and product surfaces may continue to evolve.
+> Alephat is under active development.
+> APIs, setup, and product surfaces may continue to evolve.
 
 ---
 
-Alephat is a fork of [Open SWE](https://github.com/langchain-ai/open-swe) with a standalone Kubernetes platform. See [the platform guide](docs/PLATFORM.md) and the GKE deployment guide below. The current upstream runtime requires Python 3.14 or newer; the platform images and dependency lockfile use that runtime.
+Alephat is a fork of [Open SWE](https://github.com/langchain-ai/open-swe) with a standalone Kubernetes platform.
+See [the platform guide](docs/PLATFORM.md) and the GKE deployment guide below.
+The current upstream runtime requires Python 3.14 or newer; the platform images and dependency lockfile use that runtime.
 
 ## What Alephat does
 
@@ -103,14 +106,22 @@ It does not cover anything under [`vendor/`](vendor/README.md), which is not lic
 
 ## Standalone GKE deployment: Kata, Agent Sandbox, LiteLLM, and KEDA
 
-This fork can run Alephat's API, webhook receiver, dashboard, worker harness, PostgreSQL, NATS JetStream, LiteLLM gateway, and code sandboxes on Kubernetes. It does **not** require a LangSmith deployment, a commercial sandbox account, or any Alephat license key. The checked-in configuration uses the open-source editions of Agent Sandbox, Kata Containers, KEDA, NATS, PostgreSQL, and LiteLLM.
+This fork can run Alephat's API, webhook receiver, dashboard, worker harness, PostgreSQL, NATS JetStream, LiteLLM gateway, and code sandboxes on Kubernetes.
+It does **not** require a LangSmith deployment, a commercial sandbox account, or any Alephat license key.
+The checked-in configuration uses the open-source editions of Agent Sandbox, Kata Containers, KEDA, NATS, PostgreSQL, and LiteLLM.
 
-You still pay for GKE and model usage, and you must supply normal authentication credentials: a GitHub App plus an API key for each model provider you enable. Those are service credentials, not license keys. LiteLLM enterprise-only metering is disabled.
+You still pay for GKE and model usage, and you must supply normal authentication credentials: a GitHub App plus an API key for each model provider you enable.
+Those are service credentials, not license keys.
+LiteLLM enterprise-only metering is disabled.
 
 The following path creates a GKE Standard cluster with Intel N2 Ubuntu nodes, nested virtualization, Kata's `kata-qemu` runtime, the open-source Agent Sandbox controller, and KEDA scaling of harness workers from NATS JetStream lag.
 
 > [!IMPORTANT]
-> Google also offers a managed GKE Agent Sandbox add-on. On Standard clusters its admission policy currently requires gVisor. This guide uses the open-source Agent Sandbox controller because the requested runtime is Kata. See Google's [managed Agent Sandbox guide](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/how-install-agent-sandbox) if you prefer gVisor instead. Kata on GKE is user-managed and is not covered by Google Cloud support.
+> Google also offers a managed GKE Agent Sandbox add-on.
+> On Standard clusters its admission policy currently requires gVisor.
+> This guide uses the open-source Agent Sandbox controller because the requested runtime is Kata.
+> See Google's [managed Agent Sandbox guide](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/how-install-agent-sandbox) if you prefer gVisor instead.
+> Kata on GKE is user-managed and is not covered by Google Cloud support.
 
 ### 1. Install the command-line prerequisites
 
@@ -153,11 +164,13 @@ gcloud services enable \
   iamcredentials.googleapis.com
 ```
 
-These instructions use Vertex AI through Workload Identity for the default Gemini alias. A separate Google AI Studio API-key alias is also configured for deployments that prefer that route.
+These instructions use Vertex AI through Workload Identity for the default Gemini alias.
+A separate Google AI Studio API-key alias is also configured for deployments that prefer that route.
 
 ### 2. Create the GKE cluster and install Kata Containers
 
-Agent Sandbox maintains an [official Kata-on-GKE example](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/examples/kata-gke-sandbox). Its setup script creates a zonal Standard cluster with Dataplane V2, IP aliases, nested virtualization, Ubuntu containerd, and an Intel N2 machine type; it then installs Kata and registers `RuntimeClass/kata-qemu`.
+Agent Sandbox maintains an [official Kata-on-GKE example](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/examples/kata-gke-sandbox).
+Its setup script creates a zonal Standard cluster with Dataplane V2, IP aliases, nested virtualization, Ubuntu containerd, and an Intel N2 machine type; it then installs Kata and registers `RuntimeClass/kata-qemu`.
 
 ```bash
 git clone --depth 1 https://github.com/kubernetes-sigs/agent-sandbox.git /tmp/agent-sandbox
@@ -173,7 +186,9 @@ git clone --depth 1 https://github.com/kubernetes-sigs/agent-sandbox.git /tmp/ag
 )
 ```
 
-If you created the cluster separately with `--enable-nested-virtualization`, rerun the same script with `--reuse-cluster`. Do not use E2, N2D, Arm, or Container-Optimized OS nodes for this Kata path. Choose a zone where N2 machines and nested virtualization are available.
+If you created the cluster separately with `--enable-nested-virtualization`, rerun the same script with `--reuse-cluster`.
+Do not use E2, N2D, Arm, or Container-Optimized OS nodes for this Kata path.
+Choose a zone where N2 machines and nested virtualization are available.
 
 Verify cluster access and Kata:
 
@@ -184,8 +199,8 @@ kubectl get runtimeclass kata-qemu
 kubectl -n kube-system rollout status daemonset/kata-deploy --timeout=10m
 ```
 
-Enable Workload Identity Federation and the GKE metadata server. LiteLLM uses this
-identity to call Vertex AI without a long-lived Google service-account key:
+Enable Workload Identity Federation and the GKE metadata server.
+LiteLLM uses this identity to call Vertex AI without a long-lived Google service-account key:
 
 ```bash
 gcloud container clusters update "$CLUSTER_NAME" \
@@ -198,11 +213,13 @@ gcloud container node-pools update default-pool \
   --workload-metadata=GKE_METADATA
 ```
 
-The upstream example currently pins Kata `3.2.0`. Review and pin a newer tested release deliberately before upgrading; changing the runtime on a live sandbox node pool should be treated as an infrastructure upgrade.
+The upstream example currently pins Kata `3.2.0`.
+Review and pin a newer tested release deliberately before upgrading; changing the runtime on a live sandbox node pool should be treated as an infrastructure upgrade.
 
 ### 3. Install Agent Sandbox and the Kata sandbox template
 
-This fork calls the `v1beta1` Agent Sandbox APIs. The tested `v0.5.3` release serves `v1beta1` and includes the extensions controller used by `SandboxTemplate`:
+This fork calls the `v1beta1` Agent Sandbox APIs.
+The tested `v0.5.3` release serves `v1beta1` and includes the extensions controller used by `SandboxTemplate`:
 
 ```bash
 export AGENT_SANDBOX_VERSION="v0.5.3"
@@ -217,19 +234,16 @@ kubectl wait --for=condition=Established \
 kubectl get runtimeclass kata-qemu
 ```
 
-The sandbox template is applied after its runtime image is built in steps 7–8. It uses
-`runtimeClassName: kata-qemu`, the Agent Sandbox Python toolbox on port `8888`, a non-root user,
-no service-account token, dropped capabilities, and resource limits. The Alephat runtime image adds
-Git, GitHub CLI, curl, and CA certificates to the pinned upstream toolbox image so workers can clone
-the selected repository and publish pull requests. The harness creates a direct `Sandbox` from this
-template for every task; a warm pool is not required by this provider.
+The sandbox template is applied after its runtime image is built in steps 7–8.
+It uses `runtimeClassName: kata-qemu`, the Agent Sandbox Python toolbox on port `8888`, a non-root user, no service-account token, dropped capabilities, and resource limits.
+The Alephat runtime image adds Git, GitHub CLI, curl, and CA certificates to the pinned upstream toolbox image so workers can clone the selected repository and publish pull requests.
+The harness creates a direct `Sandbox` from this template for every task; a warm pool is not required by this provider.
 
 ### 4. Install KEDA
 
-KEDA scales the harness deployment from one to fifty workers based on the pending message count for
-the durable `harness-workers` consumer on the `TASKS` JetStream stream. Keeping one worker running
-prevents queue-based scale-down from interrupting a task after its message has been claimed. One
-harness Pod processes one task at a time.
+KEDA scales the harness deployment from one to fifty workers based on the pending message count for the durable `harness-workers` consumer on the `TASKS` JetStream stream.
+Keeping one worker running prevents queue-based scale-down from interrupting a task after its message has been claimed.
+One harness Pod processes one task at a time.
 
 ```bash
 helm repo add kedacore https://kedacore.github.io/charts
@@ -243,11 +257,13 @@ kubectl -n keda rollout status deployment/keda-operator --timeout=5m
 kubectl get crd scaledobjects.keda.sh
 ```
 
-The NATS JetStream scaler is included in KEDA; no separate scaler installation is required. The `ScaledObject` is applied after Alephat starts once, so the API has created the streams and the initial harness has created its durable consumer.
+The NATS JetStream scaler is included in KEDA; no separate scaler installation is required.
+The `ScaledObject` is applied after Alephat starts once, so the API has created the streams and the initial harness has created its durable consumer.
 
 ### 5. Deploy standalone LiteLLM with OpenAI, Anthropic, and Gemini routes
 
-Create the platform namespace and LiteLLM secrets. Omit a provider key only after removing its corresponding model entry from `deploy/k8s/litellm-values.yaml`.
+Create the platform namespace and LiteLLM secrets.
+Omit a provider key only after removing its corresponding model entry from `deploy/k8s/litellm-values.yaml`.
 
 ```bash
 kubectl create namespace "$PLATFORM_NAMESPACE" \
@@ -303,11 +319,19 @@ kubectl -n "$PLATFORM_NAMESPACE" rollout status \
   deployment/alephat-platform-litellm --timeout=10m
 ```
 
-The values file creates logical aliases that match the dashboard model IDs and routes them to OpenAI, Anthropic, the Gemini API, and Vertex AI Gemini. The default `gemini-5.6-flash` alias uses Vertex AI through Workload Identity; `google:gemini-3.5-flash` demonstrates the API-key route. Provider model names change over time and differ by account; update each `litellm_params.model` to a model enabled for your account. `DEFAULT_MODEL` in `deploy/k8s/configmap.yaml` must match one of the `model_name` aliases. The explicit PostgreSQL password flags are required because the pinned LiteLLM chart generates an internal proxy credential in addition to consuming `litellm-postgres`; both must contain the same value. See the official [LiteLLM provider examples](https://docs.litellm.ai/) and [Kubernetes production guide](https://docs.litellm.ai/docs/proxy/deploy).
+The values file creates logical aliases that match the dashboard model IDs and routes them to OpenAI, Anthropic, the Gemini API, and Vertex AI Gemini.
+The default `gemini-5.6-flash` alias uses Vertex AI through Workload Identity; `google:gemini-3.5-flash` demonstrates the API-key route.
+Provider model names change over time and differ by account; update each `litellm_params.model` to a model enabled for your account.
+`DEFAULT_MODEL` in `deploy/k8s/configmap.yaml` must match one of the `model_name` aliases.
+The explicit PostgreSQL password flags are required because the pinned LiteLLM chart generates an internal proxy credential in addition to consuming `litellm-postgres`; both must contain the same value.
+See the official [LiteLLM provider examples](https://docs.litellm.ai/) and [Kubernetes production guide](https://docs.litellm.ai/docs/proxy/deploy).
 
-This getting-started deployment gives LiteLLM its own bundled PostgreSQL instance. Alephat uses a different PostgreSQL StatefulSet in the next step. For production, use separate Cloud SQL databases and Redis if you run multiple LiteLLM replicas; do not share schemas or credentials between LiteLLM and Alephat.
+This getting-started deployment gives LiteLLM its own bundled PostgreSQL instance.
+Alephat uses a different PostgreSQL StatefulSet in the next step.
+For production, use separate Cloud SQL databases and Redis if you run multiple LiteLLM replicas; do not share schemas or credentials between LiteLLM and Alephat.
 
-The pinned LiteLLM chart still references a retired Bitnami PostgreSQL tag, so the values file points that exact tag at the Bitnami Legacy archive. Legacy images receive no updates; use Cloud SQL or a currently supported PostgreSQL chart/image for a production installation.
+The pinned LiteLLM chart still references a retired Bitnami PostgreSQL tag, so the values file points that exact tag at the Bitnami Legacy archive.
+Legacy images receive no updates; use Cloud SQL or a currently supported PostgreSQL chart/image for a production installation.
 
 Test the gateway from inside the cluster with any configured alias:
 
@@ -324,19 +348,23 @@ kubectl -n "$PLATFORM_NAMESPACE" run litellm-smoke \
 
 ### 6. Create the GitHub App and Kubernetes secrets
 
-Open **GitHub Settings → Developer settings → GitHub Apps → New GitHub App**. The same GitHub App provides dashboard OAuth and short-lived installation tokens for cloning and modifying repositories.
+Open **GitHub Settings → Developer settings → GitHub Apps → New GitHub App**.
+The same GitHub App provides dashboard OAuth and short-lived installation tokens for cloning and modifying repositories.
 
 Under **Basic information**, configure:
 
 Replace `alephat.example.com` below with the value of `ALEPHAT_HOST` from step 1.
 
 - Homepage URL: use `http://127.0.0.1:18080` for port forwarding or `https://alephat.example.com` for production.
-- Callback URLs: add every origin you will use. For this guide, add both:
+- Callback URLs: add every origin you will use.
+  For this guide, add both:
   - `http://127.0.0.1:18080/dashboard/api/auth/callback`
   - `https://alephat.example.com/dashboard/api/auth/callback`
-- Under **Identifying and authorizing users**, enable **Request user authorization (OAuth) during installation** once one callback is reachable. If you create and install the app before deploying the UI, save the callback URLs now and enable this option after step 9; the dashboard's Sign in button can also start the OAuth web flow explicitly and supplies the matching `redirect_uri`.
+- Under **Identifying and authorizing users**, enable **Request user authorization (OAuth) during installation** once one callback is reachable.
+  If you create and install the app before deploying the UI, save the callback URLs now and enable this option after step 9; the dashboard's Sign in button can also start the OAuth web flow explicitly and supplies the matching `redirect_uri`.
 - Leave Device Flow disabled; the dashboard uses GitHub's web application flow.
-- Enable webhooks and set the production Webhook URL to `https://alephat.example.com/hooks/github`. For local webhook development, use a tunnel to the webhook service; a loopback URL is not reachable by GitHub.
+- Enable webhooks and set the production Webhook URL to `https://alephat.example.com/hooks/github`.
+  For local webhook development, use a tunnel to the webhook service; a loopback URL is not reachable by GitHub.
 - Generate a webhook secret with `openssl rand -hex 32` and enter the same value in the `alephat-secrets` Secret below.
 
 Set these repository permissions:
@@ -350,19 +378,23 @@ Set these repository permissions:
 - Actions: Read-only when the agent should inspect GitHub Actions logs
 - Organization members: Read-only when `ALLOWED_GITHUB_ORGS` is used to gate login
 
-Subscribe to `Issue comment`, `Pull request review`, `Pull request review comment`, `Check run`, `Check suite`, and `Workflow run`. The [detailed GitHub App permissions guide](docs/INSTALLATION.md#3-create-a-github-app) explains optional status events and why each permission is needed.
+Subscribe to `Issue comment`, `Pull request review`, `Pull request review comment`, `Check run`, `Check suite`, and `Workflow run`.
+The [detailed GitHub App permissions guide](docs/INSTALLATION.md#3-create-a-github-app) explains optional status events and why each permission is needed.
 
 After creating the app:
 
 1. Copy the App ID and OAuth Client ID.
-2. Generate an OAuth client secret.
-3. Generate and download a private-key `.pem` file.
-4. Select **Install App**, choose the account or organization, and grant access only to the repositories Alephat should operate on.
-5. Copy the numeric installation ID from the installation page URL.
+1. Generate an OAuth client secret.
+1. Generate and download a private-key `.pem` file.
+1. Select **Install App**, choose the account or organization, and grant access only to the repositories Alephat should operate on.
+1. Copy the numeric installation ID from the installation page URL.
 
-GitHub login requires an explicit `ALLOWED_GITHUB_USERS` or `ALLOWED_GITHUB_ORGS` allowlist. Add these values to existing deployments before upgrading.
+GitHub login requires an explicit `ALLOWED_GITHUB_USERS` or `ALLOWED_GITHUB_ORGS` allowlist.
+Add these values to existing deployments before upgrading.
 
-`GITHUB_APP_CLIENT_ID` and `GITHUB_APP_CLIENT_SECRET` are used for browser OAuth. `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, and `GITHUB_APP_INSTALLATION_ID` are used server-side to mint installation tokens. The private key and client secret must never be exposed to the browser or sandbox.
+`GITHUB_APP_CLIENT_ID` and `GITHUB_APP_CLIENT_SECRET` are used for browser OAuth.
+`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, and `GITHUB_APP_INSTALLATION_ID` are used server-side to mint installation tokens.
+The private key and client secret must never be exposed to the browser or sandbox.
 
 ```bash
 export ALLOWED_GITHUB_USERS="your-github-login"
@@ -395,7 +427,8 @@ kubectl -n "$PLATFORM_NAMESPACE" create secret generic alephat-oauth \
   --from-literal=TOKEN_ENCRYPTION_KEY="$TOKEN_ENCRYPTION_KEY"
 ```
 
-For production, create these secrets with Secret Manager plus External Secrets or the Secrets Store CSI driver instead of putting values in shell history. Never commit rendered Secrets, private keys, or API keys.
+For production, create these secrets with Secret Manager plus External Secrets or the Secrets Store CSI driver instead of putting values in shell history.
+Never commit rendered Secrets, private keys, or API keys.
 
 ### 7. Build and push the Alephat images
 
@@ -436,9 +469,8 @@ If you use a different LiteLLM release or logical model name, update `deploy/k8s
 
 The RBAC and NetworkPolicy manifests are separate because they target `alephat-sandboxes`, while the Kustomize base applies its namespace transformer to the `alephat` platform resources.
 
-If upgrading an earlier version of this fork that used `emptyDir`, first stop task submission, let
-queued/running tasks finish, and export PostgreSQL before the rollout. The old NATS stream was
-ephemeral, so no queued work should remain when NATS restarts:
+If upgrading an earlier version of this fork that used `emptyDir`, first stop task submission, let queued/running tasks finish, and export PostgreSQL before the rollout.
+The old NATS stream was ephemeral, so no queued work should remain when NATS restarts:
 
 ```bash
 kubectl -n "$PLATFORM_NAMESPACE" exec alephat-postgresql-0 -- \
@@ -446,8 +478,8 @@ kubectl -n "$PLATFORM_NAMESPACE" exec alephat-postgresql-0 -- \
   > alephat-before-pvc.sql
 ```
 
-Keep that backup outside the cluster. After applying, verify the PVCs are bound and restore the dump
-if this was an upgrade; a fresh installation does not need a restore.
+Keep that backup outside the cluster.
+After applying, verify the PVCs are bound and restore the dump if this was an upgrade; a fresh installation does not need a restore.
 
 ```bash
 kubectl apply -f deploy/k8s/agent-sandbox-rbac.yaml
@@ -475,7 +507,8 @@ kubectl -n "$PLATFORM_NAMESPACE" get scaledobject alephat-harness
 kubectl -n "$PLATFORM_NAMESPACE" get hpa
 ```
 
-The platform base intentionally does not include `harness-keda.yaml`: installing the base must remain possible before KEDA's CRDs exist. Once the `ScaledObject` is active, the harness can scale to zero while idle and scale out as tasks accumulate.
+The platform base intentionally does not include `harness-keda.yaml`: installing the base must remain possible before KEDA's CRDs exist.
+Once the `ScaledObject` is active, the harness can scale to zero while idle and scale out as tasks accumulate.
 
 Check all components:
 
@@ -487,17 +520,16 @@ kubectl -n keda get pods
 kubectl -n "$PLATFORM_NAMESPACE" logs deployment/alephat-harness --tail=100
 ```
 
-The checked-in Alephat PostgreSQL and NATS manifests each request a `20Gi`
-`standard-rwo` GKE persistent disk. LiteLLM's separate PostgreSQL instance requests another `20Gi`
-disk through its Helm values. PostgreSQL data and NATS JetStream state therefore survive Pod
-restarts and rescheduling. Set a different storage class or capacity in
-`deploy/k8s/postgresql.yaml`, `deploy/k8s/nats.yaml`, and `deploy/k8s/litellm-values.yaml` before the
-first apply when required. PVC capacity can be expanded later when the selected StorageClass allows
-expansion, but it cannot be shrunk.
+The checked-in Alephat PostgreSQL and NATS manifests each request a `20Gi` `standard-rwo` GKE persistent disk.
+LiteLLM's separate PostgreSQL instance requests another `20Gi` disk through its Helm values.
+PostgreSQL data and NATS JetStream state therefore survive Pod restarts and rescheduling.
+Set a different storage class or capacity in `deploy/k8s/postgresql.yaml`, `deploy/k8s/nats.yaml`, and `deploy/k8s/litellm-values.yaml` before the first apply when required.
+PVC capacity can be expanded later when the selected StorageClass allows expansion, but it cannot be shrunk.
 
 ### 9. Publish Alephat with Traefik, HTTPS, and DNS
 
-For production, reserve a regional external IPv4 address in the same region and network tier as the GKE cluster. Keeping the address reserved prevents it from changing when the Traefik Service is recreated.
+For production, reserve a regional external IPv4 address in the same region and network tier as the GKE cluster.
+Keeping the address reserved prevents it from changing when the Traefik Service is recreated.
 
 ```bash
 gcloud compute addresses describe "$TRAEFIK_IP_NAME" \
@@ -512,7 +544,9 @@ export TRAEFIK_IP="$(gcloud compute addresses describe "$TRAEFIK_IP_NAME" \
 echo "$TRAEFIK_IP"
 ```
 
-Install the official Traefik chart. The checked-in values expose ports 80 and 443, redirect HTTP to HTTPS, persist ACME state, and configure a Let's Encrypt HTTP-01 resolver. A single replica is intentional because the open-source file-based ACME store must not be written concurrently by multiple Traefik replicas.
+Install the official Traefik chart.
+The checked-in values expose ports 80 and 443, redirect HTTP to HTTPS, persist ACME state, and configure a Let's Encrypt HTTP-01 resolver.
+A single replica is intentional because the open-source file-based ACME store must not be written concurrently by multiple Traefik replicas.
 
 ```bash
 helm repo add traefik https://traefik.github.io/charts
@@ -530,7 +564,8 @@ kubectl -n traefik get service traefik
 kubectl -n traefik get pvc
 ```
 
-If the domain is already hosted by Cloud DNS, use its managed-zone name as `DNS_ZONE`. To create a new public managed zone:
+If the domain is already hosted by Cloud DNS, use its managed-zone name as `DNS_ZONE`.
+To create a new public managed zone:
 
 ```bash
 gcloud dns managed-zones describe "$DNS_ZONE" >/dev/null 2>&1 || \
@@ -542,7 +577,8 @@ gcloud dns managed-zones describe "$DNS_ZONE" \
   --format='value(nameServers)'
 ```
 
-For a newly created zone, configure the listed name servers at your domain registrar and wait for delegation to propagate. Then create the dashboard A record:
+For a newly created zone, configure the listed name servers at your domain registrar and wait for delegation to propagate.
+Then create the dashboard A record:
 
 ```bash
 gcloud dns record-sets create "${ALEPHAT_HOST%.}." \
@@ -554,16 +590,19 @@ gcloud dns record-sets create "${ALEPHAT_HOST%.}." \
 dig +short "$ALEPHAT_HOST"
 ```
 
-If DNS is hosted outside Cloud DNS, create the equivalent `A` record with that provider. Do not create the TLS route until public DNS resolves to `TRAEFIK_IP`; Let's Encrypt must reach port 80 for the HTTP-01 challenge.
+If DNS is hosted outside Cloud DNS, create the equivalent `A` record with that provider.
+Do not create the TLS route until public DNS resolves to `TRAEFIK_IP`; Let's Encrypt must reach port 80 for the HTTP-01 challenge.
 
-Apply the Traefik route after replacing the example hostname. `/hooks/*` goes directly to the webhook service; all other paths go to the UI, whose Nginx configuration proxies `/dashboard/api/*` and `/v1/*` to the API.
+Apply the Traefik route after replacing the example hostname.
+`/hooks/*` goes directly to the webhook service; all other paths go to the UI, whose Nginx configuration proxies `/dashboard/api/*` and `/v1/*` to the API.
 
 ```bash
 sed "s/alephat\.example\.com/${ALEPHAT_HOST}/g" \
   deploy/k8s/traefik-ingressroute.yaml | kubectl apply -f -
 ```
 
-Update the runtime URLs so OAuth emits the production callback, cookies are marked secure, and CORS accepts the public origin. Keep the same values in your permanent Kustomize overlay or `configmap.yaml`; otherwise a later base apply will restore the loopback defaults.
+Update the runtime URLs so OAuth emits the production callback, cookies are marked secure, and CORS accepts the public origin.
+Keep the same values in your permanent Kustomize overlay or `configmap.yaml`; otherwise a later base apply will restore the loopback defaults.
 
 ```bash
 kubectl -n "$PLATFORM_NAMESPACE" patch configmap alephat-config \
@@ -600,7 +639,8 @@ kubectl -n "$PLATFORM_NAMESPACE" port-forward service/alephat-ui 18080:80
 
 Open [http://127.0.0.1:18080](http://127.0.0.1:18080), sign in with GitHub, select a repository installed for the GitHub App, and submit a small task such as:
 
-For the Traefik deployment, open `https://alephat.example.com` using your configured hostname instead. GitHub should redirect back to `/dashboard/api/auth/callback`, set the secure `alephat_session` cookie, and return to the dashboard.
+For the Traefik deployment, open `https://alephat.example.com` using your configured hostname instead.
+GitHub should redirect back to `/dashboard/api/auth/callback`, set the secure `alephat_session` cookie, and return to the dashboard.
 
 ```text
 Add a short "Testing notes" section to README.md, inspect the diff, and report the changed files.
@@ -626,25 +666,26 @@ kubectl -n "$SANDBOX_NAMESPACE" exec "$SANDBOX_POD" -- uname -r
 kubectl -n "$SANDBOX_NAMESPACE" exec "$SANDBOX_POD" -- git diff --stat
 ```
 
-The first command must print `kata-qemu`. A successful task should show model events in the UI, command/tool events from the sandbox, and a final response. After the cooldown period, KEDA should return the harness to zero replicas if no tasks remain.
+The first command must print `kata-qemu`.
+A successful task should show model events in the UI, command/tool events from the sandbox, and a final response.
+After the cooldown period, KEDA should return the harness to zero replicas if no tasks remain.
 
 ### 11. Production hardening and cleanup
 
 The checked-in manifests are a reproducible standalone starting point, not an HA production topology:
 
-- `deploy/k8s/postgresql.yaml` gives Alephat a dedicated PostgreSQL StatefulSet backed by a GKE
-  persistent disk. Configure scheduled backups and use Cloud SQL for regional HA, point-in-time
-  recovery, and managed failover.
+- `deploy/k8s/postgresql.yaml` gives Alephat a dedicated PostgreSQL StatefulSet backed by a GKE persistent disk.
+  Configure scheduled backups and use Cloud SQL for regional HA, point-in-time recovery, and managed failover.
 - `deploy/k8s/nats.yaml` persists JetStream state on a GKE disk but remains a single NATS server.
-  Use the official NATS Helm chart with a three-node JetStream cluster and disruption budgets when
-  queue availability must survive a node or zone failure.
-- The LiteLLM chart's standalone PostgreSQL is also a getting-started option. Use a separate managed database, backups, and Redis for multi-replica LiteLLM.
+  Use the official NATS Helm chart with a three-node JetStream cluster and disruption budgets when queue availability must survive a node or zone failure.
+- The LiteLLM chart's standalone PostgreSQL is also a getting-started option.
+  Use a separate managed database, backups, and Redis for multi-replica LiteLLM.
 - Back up Traefik's ACME volume or move certificate lifecycle to cert-manager before making ingress highly available.
 - Restrict GitHub App repository access, configure NetworkPolicies and egress controls, set ResourceQuotas in the sandbox namespace, and enable GKE node autoscaling for the Kata pool.
 - Pin container, Helm chart, Agent Sandbox, and Kata versions and test upgrades in a non-production cluster.
 
-Deleting the namespace or any PVC can delete its underlying disk, depending on the StorageClass
-reclaim policy. Take a database backup and a JetStream snapshot before destructive maintenance.
+Deleting the namespace or any PVC can delete its underlying disk, depending on the StorageClass reclaim policy.
+Take a database backup and a JetStream snapshot before destructive maintenance.
 
 Delete the cluster when it is no longer needed:
 

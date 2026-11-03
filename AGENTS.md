@@ -27,7 +27,11 @@ Open SWE starts three kinds of run (`agent`, `reviewer`, `review-scout`), each a
 As a run starts, its kind resolves the run's catalog from what only the backend holds, such as thread settings, workspace defaults, the sender's access and credentialed integrations (`agent_catalog`, `reviewer_catalog`, `review_scout_catalog`, `openswe/agent_api/run_catalog.py`); after that, every call is answered from the token (`openswe/agent_api/run_calls.py`).
 The backend never runs middleware around a model call; the only middleware objects it keeps are the preparation and the reporters a named endpoint calls.
 
-Alephat also provides an independent multi-service platform in `alephat_platform/` with API, webhook, and harness services over PostgreSQL and NATS. Its deployment files live in `deploy/`; see `docs/PLATFORM.md` and the standalone GKE guide in `README.md`. Keep the platform compatible when changing shared OAuth or sandbox provider APIs. Use `make platform-up` for the local stack and `uv run pytest tests/platform` for its unit tests. Both runtimes require Python 3.14 or newer.
+Alephat also provides an independent multi-service platform in `alephat_platform/` with API, webhook, and harness services over PostgreSQL and NATS.
+Its deployment files live in `deploy/`; see `docs/PLATFORM.md` and the standalone GKE guide in `README.md`.
+Keep the platform compatible when changing shared OAuth or sandbox provider APIs.
+Use `make platform-up` for the local stack and `uv run pytest tests/platform` for its unit tests.
+Both runtimes require Python 3.14 or newer.
 
 ## Conventions
 

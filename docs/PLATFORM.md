@@ -13,13 +13,16 @@ Implementation of [`SERVICE_CONTRACTS.md`](./SERVICE_CONTRACTS.md).
 
 ### Does the harness run separately?
 
-**Yes.** The harness is a pure worker:
+**Yes.**
+The harness is a pure worker:
 
 1. API/webhook write tasks + outbox rows in Postgres.
-2. Outbox publisher (in API and webhook) publishes `task.enqueue` to **NATS JetStream `TASKS`**.
-3. Harness **pull-subscribes** to that stream, claims a task (Postgres lease), runs the agent, checkpoints, completes/parks.
+1. Outbox publisher (in API and webhook) publishes `task.enqueue` to **NATS JetStream `TASKS`**.
+1. Harness **pull-subscribes** to that stream, claims a task (Postgres lease), runs the agent, checkpoints, completes/parks.
 
-You can start/stop/scale harness without restarting API or webhooks. If harness is down, jobs stay in JetStream / `queued` until a worker appears. No KEDA is required locally — use Compose scale:
+You can start/stop/scale harness without restarting API or webhooks.
+If harness is down, jobs stay in JetStream / `queued` until a worker appears.
+No KEDA is required locally — use Compose scale:
 
 ```bash
 docker-compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --scale harness=3
@@ -35,11 +38,10 @@ docker-compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --scale
 | LLM providers | env on harness | Direct OpenAI/Anthropic/Fireworks/Google (**default**) |
 | LiteLLM | `litellm` (profile `with-litellm`) | **Optional** proxy when `LITELLM_ENABLED=true` |
 
-Sandboxes: `agent_sandbox` (default), `daytona`, `opensandbox`. Real Daytona handles and the
-Kubernetes Agent Sandbox backend run through `deepagents.create_deep_agent`. The Agent Sandbox
-backend confines file operations to `/app/repo` and implements shell execution plus upload/download
-over the Python runtime service. Stub sandboxes are fail-closed by default and can only be enabled
-explicitly with `ALLOW_STUB_SANDBOXES=true` for local control-plane/UI testing.
+Sandboxes: `agent_sandbox` (default), `daytona`, `opensandbox`.
+Real Daytona handles and the Kubernetes Agent Sandbox backend run through `deepagents.create_deep_agent`.
+The Agent Sandbox backend confines file operations to `/app/repo` and implements shell execution plus upload/download over the Python runtime service.
+Stub sandboxes are fail-closed by default and can only be enabled explicitly with `ALLOW_STUB_SANDBOXES=true` for local control-plane/UI testing.
 
 ## Docker Compose (recommended local)
 
@@ -76,24 +78,24 @@ curl -s -X POST http://localhost:8080/v1/tasks \
   -d '{"title":"Hello","prompt":"DONE: smoke test","agent_type":"coding"}'
 ```
 
-Watch harness pick up the job (`make platform-logs`). Task status:
+Watch harness pick up the job (`make platform-logs`).
+Task status:
 
 ```bash
 curl -s http://localhost:8080/v1/tasks | jq .
 ```
 
-Open the platform console at `http://localhost:3000/platform`. Nginx serves the SPA and proxies
-`/v1/*` to the API service, including the unbuffered SSE event stream. The UI supports task
-creation, task status/activity, mid-run guidance and cancellation, approvals, model/sandbox
-defaults, and MCP server create/test/delete.
+Open the platform console at `http://localhost:3000/platform`.
+Nginx serves the SPA and proxies `/v1/*` to the API service, including the unbuffered SSE event stream.
+The UI supports task creation, task status/activity, mid-run guidance and cancellation, approvals, model/sandbox defaults, and MCP server create/test/delete.
 
-Compose does not inject the complete `.env` into every service. Provider and sandbox credentials
-are available only to the harness (or the optional LiteLLM container), webhook secrets only to the
-webhook service, and API authentication/encryption values only to the API.
+Compose does not inject the complete `.env` into every service.
+Provider and sandbox credentials are available only to the harness (or the optional LiteLLM container), webhook secrets only to the webhook service, and API authentication/encryption values only to the API.
 
 ### LLM: direct providers (default) vs optional LiteLLM
 
-**Default:** harness calls providers directly. Set at least one key in `deploy/.env`:
+**Default:** harness calls providers directly.
+Set at least one key in `deploy/.env`:
 
 ```bash
 OPENAI_API_KEY=sk-...
@@ -151,8 +153,7 @@ deploy/
 
 ## Kubernetes
 
-KEDA, the schema migration Job, and multi-replica API/webhook/harness/UI Deployments live under
-`deploy/k8s/` (not used by Compose):
+KEDA, the schema migration Job, and multi-replica API/webhook/harness/UI Deployments live under `deploy/k8s/` (not used by Compose):
 
 ```bash
 kubectl apply -k deploy/k8s/
@@ -160,4 +161,5 @@ kubectl apply -k deploy/k8s/
 
 ## Legacy monolith
 
-The existing `agent/` LangGraph app (`make dev`) remains available during the strangler migration. New multi-service traffic uses `alephat_platform.*`.
+The existing `agent/` LangGraph app (`make dev`) remains available during the strangler migration.
+New multi-service traffic uses `alephat_platform.*`.

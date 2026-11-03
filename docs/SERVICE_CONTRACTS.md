@@ -2,10 +2,10 @@
 
 Target architecture for a k8s-native, long-running remote coding agent platform.
 
-**Deployables:** `ui` · `api` · `webhook` · `harness`  
-**Platform deps:** PostgreSQL · NATS JetStream · sandbox providers (**Daytona** default, **agent-sandbox**, **OpenSandbox**) · **LLM** via direct providers and/or optional **LiteLLM**
+**Deployables:** `ui` · `api` · `webhook` · `harness` **Platform deps:** PostgreSQL · NATS JetStream · sandbox providers (**Daytona** default, **agent-sandbox**, **OpenSandbox**) · **LLM** via direct providers and/or optional **LiteLLM**
 
-This document is the **contract** between services: identities, state machine, HTTP APIs, NATS subjects, lease/idempotency rules, model/sandbox/MCP contracts, and event schemas. Implementation may evolve; breaking contract changes require a version bump (`api` and message `schema_version`).
+This document is the **contract** between services: identities, state machine, HTTP APIs, NATS subjects, lease/idempotency rules, model/sandbox/MCP contracts, and event schemas.
+Implementation may evolve; breaking contract changes require a version bump (`api` and message `schema_version`).
 
 **Implementation:** Python package `alephat_platform/` (see [`PLATFORM.md`](./PLATFORM.md)), schema `migrations/001_init.sql`, deploy under `deploy/`.
 
@@ -13,17 +13,22 @@ This document is the **contract** between services: identities, state machine, H
 
 ## 1. Design invariants
 
-1. **Postgres is source of truth.** NATS is delivery only.
-2. **Harness persists and checkpoints only to Postgres** — graph/agent state, run progress, and recovery points must be durable in Postgres before ack boundaries that allow another worker to take over (lease loss, park, process exit). No reliance on local disk or in-memory-only state for resume.
-3. **At most one active harness** may hold the lease for a given `task_id` at a time.
-4. **One harness slot = one run attempt** (pod concurrency 1 initially).
-5. **Human wait parks the run** and releases the worker; compute wait holds the worker.
-6. **Transactional outbox:** producers write domain rows + outbox in one DB transaction; a publisher relays outbox → JetStream.
-7. **Idempotent consumers:** every external delivery and every NATS message has a stable idempotency key stored in Postgres.
-8. **Harness is extensible by `agent_type`**, not by new deployables (until scale profiles force a split).
-9. **LLM access is pluggable** — harness uses **direct provider APIs** (OpenAI, Anthropic, Fireworks, Google) by default, or an optional **LiteLLM** proxy when enabled (`LLM_MODE` / `LITELLM_ENABLED`). Provider credentials stay on the harness; never in the sandbox.
-10. **Sandbox provider is pluggable and user-selectable** — supported: `agent_sandbox` (default), `daytona`, `opensandbox`. Selection resolves per task (§10).
-11. **Users and orgs can configure MCP servers** — harness loads enabled MCP configs for a run and exposes their tools to the agent. MCP traffic runs **on the harness (server-side)**, not inside the sandbox, unless a server is explicitly marked sandbox-side (§11).
+1. **Postgres is source of truth.**
+   NATS is delivery only.
+1. **Harness persists and checkpoints only to Postgres** — graph/agent state, run progress, and recovery points must be durable in Postgres before ack boundaries that allow another worker to take over (lease loss, park, process exit).
+   No reliance on local disk or in-memory-only state for resume.
+1. **At most one active harness** may hold the lease for a given `task_id` at a time.
+1. **One harness slot = one run attempt** (pod concurrency 1 initially).
+1. **Human wait parks the run** and releases the worker; compute wait holds the worker.
+1. **Transactional outbox:** producers write domain rows + outbox in one DB transaction; a publisher relays outbox → JetStream.
+1. **Idempotent consumers:** every external delivery and every NATS message has a stable idempotency key stored in Postgres.
+1. **Harness is extensible by `agent_type`**, not by new deployables (until scale profiles force a split).
+1. **LLM access is pluggable** — harness uses **direct provider APIs** (OpenAI, Anthropic, Fireworks, Google) by default, or an optional **LiteLLM** proxy when enabled (`LLM_MODE` / `LITELLM_ENABLED`).
+   Provider credentials stay on the harness; never in the sandbox.
+1. **Sandbox provider is pluggable and user-selectable** — supported: `agent_sandbox` (default), `daytona`, `opensandbox`.
+   Selection resolves per task (§10).
+1. **Users and orgs can configure MCP servers** — harness loads enabled MCP configs for a run and exposes their tools to the agent.
+   MCP traffic runs **on the harness (server-side)**, not inside the sandbox, unless a server is explicitly marked sandbox-side (§11).
 
 ---
 
@@ -154,15 +159,19 @@ park_reason ∈ {
 | `litellm` (optional) | Cluster-internal model gateway | Upstream model providers |
 | sandbox control planes | Provider-specific (Daytona / agent-sandbox / OpenSandbox) | Workload runtimes |
 
-Harness **must not** expose a public HTTP API for task creation. Optional internal admin endpoints (health, metrics) only.
+Harness **must not** expose a public HTTP API for task creation.
+Optional internal admin endpoints (health, metrics) only.
 
-LiteLLM is **optional**. When disabled, harness calls provider APIs directly. Sandbox control planes may be co-located in-cluster or external SaaS.
+LiteLLM is **optional**.
+When disabled, harness calls provider APIs directly.
+Sandbox control planes may be co-located in-cluster or external SaaS.
 
 ---
 
 ## 5. PostgreSQL ownership (logical schema)
 
-Not a migration file — contract-level tables. Exact DDL is implementation.
+Not a migration file — contract-level tables.
+Exact DDL is implementation.
 
 ### 5.1 Tenancy & config
 
@@ -215,9 +224,8 @@ Sandbox workspace state is **not** a substitute for graph checkpoints; sandbox m
 
 ## 6. HTTP contracts — `api`
 
-Base path: `/v1`  
-Auth: `Authorization: Bearer <token>` or session cookie (UI).  
-Errors: RFC 7807-ish `{ "type", "title", "status", "detail", "error_code" }`.  
+Base path: `/v1` Auth: `Authorization: Bearer <token>` or session cookie (UI).
+Errors: RFC 7807-ish `{ "type", "title", "status", "detail", "error_code" }`.
 Idempotent POSTs: header `Idempotency-Key: <string>` (required for create/cancel/approve).
 
 ### 6.1 Tasks
@@ -258,7 +266,7 @@ Response `201`:
 }
 ```
 
-Effects: resolve model + sandbox_provider → insert `tasks` + initial user `messages` + outbox `tasks.enqueue`.  
+Effects: resolve model + sandbox_provider → insert `tasks` + initial user `messages` + outbox `tasks.enqueue`.
 Errors: `400 unknown_sandbox_provider`, `403 sandbox_provider_disabled`, `400 unknown_model` (if not in org allowlist when allowlisting is on).
 
 #### `GET /v1/tasks/{task_id}`
@@ -303,7 +311,7 @@ Cursor pagination over `run_events` (`after_seq`, `limit`).
 
 #### `GET /v1/tasks/{task_id}/events/stream`
 
-SSE: `event: run_event` data = event JSON; also `event: task_status` on status change.  
+SSE: `event: run_event` data = event JSON; also `event: task_status` on status change.
 Reconnect with `Last-Event-ID` = last `seq`.
 
 ### 6.2 Approvals
@@ -347,7 +355,8 @@ Includes lease worker id (admin), timestamps, error.
 
 ### 6.6 MCP servers (user-configurable)
 
-Users and org admins configure MCP servers via the API (and UI). Auth secrets are write-only after create (never returned in full).
+Users and org admins configure MCP servers via the API (and UI).
+Auth secrets are write-only after create (never returned in full).
 
 #### Scope
 
@@ -358,7 +367,7 @@ Users and org admins configure MCP servers via the API (and UI). Auth secrets ar
 
 #### `GET /v1/mcp-servers`
 
-Lists servers visible to the caller (own user + enabled org servers).  
+Lists servers visible to the caller (own user + enabled org servers).
 Query: `scope=user|org`, `enabled=true`.
 
 Response items omit secret values; include `has_auth: true|false`, `status`, tool count if last probe known.
@@ -411,8 +420,9 @@ Soft-delete or hard-delete; in-flight tasks keep the **snapshotted** `mcp_server
 
 #### `POST /v1/mcp-servers/{mcp_server_id}/test`
 
-Harness or API probes connectivity and lists tools (timeout bounded).  
-Returns `{ "ok": true, "tools": ["…"] }` or error detail. Does not expose secrets.
+Harness or API probes connectivity and lists tools (timeout bounded).
+Returns `{ "ok": true, "tools": ["…"] }` or error detail.
+Does not expose secrets.
 
 #### Task create optional override
 
@@ -435,8 +445,8 @@ Returns `{ "ok": true, "tools": ["…"] }` or error detail. Does not expose secr
 
 ## 7. HTTP contracts — `webhook`
 
-Public base: `/hooks`  
-No user auth. Provider signature required.  
+Public base: `/hooks` No user auth.
+Provider signature required.
 Responses: fast `2xx` after durable accept (DB write), **not** after agent completion.
 
 ### 7.1 Endpoints
@@ -454,11 +464,11 @@ CI may arrive as GitHub `check_run` / `check_suite` / `workflow_run` / `status` 
 For every delivery:
 
 1. Verify signature; on failure → `401`/`403`, no side effects.
-2. Compute `idempotency_key = provider + ":" + delivery_id` (GitHub `X-GitHub-Delivery`, Slack `event_id`, etc.).
-3. `INSERT` into `webhook_deliveries`; on conflict → `200` with `{ "duplicate": true }` (ack for provider retry).
-4. Normalize → domain command (see §7.3).
-5. In **one transaction**: upsert task / append messages / set cancel / create approval decision as needed + outbox row(s).
-6. Return `202` or `200` `{ "accepted": true, "task_id": "…" }`.
+1. Compute `idempotency_key = provider + ":" + delivery_id` (GitHub `X-GitHub-Delivery`, Slack `event_id`, etc.).
+1. `INSERT` into `webhook_deliveries`; on conflict → `200` with `{ "duplicate": true }` (ack for provider retry).
+1. Normalize → domain command (see §7.3).
+1. In **one transaction**: upsert task / append messages / set cancel / create approval decision as needed + outbox row(s).
+1. Return `202` or `200` `{ "accepted": true, "task_id": "…" }`.
 
 Webhook service **does not** call harness, LiteLLM, or sandboxes.
 
@@ -561,9 +571,9 @@ Published when a task becomes **runnable** (`queued`).
 }
 ```
 
-**Consumer:** harness worker pool (competing consumers).  
-**Ack policy:** Ack **only after** successful lease acquisition in Postgres **or** after determining the message is obsolete (task not `queued` / already leased).  
-If lease fails because another worker won, ack (no redelivery storm).  
+**Consumer:** harness worker pool (competing consumers).
+**Ack policy:** Ack **only after** successful lease acquisition in Postgres **or** after determining the message is obsolete (task not `queued` / already leased).
+If lease fails because another worker won, ack (no redelivery storm).
 If worker crashes after lease, **lease expiry** requeues (see §9) — do not rely on NATS redelivery alone for long runs.
 
 ### 8.5 `task.control` payload
@@ -582,12 +592,13 @@ If worker crashes after lease, **lease expiry** requeues (see §9) — do not re
 }
 ```
 
-**Consumer:** the worker that holds the lease (subscription with filter, or all workers ignore if `run_id`/lease owner mismatch).  
+**Consumer:** the worker that holds the lease (subscription with filter, or all workers ignore if `run_id`/lease owner mismatch).
 **Semantics:** best-effort wake; **Postgres remains authoritative** (worker also polls cancel/messages every step).
 
 ### 8.6 `task.event` payload (optional bus)
 
-Mirrors `run_events` for push fan-out. API may ignore and read DB only.
+Mirrors `run_events` for push fan-out.
+API may ignore and read DB only.
 
 ```json
 {
@@ -604,7 +615,8 @@ Mirrors `run_events` for push fan-out. API may ignore and read DB only.
 
 ### 8.7 DLQ
 
-After `max_deliver` on enqueue processing failures (poison payload, repeated handler bugs), publish to `dlq.tasks` with original envelope + error. Ops redrive → new outbox enqueue after fix.
+After `max_deliver` on enqueue processing failures (poison payload, repeated handler bugs), publish to `dlq.tasks` with original envelope + error.
+Ops redrive → new outbox enqueue after fix.
 
 ---
 
@@ -654,11 +666,12 @@ IF status=running AND lease_expires_at < now():
 Each step boundary the harness MUST:
 
 1. Refresh lease heartbeat.
-2. Load new `messages` with `id > last_seen`.
-3. If `cancel_requested` → abort tools, best-effort sandbox cleanup policy, terminal `cancelled`.
-4. **Persist graph checkpoint to Postgres** (required; see §5.4). Do not complete the step boundary until the checkpoint write succeeds.
-5. Append `run_events` for UI (tool start/end, PR opened, errors).
-6. If agent emits plan/question requiring human → create `approvals` / park message → `park` (§9.4).
+1. Load new `messages` with `id > last_seen`.
+1. If `cancel_requested` → abort tools, best-effort sandbox cleanup policy, terminal `cancelled`.
+1. **Persist graph checkpoint to Postgres** (required; see §5.4).
+   Do not complete the step boundary until the checkpoint write succeeds.
+1. Append `run_events` for UI (tool start/end, PR opened, errors).
+1. If agent emits plan/question requiring human → create `approvals` / park message → `park` (§9.4).
 
 ### 9.4 Park protocol
 
@@ -676,16 +689,17 @@ exit process slot (pod free for other work)
 
 If the Postgres checkpoint write fails, the harness must **not** transition to `parked` or release the lease as a clean park; surface `run_events.error` and follow failure/retry policy.
 
-Resume path is **only** via API/webhook decision/message → `parked → queued` → new `task.enqueue`. Claiming worker **loads the latest Postgres checkpoint** for the run and continues.
+Resume path is **only** via API/webhook decision/message → `parked → queued` → new `task.enqueue`.
+Claiming worker **loads the latest Postgres checkpoint** for the run and continues.
 
 **Contract choice (v1):** continue same `run_id` across park/resume; `attempt` unchanged; `runs.status` flips `parked ↔ active`.
 
 ### 9.5 Cancel protocol
 
 1. API/webhook sets `tasks.cancel_requested_at` (source of truth).
-2. Control message optional wake.
-3. Harness observes → stop scheduling new model calls → mark run+task `cancelled` → sandbox per policy (`stop` vs `delete`).
-4. If already parked/queued, API may terminalize without harness.
+1. Control message optional wake.
+1. Harness observes → stop scheduling new model calls → mark run+task `cancelled` → sandbox per policy (`stop` vs `delete`).
+1. If already parked/queued, API may terminalize without harness.
 
 ### 9.6 Agent type registry
 
@@ -701,7 +715,8 @@ harness/registry:
   chat      -> create_chat_agent(ctx)
 ```
 
-Job payload / task row selects factory. Unknown `agent_type` → fail run `error_code=unknown_agent_type` (no retry).
+Job payload / task row selects factory.
+Unknown `agent_type` → fail run `error_code=unknown_agent_type` (no retry).
 
 ### 9.7 Execution context passed into agent
 
@@ -746,8 +761,8 @@ Harness builds immutable-ish `RunContext`:
 }
 ```
 
-Models: **direct providers and/or optional LiteLLM** (§10).  
-Sandboxes: **only** via `SandboxProvider` interface for `daytona` | `agent_sandbox` | `opensandbox` (§10). Provider is taken from the task row (user-selected at create); harness must not override except on explicit admin redrive.  
+Models: **direct providers and/or optional LiteLLM** (§10).
+Sandboxes: **only** via `SandboxProvider` interface for `daytona` | `agent_sandbox` | `opensandbox` (§10). Provider is taken from the task row (user-selected at create); harness must not override except on explicit admin redrive.
 MCP: load `mcp_servers` from task snapshot (§11); connect at run start; expose filtered tools to the agent.
 
 ### 9.8 Side effects (outbound)
@@ -801,9 +816,9 @@ All three **must** be implemented behind one harness interface so agents are pro
 Resolution order for `sandbox_provider` at task create (API, UI, or normalized webhook policy):
 
 1. Explicit request field / UI choice / source command override (if allowed)
-2. User preference (`user_settings.sandbox_provider`)
-3. Org default (`org_settings.default_sandbox_provider`)
-4. Configured platform default (`DEFAULT_SANDBOX_PROVIDER`) → **`agent_sandbox`** when unset
+1. User preference (`user_settings.sandbox_provider`)
+1. Org default (`org_settings.default_sandbox_provider`)
+1. Configured platform default (`DEFAULT_SANDBOX_PROVIDER`) → **`agent_sandbox`** when unset
 
 Constraints:
 
@@ -902,7 +917,8 @@ cap by org max
 snapshot onto tasks.mcp_server_ids (+ optional frozen config blob on run)
 ```
 
-**Snapshot:** harness uses the snapshot from task/run start so mid-run admin edits do not change an active job. Edits apply to **subsequent** tasks/runs.
+**Snapshot:** harness uses the snapshot from task/run start so mid-run admin edits do not change an active job.
+Edits apply to **subsequent** tasks/runs.
 
 ### 11.4 Runtime (harness)
 
@@ -961,7 +977,8 @@ Stable `event_type` strings for UI and integrations:
 | `run_succeeded` / `run_failed` | Terminal attempt |
 | `error` | Non-terminal error detail |
 
-Payloads are JSON; additive fields OK. Renames require new `event_type` or schema version.
+Payloads are JSON; additive fields OK.
+Renames require new `event_type` or schema version.
 
 ---
 
@@ -976,7 +993,8 @@ Payloads are JSON; additive fields OK. Renames require new `event_type` or schem
 | NATS enqueue | `Nats-Msg-Id` / outbox id | JetStream + `processed_messages` |
 | Lease claim | task row lock | Loser acks enqueue msg |
 
-**Exactly-once is not promised.** **At-least-once + idempotent handlers** is the contract.
+**Exactly-once is not promised.**
+**At-least-once + idempotent handlers** is the contract.
 
 ---
 
