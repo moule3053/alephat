@@ -1678,7 +1678,7 @@ async def get_thread_background_work(
     auth: AuthContext = Depends(get_auth),
 ) -> dict[str, list[Any]]:
     del thread_id, auth
-    return {"tasks": [], "monitors": []}
+    return {"commands": [], "monitors": []}
 
 
 @router.get("/analytics/config")
