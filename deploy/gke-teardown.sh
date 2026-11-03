@@ -118,6 +118,25 @@ else
   echo "GKE cluster '${CLUSTER_NAME}' not found in zone '${ZONE}'; skipping."
 fi
 
+# 2b. Delete any unattached GCE persistent disks created for alephat/traefik PVCs in the zone
+ORPHANED_DISKS=()
+while IFS= read -r disk_name; do
+  [[ -n "${disk_name}" ]] && ORPHANED_DISKS+=("${disk_name}")
+done < <(
+  gcloud compute disks list \
+    --project "${PROJECT_ID}" \
+    --zones "${ZONE}" \
+    --filter="-users:* AND (description ~ '\"kubernetes.io/created-for/pvc/namespace\":\"alephat\"' OR description ~ '\"kubernetes.io/created-for/pvc/namespace\":\"traefik\"')" \
+    --format="value(name)" 2>/dev/null || true
+)
+if [[ ${#ORPHANED_DISKS[@]} -gt 0 ]]; then
+  echo "Deleting unattached PVC persistent disks in '${ZONE}': ${ORPHANED_DISKS[*]}..."
+  gcloud compute disks delete "${ORPHANED_DISKS[@]}" \
+    --project "${PROJECT_ID}" \
+    --zone "${ZONE}" \
+    --quiet
+fi
+
 # 3. Delete Static External IP
 if gcloud compute addresses describe "${TRAEFIK_IP_NAME}" --project "${PROJECT_ID}" --region "${REGION}" >/dev/null 2>&1; then
   echo "Deleting regional static IP '${TRAEFIK_IP_NAME}' in '${REGION}'..."
