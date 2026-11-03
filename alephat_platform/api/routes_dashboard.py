@@ -297,6 +297,7 @@ def _profile_response(
     values = dict(row.settings or {}) if row else {}
     model = row.preferred_model if row and row.preferred_model else default_model
     return {
+        "agent_workspace_tasks_supported": True,
         "login": "moule3053",
         "email": "14330171+moule3053@users.noreply.github.com",
         "default_model": model,
@@ -354,6 +355,20 @@ async def get_options() -> dict[str, Any]:
     settings = get_settings()
     default_model = settings.default_model or "google:gemini-3.5-flash"
     models: list[dict[str, Any]] = [
+        {
+            "id": "google:gemini-4-argon",
+            "label": "Gemini 4 Argon",
+            "efforts": ["low", "medium", "high"],
+            "default_effort": "medium",
+            "supports_images": True,
+        },
+        {
+            "id": "google_genai:gemini-4-argon",
+            "label": "Gemini 4 Argon (GenAI)",
+            "efforts": ["low", "medium", "high"],
+            "default_effort": "medium",
+            "supports_images": True,
+        },
         {
             "id": "google:gemini-3.5-flash",
             "label": "Gemini 3.5 Flash",
@@ -960,9 +975,11 @@ def task_to_agent_thread(
         if task.status in {TaskStatus.PARKED.value, TaskStatus.CANCELLED.value}
         else "idle"
     )
+    experience = meta.get("experience")
     return {
         "id": task.thread_id or str(task.task_id),
         "backend": "platform",
+        "experience": experience if experience in {"coding", "agent_workspace"} else "coding",
         "title": task.title or f"Task on {task.repo or 'repository'}",
         "repo": task.repo.split("/")[-1] if task.repo else "",
         "repoFullName": task.repo or "",
@@ -1041,14 +1058,19 @@ async def get_thread_projects(
 
 @router.get("/threads/pinned")
 async def get_pinned_threads(
-    db: AsyncSession = Depends(get_db), auth: AuthContext = Depends(get_auth)
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+    experience: Literal["coding", "agent_workspace"] | None = None,
 ) -> list[dict[str, object]]:
     tasks = sorted(await _dashboard_tasks(db, auth), key=lambda task: task.updated_at, reverse=True)
-    return [
+    items = [
         task_to_agent_thread(task)
         for task in tasks
         if str(auth.user_id) in (task.metadata_ or {}).get("pinned_by", [])
     ]
+    if experience is not None:
+        items = [thread for thread in items if thread.get("experience") == experience]
+    return items
 
 
 @router.get("/threads/page")
@@ -1064,6 +1086,7 @@ async def get_threads_page(
     automation_id: str | None = None,
     repo: str | None = None,
     ownerless: bool = False,
+    experience: Literal["coding", "agent_workspace"] | None = None,
     sort_by: Literal["created_at", "updated_at"] = "updated_at",
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
@@ -1086,6 +1109,8 @@ async def get_threads_page(
         if automation_id and (task.metadata_ or {}).get("schedule_id") != automation_id:
             continue
         thread = task_to_agent_thread(task)
+        if experience is not None and thread.get("experience") != experience:
+            continue
         if resolved is not None and thread["resolved"] != resolved:
             continue
         if viewed is not None and thread["viewed"] != viewed:
@@ -1258,10 +1283,12 @@ async def post_thread_commands(
     base_ref = profile_values.get("base_branch") or "main"
     target_repo = repo or (task.repo if task else None)
     instructions = _agent_instruction_records(org).get(str(target_repo), {}).get("instructions")
-    run_metadata = {
+    run_metadata: dict[str, Any] = {
         "agent_effort": configurable.get("agent_effort") or profile_values.get("reasoning_effort"),
         "plan_mode": configurable.get("plan_mode") is True,
     }
+    if configurable.get("experience") in {"coding", "agent_workspace"}:
+        run_metadata["experience"] = configurable["experience"]
     if auth.github_login:
         run_metadata["github_login"] = auth.github_login
     if isinstance(instructions, str) and instructions.strip():
@@ -1621,3 +1648,122 @@ async def get_thread_pr_diff(
         "truncated": False,
         "files": [],
     }
+
+
+@router.get("/threads/{thread_id}/queued-messages")
+async def get_thread_queued_messages(
+    thread_id: str,
+    auth: AuthContext = Depends(get_auth),
+) -> list[dict[str, Any]]:
+    del thread_id, auth
+    return []
+
+
+@router.get("/analytics/config")
+async def get_analytics_config() -> dict[str, str]:
+    return {
+        "environment": "local",
+        "posthog_api_key": "",
+        "posthog_host": "",
+    }
+
+
+@router.get("/workspaces/options")
+async def get_workspaces_options(
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    org = await db.get(OrgSettings, auth.org_id)
+    team_values = dict((org.settings or {}).get("team_settings", {})) if org else {}
+    default_repo = team_values.get("default_repo")
+    return {
+        "workspaces": [
+            {
+                "slug": "default",
+                "name": "Default",
+                "repos": [],
+                "default_repo": default_repo if isinstance(default_repo, str) else None,
+                "slack_channel_ids": [],
+                "kitchen_channel_ids": [],
+                "is_default": True,
+                "has_snapshot": False,
+            }
+        ],
+        "default_slug": "default",
+    }
+
+
+class UserPreferencesBody(BaseModel):
+    default_visibility: Literal["public", "private"] = "public"
+    default_workspace: str | None = "default"
+    follow_up_behavior: Literal["queue", "steer"] = "steer"
+
+
+@router.get("/me/preferences")
+async def get_my_preferences(
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    row = await db.get(UserSettings, auth.user_id)
+    prefs = dict((row.settings or {}).get("preferences", {})) if row else {}
+    return {
+        "default_visibility": prefs.get("default_visibility", "public"),
+        "default_workspace": prefs.get("default_workspace", "default"),
+        "follow_up_behavior": prefs.get("follow_up_behavior", "steer"),
+    }
+
+
+@router.put("/me/preferences")
+async def put_my_preferences(
+    body: UserPreferencesBody,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    row = await db.get(UserSettings, auth.user_id)
+    if row is None:
+        row = UserSettings(user_id=auth.user_id, settings={})
+        db.add(row)
+    settings_dict = dict(row.settings or {})
+    prefs = body.model_dump()
+    settings_dict["preferences"] = prefs
+    row.settings = settings_dict
+    row.updated_at = datetime.now(UTC)
+    await db.flush()
+    return prefs
+
+
+@router.get("/skills")
+async def list_skills(
+    limit: int = 100,
+    offset: int = 0,
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    del limit, offset, auth
+    return {"items": [], "next_offset": None}
+
+
+@router.get("/organization-skills")
+async def list_organization_skills(
+    limit: int = 100,
+    cursor: str | None = None,
+    auth: AuthContext = Depends(get_auth),
+) -> dict[str, Any]:
+    del limit, cursor, auth
+    return {"items": [], "next_cursor": None}
+
+
+@router.get("/ui-invalidations")
+async def stream_ui_invalidations(request: Request) -> StreamingResponse:
+    async def gen():
+        yield 'event: hello\ndata: {"backend_commit":null,"invalidated":[],"denied":[]}\n\n'
+        while not await request.is_disconnected():
+            await asyncio.sleep(10.0)
+            if await request.is_disconnected():
+                break
+            yield "event: alive\ndata: {}\n\n"
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
