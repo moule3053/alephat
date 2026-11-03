@@ -14,7 +14,6 @@ from openswe.dashboard.oauth import (
     STATE_COOKIE_NAME,
     STATE_TTL_SECONDS,
     decode_state,
-    enforce_github_login_gate,
     exchange_code,
     fetch_github_user,
     hash_state_nonce,
@@ -23,15 +22,38 @@ from openswe.dashboard.oauth import (
     new_state_nonce,
     sanitize_redirect_to,
 )
+from openswe.dashboard.oauth import (
+    enforce_github_login_gate as _enforce_github_login_gate,
+)
+from openswe.users.authorization import allowed_logins, allowed_orgs
 
 router = APIRouter(prefix="/dashboard/api", tags=["dashboard-auth"])
 
 
-def _dashboard_url(name: str) -> str:
+async def enforce_github_login_gate(login: str) -> None:
+    if not allowed_logins() and not allowed_orgs():
+        return
+    await _enforce_github_login_gate(login)
+
+
+def _dashboard_url(name: str, request: Request | None = None) -> str:
     value = os.environ.get(name, "").rstrip("/")
-    if not value:
-        raise HTTPException(500, f"{name} not configured")
-    return value
+    if value:
+        return value
+    if request is not None:
+        proto = (
+            request.headers.get("x-forwarded-proto", "").partition(",")[0].strip()
+            or request.url.scheme
+        )
+        host = request.headers.get("x-forwarded-host", "").partition(",")[0].strip() or (
+            request.headers.get("host", "").strip()
+        )
+        origin = (
+            f"{proto}://{host}".rstrip("/") if proto and host else str(request.base_url).rstrip("/")
+        )
+        if origin:
+            return origin
+    raise HTTPException(500, f"{name} not configured")
 
 
 def _cookie_security() -> tuple[bool, Literal["none", "lax"]]:
@@ -77,15 +99,20 @@ def _clear_state_cookie(response: Response) -> None:
 
 
 @router.get("/auth/login")
-async def auth_login(redirect_to: str | None = None) -> RedirectResponse:
+@router.get("/github/login")
+async def auth_login(request: Request, redirect_to: str | None = None) -> RedirectResponse:
     client_id = os.environ.get("GITHUB_APP_CLIENT_ID", "")
     if not client_id:
         raise HTTPException(500, "GITHUB_APP_CLIENT_ID not configured")
 
-    safe_redirect = sanitize_redirect_to(redirect_to) or _dashboard_url("DASHBOARD_BASE_URL")
+    base_url = _dashboard_url("DASHBOARD_BASE_URL", request)
+    api_base_url = _dashboard_url("DASHBOARD_API_BASE_URL", request)
+    safe_redirect = sanitize_redirect_to(redirect_to) or base_url
+    if safe_redirect.startswith("/"):
+        safe_redirect = f"{base_url}{safe_redirect}"
     nonce = new_state_nonce()
     state = issue_state(redirect_to=safe_redirect, nonce_hash=hash_state_nonce(nonce))
-    redirect_uri = f"{_dashboard_url('DASHBOARD_API_BASE_URL')}/dashboard/api/auth/callback"
+    redirect_uri = f"{api_base_url}/dashboard/api/auth/callback"
     query = urlencode(
         {
             "client_id": client_id,
@@ -123,9 +150,10 @@ async def auth_callback(request: Request, code: str, state: str) -> RedirectResp
         raise HTTPException(400, "could not resolve GitHub login")
     await enforce_github_login_gate(login)
 
-    redirect_to = sanitize_redirect_to(state_payload.get("redirect_to")) or _dashboard_url(
-        "DASHBOARD_BASE_URL"
-    )
+    base_url = _dashboard_url("DASHBOARD_BASE_URL", request)
+    redirect_to = sanitize_redirect_to(state_payload.get("redirect_to")) or base_url
+    if redirect_to.startswith("/"):
+        redirect_to = f"{base_url}{redirect_to}"
     session_token = issue_session(
         login=login,
         email=email,

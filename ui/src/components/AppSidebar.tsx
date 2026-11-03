@@ -202,7 +202,7 @@ export function AppSidebar({ user }: { user: SessionUser }) {
         <div className="flex items-center gap-space-3 px-space-4 pt-space-2 pb-space-6">
           <LogoMark className="size-8 shrink-0" alt="" />
           <div className="flex flex-col gap-space-1">
-            <span className="text-sm font-medium">Open SWE</span>
+            <span className="text-sm font-medium">Alephat</span>
             <span className="text-xs text-tertiary">Settings</span>
           </div>
         </div>

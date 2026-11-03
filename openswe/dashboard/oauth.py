@@ -169,7 +169,9 @@ GITHUB_APP_CLIENT_SECRET = ENV.GITHUB_APP_CLIENT_SECRET.get()
 
 
 def _secret() -> str:
-    s = ENV.DASHBOARD_JWT_SECRET.get()
+    import os
+
+    s = ENV.DASHBOARD_JWT_SECRET.get() or os.environ.get("PLATFORM_JWT_SECRET", "")
     if not s:
         raise HTTPException(500, "DASHBOARD_JWT_SECRET not configured")
     return s
@@ -663,7 +665,9 @@ def is_unrecoverable_refresh_error(exc: BaseException) -> bool:
 
 
 async def _request_github_tokens(body: dict[str, str]) -> dict[str, Any]:
-    if not GITHUB_APP_CLIENT_ID or not GITHUB_APP_CLIENT_SECRET:
+    client_id = GITHUB_APP_CLIENT_ID or ENV.GITHUB_APP_CLIENT_ID.get()
+    client_secret = GITHUB_APP_CLIENT_SECRET or ENV.GITHUB_APP_CLIENT_SECRET.get()
+    if not client_id or not client_secret:
         raise HTTPException(500, "GitHub App OAuth not configured")
     async with httpx2.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT) as client:
         resp = await client.post(
@@ -688,8 +692,8 @@ async def exchange_code(code: str) -> dict[str, Any]:
     """Exchange an OAuth authorization code for user-to-server tokens."""
     data = await _request_github_tokens(
         {
-            "client_id": GITHUB_APP_CLIENT_ID,
-            "client_secret": GITHUB_APP_CLIENT_SECRET,
+            "client_id": GITHUB_APP_CLIENT_ID or ENV.GITHUB_APP_CLIENT_ID.get(),
+            "client_secret": GITHUB_APP_CLIENT_SECRET or ENV.GITHUB_APP_CLIENT_SECRET.get(),
             "code": code,
         }
     )
@@ -702,8 +706,8 @@ async def refresh_user_access_token(refresh_token: str) -> dict[str, Any]:
     """Rotate an expiring user access token using its refresh token."""
     data = await _request_github_tokens(
         {
-            "client_id": GITHUB_APP_CLIENT_ID,
-            "client_secret": GITHUB_APP_CLIENT_SECRET,
+            "client_id": GITHUB_APP_CLIENT_ID or ENV.GITHUB_APP_CLIENT_ID.get(),
+            "client_secret": GITHUB_APP_CLIENT_SECRET or ENV.GITHUB_APP_CLIENT_SECRET.get(),
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
         }

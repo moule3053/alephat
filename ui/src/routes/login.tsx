@@ -5,6 +5,7 @@ import { Button } from "@langchain/macaw-components/Button"
 import { Card } from "@langchain/macaw-components/Card"
 import { Skeleton } from "@langchain/macaw-components/Skeleton"
 import { Text } from "@langchain/macaw-components/Text"
+import { GithubLogoIcon } from "@phosphor-icons/react/dist/ssr/GithubLogo"
 
 import { LogoMark } from "@/components/Branding"
 import { loginUrl } from "@/lib/api"
@@ -69,13 +70,15 @@ function Login() {
         <Button
           as={<a href={loginUrl(intendedPath)} />}
           size="md"
+          leftDecorator={GithubLogoIcon}
           className="w-full"
         >
-          Continue with LangSmith
+          Continue with GitHub
         </Button>
         <Text as="p" variant="sm" color="secondary">
-          Link your GitHub account after signing in to use coding features and
-          return to your existing coding threads.
+          Use your GitHub account. We'll configure your default model,
+          reasoning effort, and default repo for Slack/Linear/GitHub
+          triggered runs.
         </Text>
       </Card>
     </main>

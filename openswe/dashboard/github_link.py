@@ -29,6 +29,52 @@ class GitHubLink:
     email: str
     tokens: Mapping[str, object]
 
+    @staticmethod
+    def authorize(
+        *,
+        authorize_url: str = "https://github.com/login/oauth/authorize",
+        redirect_to: str | None = None,
+        desktop_handoff: str | None = None,
+        desktop_port: int | None = None,
+    ) -> RedirectResponse:
+        from urllib.parse import urlencode
+
+        from fastapi.responses import RedirectResponse
+
+        from openswe.config import ENV
+        from openswe.dashboard.oauth import (
+            GITHUB_CALLBACK_PATH,
+            frontend_base_url,
+            hash_state_nonce,
+            issue_state,
+            new_state_nonce,
+            sanitize_redirect_to,
+            set_state_cookie,
+            valid_handoff_challenge,
+        )
+        from openswe.utils.dashboard_links import dashboard_api_base_url
+
+        client_id = ENV.GITHUB_APP_CLIENT_ID.get()
+        if not client_id:
+            raise HTTPException(500, "GITHUB_APP_CLIENT_ID not configured")
+        nonce = new_state_nonce()
+        state = issue_state(
+            redirect_to=sanitize_redirect_to(redirect_to) or frontend_base_url(),
+            nonce_hash=hash_state_nonce(nonce),
+            handoff_challenge=valid_handoff_challenge(desktop_handoff),
+            handoff_port=desktop_port,
+        )
+        query = urlencode(
+            {
+                "client_id": client_id,
+                "redirect_uri": f"{dashboard_api_base_url()}{GITHUB_CALLBACK_PATH}",
+                "state": state,
+            }
+        )
+        response = RedirectResponse(f"{authorize_url}?{query}", status_code=302)
+        set_state_cookie(response, nonce)
+        return response
+
     @classmethod
     async def from_code(cls, code: str) -> Self:
         tokens = await exchange_code(code)
@@ -77,6 +123,32 @@ class GitHubLink:
             self.account.login, self.email, dict(self.tokens)
         )
         return joined
+
+    async def sign_in(self) -> str:
+        """Sign in directly with this GitHub account and issue a GitHub session."""
+        from openswe.dashboard.admin import configured_admins, is_admin
+
+        signed_in = await User.sign_in(
+            "github",
+            str(self.account.id),
+            login=self.account.login,
+            email=self.email,
+            display_name=self.account.name or "",
+            avatar_url=self.account.avatar_url or "",
+            admin=is_admin(self.email or None, login=self.account.login)
+            if configured_admins()
+            else None,
+        )
+        await upsert_access_token_from_github_response(
+            self.account.login, self.email, dict(self.tokens)
+        )
+        return issue_session(
+            login=self.account.login,
+            email=self.email or None,
+            avatar_url=self.account.avatar_url,
+            user_id=str(signed_in.id),
+            provider="github",
+        )
 
     @staticmethod
     def session(principal: DashboardPrincipal, user: User, email: str | None) -> str:

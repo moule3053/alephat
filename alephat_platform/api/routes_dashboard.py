@@ -317,8 +317,12 @@ def _profile_response(
 
 @router.get("/me")
 async def get_me(auth: AuthContext = Depends(get_auth)) -> dict[str, Any]:
+    login = auth.github_login or "moule3053"
     return {
-        "login": auth.github_login or "moule3053",
+        "login": login,
+        "auth_provider": "github",
+        "github_login": login,
+        "display_name": login,
         "email": auth.email or "14330171+moule3053@users.noreply.github.com",
         "avatar_url": auth.avatar_url or "https://github.com/moule3053.png",
         "is_admin": auth.role == "admin",
