@@ -8,6 +8,9 @@ deployment:
         - name: data
           mountPath: /data
 
+updateStrategy:
+  type: Recreate
+
 podSecurityContext:
   fsGroup: 65532
   fsGroupChangePolicy: OnRootMismatch
@@ -41,8 +44,7 @@ certificatesResolvers:
   letsencrypt:
     acme:
       storage: /data/acme.json
-      httpChallenge:
-        entryPoint: web
+      tlsChallenge: true
 
 log:
   level: INFO

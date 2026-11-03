@@ -513,10 +513,10 @@ kubectl -n keda rollout status deployment/keda-operator --timeout=5m
 # ---------------------------------------------------------------------------
 kubectl create namespace "${PLATFORM_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
-LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-sk-$(openssl rand -hex 24)}"
-LITELLM_DB_PASSWORD="${LITELLM_DB_PASSWORD:-$(openssl rand -hex 24)}"
-
-if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-secrets >/dev/null 2>&1; then
+if kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-secrets >/dev/null 2>&1; then
+  LITELLM_MASTER_KEY="$(kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-secrets -o jsonpath='{.data.masterkey}' | base64 -d)"
+else
+  LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-sk-$(openssl rand -hex 24)}"
   kubectl -n "${PLATFORM_NAMESPACE}" create secret generic litellm-secrets \
     --from-literal=masterkey="${LITELLM_MASTER_KEY}"
 fi
@@ -527,7 +527,10 @@ if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-provider-keys >/dev/n
     --from-literal=GEMINI_API_KEY="${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}" \
     --from-literal=FIREWORKS_API_KEY="${FIREWORKS_API_KEY:-}"
 fi
-if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-postgres >/dev/null 2>&1; then
+if kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-postgres >/dev/null 2>&1; then
+  LITELLM_DB_PASSWORD="$(kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-postgres -o jsonpath='{.data.password}' | base64 -d)"
+else
+  LITELLM_DB_PASSWORD="${LITELLM_DB_PASSWORD:-$(openssl rand -hex 24)}"
   kubectl -n "${PLATFORM_NAMESPACE}" create secret generic litellm-postgres \
     --from-literal=postgres-password="${LITELLM_DB_PASSWORD}" \
     --from-literal=password="${LITELLM_DB_PASSWORD}"
@@ -554,6 +557,7 @@ trap 'rm -f "${TMP_LITELLM_VALUES}"' EXIT
 render_litellm_values > "${TMP_LITELLM_VALUES}"
 
 echo "Deploying LiteLLM ${LITELLM_VERSION}..."
+kubectl -n "${PLATFORM_NAMESPACE}" delete job alephat-platform-litellm-migrations --ignore-not-found
 helm upgrade --install alephat-platform \
   oci://ghcr.io/berriai/litellm-helm \
   --namespace "${PLATFORM_NAMESPACE}" \
@@ -612,19 +616,24 @@ fi
 # ---------------------------------------------------------------------------
 # 8. Deploy SandboxTemplate, Platform Workloads, Harness, and KEDA Autoscaler
 # ---------------------------------------------------------------------------
+kubectl create namespace "${SANDBOX_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+render_sandbox_template | kubectl apply -f -
 kubectl apply -f "${REPO_ROOT}/deploy/k8s/agent-sandbox-rbac.yaml"
 kubectl apply -f "${REPO_ROOT}/deploy/k8s/agent-sandbox-networkpolicy.yaml"
-render_sandbox_template | kubectl apply -f -
 
 TMP_KUSTOMIZE="$(mktemp -d)"
 trap 'rm -rf "${TMP_LITELLM_VALUES}" "${TMP_KUSTOMIZE}"' EXIT
 cp "${REPO_ROOT}"/deploy/k8s/*.yaml "${TMP_KUSTOMIZE}/"
-(
-  cd "${TMP_KUSTOMIZE}"
-  kustomize edit set image \
-    "us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-platform=${PLATFORM_IMAGE}" \
-    "us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-ui=${UI_IMAGE}"
-)
+cat <<EOF >> "${TMP_KUSTOMIZE}/kustomization.yaml"
+images:
+  - name: us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-platform
+    newName: ${PLATFORM_IMAGE%:*}
+    newTag: ${PLATFORM_IMAGE##*:}
+  - name: us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-ui
+    newName: ${UI_IMAGE%:*}
+    newTag: ${UI_IMAGE##*:}
+EOF
+kubectl -n "${PLATFORM_NAMESPACE}" delete job alephat-migrate --ignore-not-found
 kubectl apply -k "${TMP_KUSTOMIZE}"
 
 kubectl -n "${PLATFORM_NAMESPACE}" patch configmap alephat-config \
@@ -655,7 +664,7 @@ if [[ "${WITH_TRAEFIK}" == "true" ]]; then
   TRAEFIK_IP="$(gcloud compute addresses describe "${TRAEFIK_IP_NAME}" --region "${REGION}" --format='value(address)')"
 
   if [[ -z "${ALEPHAT_HOST}" || "${ALEPHAT_HOST}" == "auto" ]]; then
-    ALEPHAT_HOST="alephat.${TRAEFIK_IP}.sslip.io"
+    ALEPHAT_HOST="alephat.${TRAEFIK_IP//./-}.sslip.io"
   fi
   echo "Using Traefik hostname: ${ALEPHAT_HOST} (IP: ${TRAEFIK_IP})"
 
@@ -683,6 +692,14 @@ if [[ "${WITH_TRAEFIK}" == "true" ]]; then
         --rrdatas "${TRAEFIK_IP}"
   fi
 
+  echo "Waiting for Traefik LoadBalancer (${TRAEFIK_IP}:443) to accept connections..."
+  for _ in {1..30}; do
+    if curl -sk --connect-timeout 3 "https://${TRAEFIK_IP}/" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 3
+  done
+
   sed "s/alephat\.example\.com/${ALEPHAT_HOST}/g" \
     "${REPO_ROOT}/deploy/k8s/traefik-ingressroute.yaml" | kubectl apply -f -
 
@@ -691,6 +708,7 @@ if [[ "${WITH_TRAEFIK}" == "true" ]]; then
     --type merge \
     --patch "{\"data\":{\"DASHBOARD_BASE_URL\":\"${ALEPHAT_ORIGIN}\",\"DASHBOARD_API_BASE_URL\":\"${ALEPHAT_ORIGIN}\",\"DASHBOARD_ALLOWED_ORIGINS\":\"${ALEPHAT_ORIGIN}\",\"CORS_ORIGINS\":\"${ALEPHAT_ORIGIN}\"}}"
   kubectl -n "${PLATFORM_NAMESPACE}" rollout restart deployment/alephat-api deployment/alephat-webhook deployment/alephat-harness
+  kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/alephat-api deployment/alephat-webhook deployment/alephat-harness --timeout=5m
   echo "Public HTTPS URL: ${ALEPHAT_ORIGIN}"
 fi
 
