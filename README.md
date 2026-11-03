@@ -108,7 +108,7 @@ It does not cover anything under [`vendor/`](vendor/README.md), which is not lic
 
 This fork can run Alephat's API, webhook receiver, dashboard, worker harness, PostgreSQL, NATS JetStream, LiteLLM gateway, and code sandboxes on Kubernetes.
 It does **not** require a LangSmith deployment, a commercial sandbox account, or any Alephat license key.
-The checked-in configuration uses the open-source editions of Agent Sandbox (`v1.0.9`), Kata Containers (`4.3.1`) or gVisor, KEDA (`2.21.0`), NATS (`2.12`), PostgreSQL (`17`), and LiteLLM (`1.106.6`).
+The checked-in configuration uses the open-source editions of Agent Sandbox (`v1.0.9`), Kata Containers (`4.3.1`) or gVisor, KEDA (`2.21.0`), External Secrets Operator (`2.14.0`) with Google Cloud Secret Manager, NATS (`2.12`), PostgreSQL (`17`), and LiteLLM (`1.106.6`).
 
 ### Automated one-command deployment (`./deploy/gke-deploy.sh`)
 
@@ -455,7 +455,33 @@ kubectl -n "$PLATFORM_NAMESPACE" create secret generic alephat-oauth \
   --from-literal=TOKEN_ENCRYPTION_KEY="$TOKEN_ENCRYPTION_KEY"
 ```
 
-For production, create these secrets with Secret Manager plus External Secrets or the Secrets Store CSI driver instead of putting values in shell history.
+`./deploy/gke-deploy.sh` installs External Secrets Operator (`2.14.0`) and syncs `alephat-oauth`, `alephat-secrets`, `alephat-postgres`, `litellm-secrets`, `litellm-postgres`, and `litellm-provider-keys` from Google Cloud Secret Manager via Workload Identity (`deploy/k8s/external-secrets.yaml`).
+To update or rotate the GitHub OAuth secret in Google Cloud Secret Manager:
+
+```bash
+jq -nc \
+  --arg app_id "$GITHUB_APP_ID" \
+  --arg client_id "$GITHUB_APP_CLIENT_ID" \
+  --arg client_secret "$GITHUB_APP_CLIENT_SECRET" \
+  --arg installation_id "$GITHUB_APP_INSTALLATION_ID" \
+  --rawfile private_key "$GITHUB_APP_PRIVATE_KEY_FILE" \
+  --arg allowed_users "$ALLOWED_GITHUB_USERS" \
+  --arg allowed_orgs "${ALLOWED_GITHUB_ORGS:-}" \
+  --arg dashboard_jwt "$DASHBOARD_JWT_SECRET" \
+  --arg token_enc "$TOKEN_ENCRYPTION_KEY" \
+  '{
+    GITHUB_APP_ID: $app_id,
+    GITHUB_APP_CLIENT_ID: $client_id,
+    GITHUB_APP_CLIENT_SECRET: $client_secret,
+    GITHUB_APP_INSTALLATION_ID: $installation_id,
+    GITHUB_APP_PRIVATE_KEY: $private_key,
+    ALLOWED_GITHUB_USERS: $allowed_users,
+    ALLOWED_GITHUB_ORGS: $allowed_orgs,
+    DASHBOARD_JWT_SECRET: $dashboard_jwt,
+    TOKEN_ENCRYPTION_KEY: $token_enc
+  }' | gcloud secrets versions add alephat-oauth --project "$PROJECT_ID" --data-file=-
+```
+
 Never commit rendered Secrets, private keys, or API keys.
 
 ### 7. Build and push the Alephat images

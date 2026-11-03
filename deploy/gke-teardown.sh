@@ -19,6 +19,7 @@ DNS_ZONE="${DNS_ZONE:-}"
 
 DELETE_IMAGES=false
 DELETE_IAM=false
+DELETE_SECRETS=false
 DRY_RUN=false
 
 usage() {
@@ -35,7 +36,8 @@ Options:
   --dns-zone <zone-name>     Cloud DNS managed zone name
   --ar-repository <name>     Artifact Registry repository name (default: alephat)
   --delete-images            Also delete the Artifact Registry repository and images
-  --delete-iam               Also delete the alephat-litellm GCP service account
+  --delete-iam               Also delete the alephat-litellm and alephat-eso GCP service accounts
+  --delete-secrets           Also delete the alephat-* secrets in Google Cloud Secret Manager
   --dry-run                  Print teardown actions without deleting resources
   -h, --help                 Show this help text
 EOF
@@ -53,6 +55,7 @@ while [[ $# -gt 0 ]]; do
     --ar-repository) AR_REPOSITORY="$2"; shift 2 ;;
     --delete-images) DELETE_IMAGES=true; shift ;;
     --delete-iam) DELETE_IAM=true; shift ;;
+    --delete-secrets) DELETE_SECRETS=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
@@ -79,6 +82,7 @@ echo "Traefik Static IP:      ${TRAEFIK_IP_NAME}"
 echo "DNS Record / Zone:      ${ALEPHAT_HOST:-<none>} / ${DNS_ZONE:-<none>}"
 echo "Delete Images (${AR_REPOSITORY}): ${DELETE_IMAGES}"
 echo "Delete IAM SA:          ${DELETE_IAM}"
+echo "Delete GSM Secrets:     ${DELETE_SECRETS}"
 echo "=================================================================="
 
 if [[ "${DRY_RUN}" == "true" ]]; then
@@ -86,7 +90,8 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   echo "[dry-run] Would delete static IP '${TRAEFIK_IP_NAME}' in '${REGION}' if present."
   [[ -n "${ALEPHAT_HOST}" && -n "${DNS_ZONE}" ]] && echo "[dry-run] Would delete DNS A record '${ALEPHAT_HOST%.}.' in zone '${DNS_ZONE}'."
   [[ "${DELETE_IMAGES}" == "true" ]] && echo "[dry-run] Would delete Artifact Registry repository '${AR_REPOSITORY}' in '${REGION}'."
-  [[ "${DELETE_IAM}" == "true" ]] && echo "[dry-run] Would delete service account 'alephat-litellm@${PROJECT_ID}.iam.gserviceaccount.com'."
+  [[ "${DELETE_IAM}" == "true" ]] && echo "[dry-run] Would delete service accounts 'alephat-litellm@${PROJECT_ID}.iam.gserviceaccount.com' and 'alephat-eso@${PROJECT_ID}.iam.gserviceaccount.com'."
+  [[ "${DELETE_SECRETS}" == "true" ]] && echo "[dry-run] Would delete alephat-* secrets in Google Cloud Secret Manager."
   exit 0
 fi
 
@@ -133,7 +138,7 @@ if [[ "${DELETE_IMAGES}" == "true" ]]; then
   fi
 fi
 
-# 5. Optionally Delete LiteLLM GCP Service Account
+# 5. Optionally Delete LiteLLM & ESO GCP Service Accounts
 if [[ "${DELETE_IAM}" == "true" ]]; then
   LITELLM_GSA="alephat-litellm@${PROJECT_ID}.iam.gserviceaccount.com"
   if gcloud iam service-accounts describe "${LITELLM_GSA}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
@@ -146,6 +151,34 @@ if [[ "${DELETE_IAM}" == "true" ]]; then
       --project "${PROJECT_ID}" \
       --quiet
   fi
+
+  ESO_GSA="alephat-eso@${PROJECT_ID}.iam.gserviceaccount.com"
+  if gcloud iam service-accounts describe "${ESO_GSA}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
+    echo "Removing IAM policy binding and deleting service account '${ESO_GSA}'..."
+    gcloud projects remove-iam-policy-binding "${PROJECT_ID}" \
+      --member="serviceAccount:${ESO_GSA}" \
+      --role=roles/secretmanager.secretAccessor \
+      --condition=None >/dev/null 2>&1 || true
+    gcloud iam service-accounts delete "${ESO_GSA}" \
+      --project "${PROJECT_ID}" \
+      --quiet
+  fi
+fi
+
+# 6. Optionally Delete Google Cloud Secret Manager Secrets
+if [[ "${DELETE_SECRETS}" == "true" ]]; then
+  for secret in \
+    litellm-secrets \
+    litellm-postgres \
+    litellm-provider-keys \
+    alephat-postgres \
+    alephat-secrets \
+    alephat-oauth; do
+    if gcloud secrets describe "${secret}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
+      echo "Deleting Google Cloud Secret Manager secret '${secret}'..."
+      gcloud secrets delete "${secret}" --project "${PROJECT_ID}" --quiet
+    fi
+  done
 fi
 
 echo "Teardown complete."

@@ -46,7 +46,10 @@ AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v1.0.9}"
 KATA_VERSION="${KATA_VERSION:-4.3.1}"
 LITELLM_VERSION="${LITELLM_VERSION:-1.106.6}"
 KEDA_VERSION="${KEDA_VERSION:-2.21.0}"
+ESO_VERSION="${ESO_VERSION:-2.14.0}"
 TRAEFIK_VERSION="${TRAEFIK_VERSION:-42.3.0}"
+
+USE_EXTERNAL_SECRETS="${USE_EXTERNAL_SECRETS:-true}"
 
 AR_REPOSITORY="${AR_REPOSITORY:-alephat}"
 PLATFORM_NAMESPACE="${PLATFORM_NAMESPACE:-alephat}"
@@ -97,7 +100,9 @@ Component Versions:
   --kata-version <ver>            Kata Containers release tag (default: 4.3.1)
   --litellm-version <ver>         LiteLLM Helm chart & image version (default: 1.106.6)
   --keda-version <ver>            KEDA Helm chart version (default: 2.21.0)
+  --eso-version <ver>             External Secrets Operator Helm chart version (default: 2.14.0)
   --traefik-version <ver>         Traefik Helm chart version (default: 42.3.0)
+  --no-external-secrets           Create plain Kubernetes Secrets instead of External Secrets + GCP Secret Manager
 
 Ingress & Lifecycle Options:
   --with-traefik                  Deploy Traefik LoadBalancer + Let's Encrypt HTTPS
@@ -129,7 +134,9 @@ while [[ $# -gt 0 ]]; do
     --kata-version) KATA_VERSION="$2"; shift 2 ;;
     --litellm-version) LITELLM_VERSION="$2"; shift 2 ;;
     --keda-version) KEDA_VERSION="$2"; shift 2 ;;
+    --eso-version) ESO_VERSION="$2"; shift 2 ;;
     --traefik-version) TRAEFIK_VERSION="$2"; shift 2 ;;
+    --no-external-secrets) USE_EXTERNAL_SECRETS=false; shift ;;
     --with-traefik) WITH_TRAEFIK=true; shift ;;
     --host) ALEPHAT_HOST="$2"; shift 2 ;;
     --dns-domain) DNS_DOMAIN="$2"; shift 2 ;;
@@ -377,6 +384,7 @@ echo "Agent Sandbox Version:  ${AGENT_SANDBOX_VERSION}"
 echo "Kata Version:           ${KATA_VERSION}"
 echo "LiteLLM Version:        ${LITELLM_VERSION}"
 echo "KEDA Version:           ${KEDA_VERSION}"
+echo "External Secrets Ver:   ${ESO_VERSION} (enabled: ${USE_EXTERNAL_SECRETS})"
 echo "Traefik Version:        ${TRAEFIK_VERSION} (enabled: ${WITH_TRAEFIK})"
 echo "Enabled Models:         ${ENABLED_MODELS}"
 echo "Default Model:          ${DEFAULT_MODEL}"
@@ -413,7 +421,8 @@ gcloud services enable \
   compute.googleapis.com \
   container.googleapis.com \
   dns.googleapis.com \
-  iamcredentials.googleapis.com
+  iamcredentials.googleapis.com \
+  secretmanager.googleapis.com
 
 # ---------------------------------------------------------------------------
 # 2. Provision GKE Cluster & Sandbox Runtime (Kata or gVisor)
@@ -497,7 +506,7 @@ kubectl wait --for=condition=Established crd/sandboxes.agents.x-k8s.io --timeout
 kubectl wait --for=condition=Established crd/sandboxtemplates.extensions.agents.x-k8s.io --timeout=2m
 
 # ---------------------------------------------------------------------------
-# 4. Install KEDA
+# 4. Install KEDA & External Secrets Operator
 # ---------------------------------------------------------------------------
 echo "Installing KEDA ${KEDA_VERSION}..."
 helm repo add kedacore https://kedacore.github.io/charts --force-update
@@ -508,33 +517,177 @@ helm upgrade --install keda kedacore/keda \
   --version "${KEDA_VERSION}"
 kubectl -n keda rollout status deployment/keda-operator --timeout=5m
 
+kubectl create namespace "${PLATFORM_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+ensure_gsm_secret() {
+  local name="$1"
+  local value="$2"
+  if ! gcloud secrets describe "${name}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
+    gcloud secrets create "${name}" \
+      --project "${PROJECT_ID}" \
+      --replication-policy="automatic" >/dev/null
+    printf '%s' "${value}" | gcloud secrets versions add "${name}" \
+      --project "${PROJECT_ID}" \
+      --data-file=- >/dev/null
+  else
+    local existing=""
+    existing="$(gcloud secrets versions access latest --secret="${name}" --project "${PROJECT_ID}" 2>/dev/null || true)"
+    if [[ -z "${existing}" && -n "${value}" ]]; then
+      printf '%s' "${value}" | gcloud secrets versions add "${name}" \
+        --project "${PROJECT_ID}" \
+        --data-file=- >/dev/null
+    fi
+  fi
+}
+
+read_k8s_secret_key() {
+  local secret_name="$1"
+  local key="$2"
+  if kubectl -n "${PLATFORM_NAMESPACE}" get secret "${secret_name}" >/dev/null 2>&1; then
+    kubectl -n "${PLATFORM_NAMESPACE}" get secret "${secret_name}" -o "jsonpath={.data.${key}}" 2>/dev/null | base64 -d || true
+  fi
+}
+
+if [[ "${USE_EXTERNAL_SECRETS}" == "true" ]]; then
+  echo "Installing External Secrets Operator ${ESO_VERSION}..."
+  helm repo add external-secrets https://charts.external-secrets.io --force-update
+  helm repo update external-secrets
+  helm upgrade --install external-secrets external-secrets/external-secrets \
+    --namespace external-secrets \
+    --create-namespace \
+    --version "${ESO_VERSION}" \
+    --set installCRDs=true
+  kubectl -n external-secrets rollout status deployment/external-secrets --timeout=5m
+  kubectl -n external-secrets rollout status deployment/external-secrets-webhook --timeout=5m
+  kubectl -n external-secrets rollout status deployment/external-secrets-cert-controller --timeout=5m
+
+  ESO_GSA="alephat-eso@${PROJECT_ID}.iam.gserviceaccount.com"
+  gcloud iam service-accounts describe "${ESO_GSA}" --project "${PROJECT_ID}" >/dev/null 2>&1 || \
+    gcloud iam service-accounts create alephat-eso \
+      --project "${PROJECT_ID}" \
+      --display-name="Alephat External Secrets Operator"
+  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    --member="serviceAccount:${ESO_GSA}" \
+    --role=roles/secretmanager.secretAccessor \
+    --condition=None >/dev/null
+  gcloud iam service-accounts add-iam-policy-binding "${ESO_GSA}" \
+    --project "${PROJECT_ID}" \
+    --role=roles/iam.workloadIdentityUser \
+    --member="serviceAccount:${PROJECT_ID}.svc.id.goog[${PLATFORM_NAMESPACE}/alephat-eso]" >/dev/null
+
+  echo "Ensuring JSON secrets exist in Google Cloud Secret Manager..."
+  EXISTING_LITELLM_MASTER="$(read_k8s_secret_key litellm-secrets masterkey)"
+  EXISTING_LITELLM_DB="$(read_k8s_secret_key litellm-postgres password)"
+  EXISTING_ALEPHAT_DB="$(read_k8s_secret_key alephat-postgres password)"
+  EXISTING_API_TOKEN="$(read_k8s_secret_key alephat-secrets PLATFORM_API_TOKEN)"
+  EXISTING_JWT_SECRET="$(read_k8s_secret_key alephat-secrets PLATFORM_JWT_SECRET)"
+  EXISTING_WEBHOOK_SECRET="$(read_k8s_secret_key alephat-secrets GITHUB_WEBHOOK_SECRET)"
+  EXISTING_DASHBOARD_JWT="$(read_k8s_secret_key alephat-oauth DASHBOARD_JWT_SECRET)"
+  EXISTING_TOKEN_ENC="$(read_k8s_secret_key alephat-oauth TOKEN_ENCRYPTION_KEY)"
+
+  ensure_gsm_secret "litellm-secrets" "$(jq -nc \
+    --arg masterkey "${LITELLM_MASTER_KEY:-${EXISTING_LITELLM_MASTER:-sk-$(openssl rand -hex 24)}}" \
+    '{masterkey: $masterkey}')"
+
+  RESOLVED_LITELLM_DB="${LITELLM_DB_PASSWORD:-${EXISTING_LITELLM_DB:-$(openssl rand -hex 24)}}"
+  ensure_gsm_secret "litellm-postgres" "$(jq -nc \
+    --arg pw "${RESOLVED_LITELLM_DB}" \
+    '{password: $pw, "postgres-password": $pw}')"
+
+  ensure_gsm_secret "litellm-provider-keys" "$(jq -nc \
+    --arg openai "${OPENAI_API_KEY:-$(read_k8s_secret_key litellm-provider-keys OPENAI_API_KEY)}" \
+    --arg anthropic "${ANTHROPIC_API_KEY:-$(read_k8s_secret_key litellm-provider-keys ANTHROPIC_API_KEY)}" \
+    --arg gemini "${GEMINI_API_KEY:-${GOOGLE_API_KEY:-$(read_k8s_secret_key litellm-provider-keys GEMINI_API_KEY)}}" \
+    --arg fireworks "${FIREWORKS_API_KEY:-$(read_k8s_secret_key litellm-provider-keys FIREWORKS_API_KEY)}" \
+    '{OPENAI_API_KEY: $openai, ANTHROPIC_API_KEY: $anthropic, GEMINI_API_KEY: $gemini, FIREWORKS_API_KEY: $fireworks}')"
+
+  ensure_gsm_secret "alephat-postgres" "$(jq -nc \
+    --arg pw "${ALEPHAT_DB_PASSWORD:-${EXISTING_ALEPHAT_DB:-$(openssl rand -hex 24)}}" \
+    '{password: $pw}')"
+
+  ensure_gsm_secret "alephat-secrets" "$(jq -nc \
+    --arg token "${PLATFORM_API_TOKEN:-${EXISTING_API_TOKEN:-$(openssl rand -hex 32)}}" \
+    --arg jwt "${PLATFORM_JWT_SECRET:-${EXISTING_JWT_SECRET:-$(openssl rand -hex 32)}}" \
+    --arg webhook "${GITHUB_WEBHOOK_SECRET:-${EXISTING_WEBHOOK_SECRET:-$(openssl rand -hex 32)}}" \
+    '{PLATFORM_API_TOKEN: $token, PLATFORM_JWT_SECRET: $jwt, GITHUB_WEBHOOK_SECRET: $webhook}')"
+
+  ensure_gsm_secret "alephat-oauth" "$(jq -nc \
+    --arg app_id "${GITHUB_APP_ID:-$(read_k8s_secret_key alephat-oauth GITHUB_APP_ID)}" \
+    --arg client_id "${GITHUB_APP_CLIENT_ID:-$(read_k8s_secret_key alephat-oauth GITHUB_APP_CLIENT_ID)}" \
+    --arg client_secret "${GITHUB_APP_CLIENT_SECRET:-$(read_k8s_secret_key alephat-oauth GITHUB_APP_CLIENT_SECRET)}" \
+    --arg installation_id "${GITHUB_APP_INSTALLATION_ID:-$(read_k8s_secret_key alephat-oauth GITHUB_APP_INSTALLATION_ID)}" \
+    --arg private_key "${GITHUB_APP_PRIVATE_KEY:-$(read_k8s_secret_key alephat-oauth GITHUB_APP_PRIVATE_KEY)}" \
+    --arg allowed_users "${ALLOWED_GITHUB_USERS:-$(read_k8s_secret_key alephat-oauth ALLOWED_GITHUB_USERS)}" \
+    --arg allowed_orgs "${ALLOWED_GITHUB_ORGS:-$(read_k8s_secret_key alephat-oauth ALLOWED_GITHUB_ORGS)}" \
+    --arg dashboard_jwt "${DASHBOARD_JWT_SECRET:-${EXISTING_DASHBOARD_JWT:-$(openssl rand -hex 32)}}" \
+    --arg token_enc "${TOKEN_ENCRYPTION_KEY:-${EXISTING_TOKEN_ENC:-$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '\n')}}" \
+    '{
+      GITHUB_APP_ID: $app_id,
+      GITHUB_APP_CLIENT_ID: $client_id,
+      GITHUB_APP_CLIENT_SECRET: $client_secret,
+      GITHUB_APP_INSTALLATION_ID: $installation_id,
+      GITHUB_APP_PRIVATE_KEY: $private_key,
+      ALLOWED_GITHUB_USERS: $allowed_users,
+      ALLOWED_GITHUB_ORGS: $allowed_orgs,
+      DASHBOARD_JWT_SECRET: $dashboard_jwt,
+      TOKEN_ENCRYPTION_KEY: $token_enc
+    }')"
+
+  LITELLM_MASTER_KEY="$(gcloud secrets versions access latest --secret=litellm-secrets --project "${PROJECT_ID}" | jq -r '.masterkey')"
+  LITELLM_DB_PASSWORD="$(gcloud secrets versions access latest --secret=litellm-postgres --project "${PROJECT_ID}" | jq -r '.password')"
+
+  for s in litellm-secrets litellm-provider-keys litellm-postgres alephat-postgres alephat-secrets alephat-oauth; do
+    if kubectl -n "${PLATFORM_NAMESPACE}" get secret "${s}" >/dev/null 2>&1; then
+      owner_kind="$(kubectl -n "${PLATFORM_NAMESPACE}" get secret "${s}" -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || true)"
+      if [[ "${owner_kind}" != "ExternalSecret" ]]; then
+        kubectl -n "${PLATFORM_NAMESPACE}" delete secret "${s}" --ignore-not-found
+      fi
+    fi
+  done
+
+  sed \
+    -e "s/your-gcp-project-id/${PROJECT_ID}/g" \
+    -e "s/us-central1-a/${ZONE}/g" \
+    -e "s/clusterName: alephat/clusterName: ${CLUSTER_NAME}/g" \
+    "${REPO_ROOT}/deploy/k8s/external-secrets.yaml" | kubectl apply -f -
+
+  echo "Waiting for ExternalSecrets to sync from Google Cloud Secret Manager..."
+  kubectl -n "${PLATFORM_NAMESPACE}" wait --for=condition=Ready \
+    externalsecret/litellm-secrets \
+    externalsecret/litellm-provider-keys \
+    externalsecret/litellm-postgres \
+    externalsecret/alephat-postgres \
+    externalsecret/alephat-secrets \
+    externalsecret/alephat-oauth \
+    --timeout=3m
+else
+  if kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-secrets >/dev/null 2>&1; then
+    LITELLM_MASTER_KEY="$(kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-secrets -o jsonpath='{.data.masterkey}' | base64 -d)"
+  else
+    LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-sk-$(openssl rand -hex 24)}"
+    kubectl -n "${PLATFORM_NAMESPACE}" create secret generic litellm-secrets \
+      --from-literal=masterkey="${LITELLM_MASTER_KEY}"
+  fi
+  if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-provider-keys >/dev/null 2>&1; then
+    kubectl -n "${PLATFORM_NAMESPACE}" create secret generic litellm-provider-keys \
+      --from-literal=OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
+      --from-literal=ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+      --from-literal=GEMINI_API_KEY="${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}" \
+      --from-literal=FIREWORKS_API_KEY="${FIREWORKS_API_KEY:-}"
+  fi
+  if kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-postgres >/dev/null 2>&1; then
+    LITELLM_DB_PASSWORD="$(kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-postgres -o jsonpath='{.data.password}' | base64 -d)"
+  else
+    LITELLM_DB_PASSWORD="${LITELLM_DB_PASSWORD:-$(openssl rand -hex 24)}"
+    kubectl -n "${PLATFORM_NAMESPACE}" create secret generic litellm-postgres \
+      --from-literal=postgres-password="${LITELLM_DB_PASSWORD}" \
+      --from-literal=password="${LITELLM_DB_PASSWORD}"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # 5. Deploy LiteLLM Gateway
 # ---------------------------------------------------------------------------
-kubectl create namespace "${PLATFORM_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-
-if kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-secrets >/dev/null 2>&1; then
-  LITELLM_MASTER_KEY="$(kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-secrets -o jsonpath='{.data.masterkey}' | base64 -d)"
-else
-  LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-sk-$(openssl rand -hex 24)}"
-  kubectl -n "${PLATFORM_NAMESPACE}" create secret generic litellm-secrets \
-    --from-literal=masterkey="${LITELLM_MASTER_KEY}"
-fi
-if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-provider-keys >/dev/null 2>&1; then
-  kubectl -n "${PLATFORM_NAMESPACE}" create secret generic litellm-provider-keys \
-    --from-literal=OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
-    --from-literal=ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
-    --from-literal=GEMINI_API_KEY="${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}" \
-    --from-literal=FIREWORKS_API_KEY="${FIREWORKS_API_KEY:-}"
-fi
-if kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-postgres >/dev/null 2>&1; then
-  LITELLM_DB_PASSWORD="$(kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-postgres -o jsonpath='{.data.password}' | base64 -d)"
-else
-  LITELLM_DB_PASSWORD="${LITELLM_DB_PASSWORD:-$(openssl rand -hex 24)}"
-  kubectl -n "${PLATFORM_NAMESPACE}" create secret generic litellm-postgres \
-    --from-literal=postgres-password="${LITELLM_DB_PASSWORD}" \
-    --from-literal=password="${LITELLM_DB_PASSWORD}"
-fi
 
 LITELLM_GSA="alephat-litellm@${PROJECT_ID}.iam.gserviceaccount.com"
 gcloud iam service-accounts describe "${LITELLM_GSA}" >/dev/null 2>&1 || \
@@ -571,28 +724,30 @@ helm upgrade --install alephat-platform \
 kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/alephat-platform-litellm --timeout=10m
 
 # ---------------------------------------------------------------------------
-# 6. Ensure Platform Secrets Exist
+# 6. Ensure Platform Secrets Exist (when --no-external-secrets is used)
 # ---------------------------------------------------------------------------
-if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret alephat-postgres >/dev/null 2>&1; then
-  kubectl -n "${PLATFORM_NAMESPACE}" create secret generic alephat-postgres \
-    --from-literal=password="${ALEPHAT_DB_PASSWORD:-$(openssl rand -hex 24)}"
-fi
-if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret alephat-secrets >/dev/null 2>&1; then
-  kubectl -n "${PLATFORM_NAMESPACE}" create secret generic alephat-secrets \
-    --from-literal=PLATFORM_API_TOKEN="${PLATFORM_API_TOKEN:-$(openssl rand -hex 32)}" \
-    --from-literal=PLATFORM_JWT_SECRET="${PLATFORM_JWT_SECRET:-$(openssl rand -hex 32)}" \
-    --from-literal=GITHUB_WEBHOOK_SECRET="${GITHUB_WEBHOOK_SECRET:-$(openssl rand -hex 32)}"
-fi
-if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret alephat-oauth >/dev/null 2>&1; then
-  kubectl -n "${PLATFORM_NAMESPACE}" create secret generic alephat-oauth \
-    --from-literal=ALLOWED_GITHUB_USERS="${ALLOWED_GITHUB_USERS:-}" \
-    --from-literal=GITHUB_APP_ID="${GITHUB_APP_ID:-}" \
-    --from-literal=GITHUB_APP_CLIENT_ID="${GITHUB_APP_CLIENT_ID:-}" \
-    --from-literal=GITHUB_APP_CLIENT_SECRET="${GITHUB_APP_CLIENT_SECRET:-}" \
-    --from-literal=GITHUB_APP_INSTALLATION_ID="${GITHUB_APP_INSTALLATION_ID:-}" \
-    --from-literal=GITHUB_APP_PRIVATE_KEY="${GITHUB_APP_PRIVATE_KEY:-}" \
-    --from-literal=DASHBOARD_JWT_SECRET="${DASHBOARD_JWT_SECRET:-$(openssl rand -hex 32)}" \
-    --from-literal=TOKEN_ENCRYPTION_KEY="${TOKEN_ENCRYPTION_KEY:-$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '\n')}"
+if [[ "${USE_EXTERNAL_SECRETS}" != "true" ]]; then
+  if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret alephat-postgres >/dev/null 2>&1; then
+    kubectl -n "${PLATFORM_NAMESPACE}" create secret generic alephat-postgres \
+      --from-literal=password="${ALEPHAT_DB_PASSWORD:-$(openssl rand -hex 24)}"
+  fi
+  if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret alephat-secrets >/dev/null 2>&1; then
+    kubectl -n "${PLATFORM_NAMESPACE}" create secret generic alephat-secrets \
+      --from-literal=PLATFORM_API_TOKEN="${PLATFORM_API_TOKEN:-$(openssl rand -hex 32)}" \
+      --from-literal=PLATFORM_JWT_SECRET="${PLATFORM_JWT_SECRET:-$(openssl rand -hex 32)}" \
+      --from-literal=GITHUB_WEBHOOK_SECRET="${GITHUB_WEBHOOK_SECRET:-$(openssl rand -hex 32)}"
+  fi
+  if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret alephat-oauth >/dev/null 2>&1; then
+    kubectl -n "${PLATFORM_NAMESPACE}" create secret generic alephat-oauth \
+      --from-literal=ALLOWED_GITHUB_USERS="${ALLOWED_GITHUB_USERS:-}" \
+      --from-literal=GITHUB_APP_ID="${GITHUB_APP_ID:-}" \
+      --from-literal=GITHUB_APP_CLIENT_ID="${GITHUB_APP_CLIENT_ID:-}" \
+      --from-literal=GITHUB_APP_CLIENT_SECRET="${GITHUB_APP_CLIENT_SECRET:-}" \
+      --from-literal=GITHUB_APP_INSTALLATION_ID="${GITHUB_APP_INSTALLATION_ID:-}" \
+      --from-literal=GITHUB_APP_PRIVATE_KEY="${GITHUB_APP_PRIVATE_KEY:-}" \
+      --from-literal=DASHBOARD_JWT_SECRET="${DASHBOARD_JWT_SECRET:-$(openssl rand -hex 32)}" \
+      --from-literal=TOKEN_ENCRYPTION_KEY="${TOKEN_ENCRYPTION_KEY:-$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '\n')}"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
