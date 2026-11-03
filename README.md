@@ -510,11 +510,11 @@ Keep that backup outside the cluster.
 After applying, verify the PVCs are bound and restore the dump if this was an upgrade; a fresh installation does not need a restore.
 
 ```bash
-kubectl apply -f deploy/k8s/agent-sandbox-rbac.yaml
-kubectl apply -f deploy/k8s/agent-sandbox-networkpolicy.yaml
 sed \
   "s|us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-sandbox:latest|${SANDBOX_IMAGE}|g" \
   deploy/k8s/agent-sandbox-template.yaml | kubectl apply -f -
+kubectl apply -f deploy/k8s/agent-sandbox-rbac.yaml
+kubectl apply -f deploy/k8s/agent-sandbox-networkpolicy.yaml
 kubectl apply -k deploy/k8s
 
 kubectl -n "$PLATFORM_NAMESPACE" wait \
