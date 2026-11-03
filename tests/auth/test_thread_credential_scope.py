@@ -5,10 +5,12 @@ from unittest.mock import AsyncMock
 import langgraph_sdk
 import pytest
 
-from agent.dashboard import profiles
-from agent.github import thread_token
-from agent.github import token as auth
-from agent.tool_loaders import notion_mcp
+from openswe import credential_scope
+from openswe.agent_api.connections import ACTING_USER_KEY, carrying, operation_connections
+from openswe.dashboard import profiles
+from openswe.github import thread_token
+from openswe.github import token as auth
+from openswe.github.http import GitHubClient
 
 
 @pytest.fixture
@@ -34,7 +36,6 @@ def credentials(monkeypatch):
         "get_github_app_installation_token_with_expiry",
         AsyncMock(return_value=("bot-token", None)),
     )
-    monkeypatch.setattr(auth, "is_bot_token_only_mode", lambda: False)
     return user
 
 
@@ -73,55 +74,49 @@ async def test_public_threads_never_resolve_personal_github_auth(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["dashboard", "slack", "linear", "github"])
 @pytest.mark.parametrize("actor", ["alice", "bob"])
-async def test_public_pr_is_opened_as_initiator(monkeypatch, thread_metadata, credentials, actor):
-    opr = importlib.import_module("agent.tools.open_pull_request")
-    monkeypatch.setattr("agent.run_config.get_config", lambda: config(login=actor))
+async def test_public_pr_is_opened_as_run_requester(
+    monkeypatch, thread_metadata, credentials, actor, source
+):
+    opr = importlib.import_module("openswe.tools.open_pull_request")
+    monkeypatch.setattr("openswe.run_config.get_config", lambda: config(source=source, login=actor))
+    credentials.side_effect = {"alice": "alice-token", "bob": "bob-token"}.get
     bot = AsyncMock(return_value="bot-token")
     monkeypatch.setattr(opr, "get_github_app_installation_token", bot)
-    assert await opr._resolve_pr_author_token() == ("personal-token", "user")
-    credentials.assert_awaited_once_with("alice")
+    assert await opr._resolve_pr_author_token() == (f"{actor}-token", "user")
+    assert thread_metadata["owner_login"] == "alice"
     bot.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("actor", ["bob", "alice"])
-async def test_public_pr_preserves_initiator_login_case(
-    monkeypatch, thread_metadata, credentials, actor
-):
-    opr = importlib.import_module("agent.tools.open_pull_request")
+async def test_public_pr_preserves_requester_login_case(monkeypatch, thread_metadata, credentials):
+    opr = importlib.import_module("openswe.tools.open_pull_request")
     thread_metadata.update(owner_type="user", owner_login="Alice")
-    credentials.side_effect = lambda login: "personal-token" if login == "Alice" else None
-    monkeypatch.setattr("agent.run_config.get_config", lambda: config(login=actor))
-    assert await opr._resolve_pr_author_token() == ("personal-token", "user")
-    credentials.assert_awaited_once_with("Alice")
+    credentials.side_effect = {"Alice": "alice-token", "Bob": "bob-token"}.get
+    monkeypatch.setattr("openswe.run_config.get_config", lambda: config(login="Bob"))
+    assert await opr._resolve_pr_author_token() == ("bob-token", "user")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("actor", ["Alice", "bob"])
-async def test_older_public_owner_resolves_oauth_key_independently_of_participant(
-    monkeypatch, thread_metadata, credentials, actor
-):
-    opr = importlib.import_module("agent.tools.open_pull_request")
+async def test_older_public_owned_pr_uses_requester(monkeypatch, thread_metadata, credentials):
+    opr = importlib.import_module("openswe.tools.open_pull_request")
     thread_metadata.pop("owner_type")
-    credentials.side_effect = lambda login: "personal-token" if login == "Alice" else None
-    monkeypatch.setattr("agent.run_config.get_config", lambda: config(login=actor))
+    credentials.side_effect = {"alice": "alice-token", "Bob": "bob-token"}.get
     monkeypatch.setattr(
-        profiles,
-        "search_all_values",
-        AsyncMock(return_value=[{"login": "Bob"}, {"login": "Alice"}]),
-        raising=False,
+        profiles, "get_oauth_token_record", AsyncMock(return_value={"login": "alice"})
     )
-
-    assert await opr._resolve_pr_author_token() == ("personal-token", "user")
-    credentials.assert_awaited_once_with("Alice")
+    monkeypatch.setattr("openswe.run_config.get_config", lambda: config(login="Bob"))
+    assert await opr._resolve_pr_author_token() == ("bob-token", "user")
 
 
 @pytest.mark.asyncio
-async def test_public_pr_does_not_fall_back_to_bot(monkeypatch, thread_metadata, credentials):
-    opr = importlib.import_module("agent.tools.open_pull_request")
-    monkeypatch.setattr("agent.run_config.get_config", lambda: config(login="bob"))
-    credentials.return_value = None
+async def test_public_pr_does_not_fall_back_to_owner_or_bot(
+    monkeypatch, thread_metadata, credentials
+):
+    opr = importlib.import_module("openswe.tools.open_pull_request")
+    monkeypatch.setattr("openswe.run_config.get_config", lambda: config(login="bob"))
+    credentials.side_effect = {"alice": "alice-token"}.get
     bot = AsyncMock(return_value="bot-token")
     monkeypatch.setattr(opr, "get_github_app_installation_token", bot)
     with pytest.raises(auth.GitHubUserAuthRequired):
@@ -130,18 +125,145 @@ async def test_public_pr_does_not_fall_back_to_bot(monkeypatch, thread_metadata,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("author", "granted_login", "expected"),
+    [
+        (None, "Bob", "granted-token"),
+        ("alice", "bob", "alice-token"),
+        (None, "mallory", "bob-token"),
+    ],
+)
+async def test_the_runs_github_grant_opens_only_its_requesters_own_pr(
+    monkeypatch, thread_metadata, credentials, author, granted_login, expected
+):
+    opr = importlib.import_module("openswe.tools.open_pull_request")
+    monkeypatch.setenv("MDA_GITHUB_USER_CONNECTION", "open-swe-github-test")
+    monkeypatch.setattr("openswe.run_config.get_config", lambda: config(login="bob"))
+    thread_metadata["participant_logins"] = ["alice", "bob"]
+    credentials.side_effect = {"alice": "alice-token", "bob": "bob-token"}.get
+    monkeypatch.setattr(GitHubClient, "viewer_login", AsyncMock(return_value=granted_login))
+    with carrying({"open-swe-github-test": "granted-token"}):
+        assert await opr._resolve_pr_author_token(author) == (expected, "user")
+
+
+@pytest.mark.parametrize(
+    ("slug", "metadata", "named"),
+    [
+        ("open-swe-github-test", {ACTING_USER_KEY: "user-1"}, ["open-swe-github-test"]),
+        # A run that acts as no one, such as a background task's completion or a wakeup
+        # attributed to a person, is MDA's channel service on a channel's thread, which
+        # reads no user connections, and elsewhere the backend's own key, one principal
+        # all such runs share.
+        ("open-swe-github-test", {}, []),
+        ("open-swe-github-test", {"user_id": "user-1"}, []),
+        # A setting MDA would refuse leaves the operation as it was without it.
+        ("mda/github-token", {ACTING_USER_KEY: "user-1"}, []),
+        ("Open-Swe-GitHub", {ACTING_USER_KEY: "user-1"}, []),
+    ],
+)
+def test_a_run_names_a_persons_connection_only_when_it_acts_for_one(
+    monkeypatch, slug, metadata, named
+):
+    monkeypatch.setenv("MDA_GITHUB_USER_CONNECTION", slug)
+    monkeypatch.setenv("MDA_EXA_CONNECTION", "open-swe-exa")
+    run = {"configurable": {}, "metadata": metadata}
+
+    assert [ref.slug for ref in operation_connections("open_pull_request", run)] == named
+    assert [ref.slug for ref in operation_connections("web_search", run)] == ["open-swe-exa"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actor", [None, "", " "])
+async def test_public_owned_pr_requires_authenticated_requester(
+    monkeypatch, thread_metadata, credentials, actor
+):
+    opr = importlib.import_module("openswe.tools.open_pull_request")
+    monkeypatch.setattr("openswe.run_config.get_config", lambda: config(login=actor))
+    with pytest.raises(RuntimeError, match="requester"):
+        await opr._resolve_pr_author_token()
+    credentials.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_private_pr_rejects_another_requester(monkeypatch, thread_metadata, credentials):
+    opr = importlib.import_module("openswe.tools.open_pull_request")
+    thread_metadata["visibility"] = "private"
+    monkeypatch.setattr("openswe.run_config.get_config", lambda: config(login="bob"))
+    with pytest.raises(RuntimeError, match="private thread owner"):
+        await opr._resolve_pr_author_token()
+    credentials.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["public", "private", "legacy", "system", "unowned"])
+async def test_background_completion_publishes_only_as_a_pinned_identity(
+    monkeypatch, thread_metadata, credentials, scope
+):
+    opr = importlib.import_module("openswe.tools.open_pull_request")
+    if scope == "private":
+        thread_metadata["visibility"] = "private"
+    elif scope == "system":
+        thread_metadata.update(owner_type="system")
+        thread_metadata.pop("owner_login")
+    elif scope in ("legacy", "unowned"):
+        thread_metadata.pop("owner_type")
+        if scope == "unowned":
+            thread_metadata.pop("owner_login")
+    run_config = config()
+    run_config["configurable"]["background_task_completion"] = True
+    monkeypatch.setattr("openswe.run_config.get_config", lambda: run_config)
+    monkeypatch.setattr(
+        opr, "get_github_app_installation_token", AsyncMock(return_value="bot-token")
+    )
+    if scope == "private":
+        assert await opr._resolve_pr_author_token() == ("personal-token", "user")
+        credentials.assert_awaited_once_with("alice")
+        return
+    if scope in ("system", "unowned"):
+        assert await opr._resolve_pr_author_token() == ("bot-token", "bot")
+    else:
+        with pytest.raises(RuntimeError, match="Background"):
+            await opr._resolve_pr_author_token()
+    credentials.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["dashboard", "slack"])
+async def test_user_followup_can_publish_after_background_completion(
+    monkeypatch, thread_metadata, credentials, source
+):
+    from openswe.dispatch import prepare_run_config
+
+    opr = importlib.import_module("openswe.tools.open_pull_request")
+    background_config = config(source=source)
+    background_config["configurable"]["background_task_completion"] = True
+    background_config = prepare_run_config(background_config, None)
+    monkeypatch.setattr("openswe.run_config.get_config", lambda: background_config)
+
+    with pytest.raises(RuntimeError, match="Background"):
+        await opr._resolve_pr_author_token()
+    credentials.assert_not_awaited()
+
+    followup = prepare_run_config(config(source=source, login="bob"), None)
+    background_config["configurable"].update(followup["configurable"])
+    credentials.side_effect = {"alice": "alice-token", "bob": "bob-token"}.get
+
+    assert await opr._resolve_pr_author_token() == ("bob-token", "user")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("removed_bot", [False, True])
 async def test_system_pr_uses_bot_even_with_a_triggering_user(
-    monkeypatch, thread_metadata, credentials, fake_store, removed_bot
+    monkeypatch, thread_metadata, credentials, removed_bot
 ):
-    opr = importlib.import_module("agent.tools.open_pull_request")
+    opr = importlib.import_module("openswe.tools.open_pull_request")
     thread_metadata.update(owner_type="system")
     thread_metadata.pop("owner_login")
     if removed_bot:
         thread_metadata["source_context"] = {
             "slack_thread": {"team_id": "T123", "triggering_bot_id": "B123"}
         }
-    monkeypatch.setattr("agent.run_config.get_config", config)
+    monkeypatch.setattr("openswe.run_config.get_config", config)
     monkeypatch.setattr(
         opr, "get_github_app_installation_token", AsyncMock(return_value="bot-token")
     )
@@ -152,10 +274,10 @@ async def test_system_pr_uses_bot_even_with_a_triggering_user(
 
 @pytest.mark.asyncio
 async def test_user_owned_pr_requires_saved_initiator(monkeypatch, thread_metadata, credentials):
-    opr = importlib.import_module("agent.tools.open_pull_request")
+    opr = importlib.import_module("openswe.tools.open_pull_request")
     thread_metadata.update(owner_type="user")
     thread_metadata.pop("owner_login")
-    monkeypatch.setattr("agent.run_config.get_config", config)
+    monkeypatch.setattr("openswe.run_config.get_config", config)
     with pytest.raises(RuntimeError, match="owner"):
         await opr._resolve_pr_author_token()
     credentials.assert_not_awaited()
@@ -178,38 +300,6 @@ async def test_system_thread_cannot_use_private_credentials(thread_metadata, cre
     with pytest.raises(RuntimeError, match="System threads"):
         await auth.resolve_github_token(config(), "thread-1")
     credentials.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_public_notion_tools_do_not_load_personal_credentials(monkeypatch, thread_metadata):
-    monkeypatch.setattr("agent.run_config.get_config", config)
-    get_token = AsyncMock(return_value="notion-token")
-    monkeypatch.setattr(notion_mcp, "get_notion_access_token", get_token)
-    monkeypatch.setattr(notion_mcp, "_build_mcp_tools", AsyncMock(return_value=[]))
-    assert await notion_mcp.load_notion_tools("alice") == []
-    get_token.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_cached_notion_tool_cannot_run_in_public_thread(monkeypatch, thread_metadata):
-    from langchain_core.tools import StructuredTool
-
-    async def search(query: str) -> str:
-        return query
-
-    tool = notion_mcp._refreshing_tool(
-        StructuredTool.from_function(
-            coroutine=search, name="notion_search", description="Search Notion"
-        )
-    )
-    monkeypatch.setattr("agent.run_config.get_config", config)
-    monkeypatch.setattr(notion_mcp, "resolve_participant", AsyncMock(return_value="alice"))
-    get_token = AsyncMock(return_value="notion-token")
-    monkeypatch.setattr(notion_mcp, "get_notion_access_token", get_token)
-    monkeypatch.setattr(notion_mcp, "_build_mcp_tools", AsyncMock(return_value=[]))
-    with pytest.raises(RuntimeError, match="private"):
-        await tool.ainvoke({"on_behalf_of": "alice", "query": "roadmap"})
-    get_token.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -267,7 +357,6 @@ async def test_private_thread_does_not_fall_back_to_bot(
 ):
     thread_metadata["visibility"] = "private"
     credentials.return_value = None
-    monkeypatch.setattr(auth, "is_bot_token_only_mode", lambda: True)
     with pytest.raises(auth.GitHubUserAuthRequired):
         await auth.resolve_github_token(config(), "thread-1")
 
@@ -291,18 +380,77 @@ async def test_metadata_lookup_failure_cannot_use_personal_credentials(
 
 @pytest.mark.asyncio
 async def test_github_webhook_context_always_uses_workspace_bot(monkeypatch, credentials):
-    from agent.webhooks import common
+    from openswe.webhooks import common
 
-    monkeypatch.setattr(common, "is_bot_token_only_mode", lambda: False)
     monkeypatch.setattr(
         common,
         "get_github_app_installation_token_with_expiry",
         AsyncMock(return_value=("bot-token", None)),
     )
-    personal = AsyncMock(return_value={"token": "personal-token"})
-    monkeypatch.setattr(auth, "resolve_github_token_from_email", personal)
     assert (
         await common.get_or_resolve_thread_github_token("thread-1", "alice@example.com")
         == "bot-token"
     )
-    personal.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_public_pr_opens_as_a_named_participant(monkeypatch, thread_metadata, credentials):
+    opr = importlib.import_module("openswe.tools.open_pull_request")
+    thread_metadata["participant_logins"] = {"alice": True, "bob": True}
+    credentials.side_effect = {"alice": "alice-token", "bob": "bob-token"}.get
+    monkeypatch.setattr("openswe.run_config.get_config", lambda: config(login="bob"))
+
+    assert await opr._resolve_pr_author_token("alice") == ("alice-token", "user")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("run", ["background_completion", "no_requester"])
+async def test_named_participant_is_honored_whoever_started_the_run(
+    monkeypatch, thread_metadata, credentials, run
+):
+    opr = importlib.import_module("openswe.tools.open_pull_request")
+    thread_metadata["participant_logins"] = {"alice": True, "bob": True}
+    credentials.side_effect = {"alice": "alice-token", "bob": "bob-token"}.get
+    run_config = config(login=None if run == "no_requester" else "alice")
+    run_config["configurable"]["background_task_completion"] = run == "background_completion"
+    monkeypatch.setattr("openswe.run_config.get_config", lambda: run_config)
+
+    assert await opr._resolve_pr_author_token("bob") == ("bob-token", "user")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("participants", [{"bob": True}, {}, None])
+async def test_public_pr_rejects_an_author_who_never_posted(
+    monkeypatch, thread_metadata, credentials, participants
+):
+    """A named author is only ever someone who could have opened the PR themselves."""
+    opr = importlib.import_module("openswe.tools.open_pull_request")
+    if participants is not None:
+        thread_metadata["participant_logins"] = participants
+    monkeypatch.setattr("openswe.run_config.get_config", lambda: config(login="bob"))
+
+    with pytest.raises(credential_scope.PrAuthorNotAParticipant):
+        await opr._resolve_pr_author_token("mallory")
+    credentials.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["private", "system"])
+async def test_a_named_author_cannot_borrow_a_pinned_thread(
+    monkeypatch, thread_metadata, credentials, scope
+):
+    opr = importlib.import_module("openswe.tools.open_pull_request")
+    thread_metadata["participant_logins"] = {"alice": True, "bob": True}
+    credentials.side_effect = {"alice": "alice-token", "bob": "bob-token"}.get
+    monkeypatch.setattr(
+        opr, "get_github_app_installation_token", AsyncMock(return_value="bot-token")
+    )
+    if scope == "private":
+        thread_metadata["visibility"] = "private"
+        monkeypatch.setattr("openswe.run_config.get_config", lambda: config(login="alice"))
+        assert await opr._resolve_pr_author_token("bob") == ("alice-token", "user")
+    else:
+        thread_metadata.update(owner_type="system")
+        thread_metadata.pop("owner_login")
+        monkeypatch.setattr("openswe.run_config.get_config", lambda: config(login="alice"))
+        assert await opr._resolve_pr_author_token("bob") == ("bot-token", "bot")

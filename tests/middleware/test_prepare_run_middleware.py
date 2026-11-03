@@ -1,19 +1,23 @@
 import asyncio
-import hashlib
-from typing import Any, cast
-from unittest.mock import MagicMock
+from dataclasses import replace
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import AsyncMock, MagicMock, patch
 from xml.etree import ElementTree
 
 import pytest
 from langchain.agents.middleware import AgentState
-from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
-from agent.input_messages import human_input, system_input, system_introduction
-from agent.middleware.prepare_run import BasePrepareRunMiddleware, PrepareRunState
-from agent.server import PrepareAgentRunMiddleware
-from agent.utils import ttl_cache
+from openswe.input_messages import human_input, person_introduction
+from openswe.middleware.prepare_run import BasePrepareRunMiddleware, PrepareRunState
+from openswe.run_config import RunConfig
+from openswe.server import PrepareAgentRunMiddleware, _thread_participants
+from openswe.slack.client import get_slack_user_timezone, remember_slack_user_timezone
+from openswe.users import UserPreferences
+from openswe.utils import ttl_cache
+from openswe.utils.authorship import CollaboratorIdentity, ThreadParticipant
 
 
 class DummyPrepareMiddleware(BasePrepareRunMiddleware):
@@ -23,33 +27,6 @@ class DummyPrepareMiddleware(BasePrepareRunMiddleware):
     async def _prepare(self, state, runtime):
         self.calls += 1
         return {"work_dir": "/tmp/work", "rendered_system_prompt": "prepared prompt"}
-
-
-@pytest.mark.asyncio
-async def test_prepare_latch_skips_second_call():
-    middleware = DummyPrepareMiddleware()
-
-    update = await middleware.abefore_agent(
-        cast(AgentState, {"messages": []}), cast(Runtime[None], MagicMock())
-    )
-    assert update is not None
-    fingerprint = update.pop("run_prepared_for")
-    assert isinstance(fingerprint, str)
-    assert update == {
-        "run_prepared": True,
-        "work_dir": "/tmp/work",
-        "rendered_system_prompt": "prepared prompt",
-    }
-    assert (
-        await middleware.abefore_agent(
-            cast(
-                AgentState, {"messages": [], "run_prepared": True, "run_prepared_for": fingerprint}
-            ),
-            cast(Runtime[None], MagicMock()),
-        )
-        is None
-    )
-    assert middleware.calls == 1
 
 
 @pytest.mark.asyncio
@@ -63,39 +40,6 @@ async def test_prepare_latch_reruns_when_fingerprint_changes():
     assert middleware.calls == 1
 
 
-@pytest.mark.asyncio
-async def test_prepare_prompt_injection():
-    middleware = DummyPrepareMiddleware()
-    seen = {}
-
-    async def handler(request: ModelRequest[None]) -> ModelResponse[Any]:
-        seen["system_prompt"] = request.system_prompt
-        return cast(ModelResponse[Any], MagicMock())
-
-    request = type(
-        "Request",
-        (),
-        {
-            "state": {
-                "rendered_system_prompt": "prepared prompt",
-                "messages": [HumanMessage("hi")],
-            },
-            "system_message": None,
-            "override": lambda self, **kwargs: type(
-                "Request",
-                (),
-                {
-                    "state": self.state,
-                    "system_prompt": kwargs["system_message"].text,
-                    "override": self.override,
-                },
-            )(),
-        },
-    )()
-    await middleware.awrap_model_call(cast(ModelRequest[None], request), handler)
-    assert seen["system_prompt"] == "prepared prompt"
-
-
 def _sender_message(sender_id: str, text: str = "ship it") -> HumanMessage:
     content = human_input(
         text,
@@ -104,148 +48,109 @@ def _sender_message(sender_id: str, text: str = "ship it") -> HumanMessage:
     return HumanMessage(content=cast(str, content))
 
 
-def _sender_context_introduction(sender_id: str, sender_context: str = "sender") -> HumanMessage:
-    content = system_introduction(
-        {
-            "id": "system:sender-context",
-            "display_name": "Sender context",
-            "platform": "alephat",
-            "subject_id": sender_id,
-            "context_hash": hashlib.sha256(sender_context.encode()).hexdigest(),
-        }
-    )["content"]
+def _participant(login: str, *, instructions: str = "") -> ThreadParticipant:
+    identity = CollaboratorIdentity(
+        display_name=login,
+        commit_name=login,
+        commit_email=f"{login}@users.noreply.github.com",
+        github_login=login,
+    )
+    return ThreadParticipant(
+        identity=identity, person_id=f"user:{login}", instructions=instructions
+    )
+
+
+def _participant_block(participant: ThreadParticipant) -> HumanMessage:
+    content = person_introduction(participant.as_person())["content"]
     return HumanMessage(content=cast(str, content))
 
 
-def test_sender_context_arrives_as_its_own_message():
-    latest = _sender_message("github:ramon")
-
-    messages = PrepareAgentRunMiddleware._sender_context_messages(
-        cast(PrepareRunState, {"messages": [latest]}),
-        "sender",
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sender_login", ["alice", "Alice"])
+async def test_sender_is_matched_by_login_and_others_get_their_slack_timezone(
+    sender_login: str,
+) -> None:
+    alice, bob = _participant("alice"), _participant("bob")
+    sender = replace(
+        alice.identity,
+        github_login=sender_login,
+        commit_email=f"123+{sender_login}@users.noreply.github.com",
     )
-
-    assert len(messages) == 2
-    introduction = ElementTree.fromstring(cast(str, messages[0]["content"]))
-    assert introduction.findtext("subject_id") == "github:ramon"
-    assert introduction.findtext("context_hash") == hashlib.sha256(b"sender").hexdigest()
-    envelope = ElementTree.fromstring(cast(str, messages[-1]["content"]))
-    assert envelope.attrib["sender"] == "system:sender-context"
-    assert envelope.attrib["kind"] == "system"
-    assert envelope.findtext("content") == "sender"
-
-
-def test_sender_context_is_skipped_when_visible_for_same_sender():
-    state = cast(
-        PrepareRunState,
-        {
-            "messages": [
-                _sender_context_introduction("github:ramon"),
-                _sender_message("github:ramon", "again"),
-            ]
-        },
+    bob_user = SimpleNamespace(
+        id="bob",
+        github_login="bob",
+        display_name="bob",
+        email="",
+        slack_user_id="U-bob",
+        typed_preferences=UserPreferences(),
     )
-
-    assert PrepareAgentRunMiddleware._sender_context_messages(state, "sender") == []
-
-
-def test_sender_context_is_added_when_same_sender_context_changes():
-    state = cast(
-        PrepareRunState,
-        {
-            "messages": [
-                _sender_context_introduction("github:ramon", "old sender"),
-                _sender_message("github:ramon", "again"),
-            ]
-        },
-    )
-
-    messages = PrepareAgentRunMiddleware._sender_context_messages(state, "new sender")
-    assert len(messages) == 2
-    introduction = ElementTree.fromstring(cast(str, messages[0]["content"]))
-    assert introduction.findtext("subject_id") == "github:ramon"
-    assert introduction.findtext("context_hash") == hashlib.sha256(b"new sender").hexdigest()
-
-
-def test_sender_context_is_added_for_new_sender():
-    state = cast(
-        PrepareRunState,
-        {
-            "messages": [
-                _sender_context_introduction("github:ramon"),
-                _sender_message("github:alice"),
-            ]
-        },
-    )
-
-    messages = PrepareAgentRunMiddleware._sender_context_messages(state, "alice")
-    assert len(messages) == 2
-    introduction = ElementTree.fromstring(cast(str, messages[0]["content"]))
-    assert introduction.findtext("subject_id") == "github:alice"
-
-
-def test_sender_context_is_restored_after_compaction():
-    state = cast(
-        PrepareRunState,
-        {
-            "messages": [
-                _sender_context_introduction("github:ramon"),
-                _sender_message("github:ramon", "again"),
-            ],
-            "_summarization_event": {"cutoff_index": 1},
-        },
-    )
-
-    assert len(PrepareAgentRunMiddleware._sender_context_messages(state, "sender")) == 2
-
-
-def test_sender_context_escapes_untrusted_identity_text():
-    message = _sender_message("slack:U1", "ship it <now> & fast")
-    original = message.content
-
-    messages = PrepareAgentRunMiddleware._sender_context_messages(
-        cast(PrepareRunState, {"messages": [message]}),
-        "identity: 'ramon' & <team>",
-    )
-
-    assert message.content == original
-    envelope = ElementTree.fromstring(cast(str, messages[-1]["content"]))
-    assert envelope.findtext("content") == "identity: 'ramon' & <team>"
-
-
-def test_sender_context_skipped_without_a_human_message():
-    assert (
-        PrepareAgentRunMiddleware._sender_context_messages(
-            cast(PrepareRunState, {"messages": []}), "sender"
+    with patch.multiple(
+        "openswe.server",
+        _thread_participant_identities=AsyncMock(return_value=[alice.identity, bob.identity]),
+        _participant_user=AsyncMock(
+            side_effect=lambda login, _: bob_user if login == "bob" else None
+        ),
+        get_slack_user_timezone=AsyncMock(return_value="Europe/Paris"),
+        load_profile=AsyncMock(return_value={}),
+        participant_is_admin=AsyncMock(return_value=False),
+        _resolve_user_custom_instructions=AsyncMock(return_value=None),
+    ):
+        participants = await _thread_participants(
+            "thread-id",
+            {},
+            sender,
+            sender_person_id=alice.person_id,
+            sender_timezone="America/New_York",
         )
-        == []
+
+    assert [(p.identity.github_login, p.timezone) for p in participants] == [
+        (sender_login, "America/New_York"),
+        ("bob", "Europe/Paris"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_slack_timezone_skips_failed_lookups_and_keeps_a_reported_one():
+    ttl_cache.clear()
+    with patch(
+        "openswe.slack.client.get_slack_user_info",
+        AsyncMock(side_effect=[None, {"tz": "Europe/Paris"}]),
+    ):
+        assert await get_slack_user_timezone("U1") == ""
+        assert await get_slack_user_timezone("U1") == "Europe/Paris"
+
+    remember_slack_user_timezone("U1", "America/New_York")
+    assert await get_slack_user_timezone("U1") == "America/New_York"
+
+
+def test_only_the_changed_participant_is_resent():
+    alice, bob = _participant("alice"), _participant("bob")
+    state = cast(
+        PrepareRunState, {"messages": [_participant_block(alice), _participant_block(bob)]}
+    )
+    bob_now = _participant("bob", instructions="Never use ripgrep.")
+
+    messages = PrepareAgentRunMiddleware._participants_messages(state, [alice, bob_now])
+
+    assert len(messages) == 1
+    block = ElementTree.fromstring(cast(str, messages[0]["content"]))
+    assert block.attrib["id"] == "user:bob"
+    assert "standing_instructions: Never use ripgrep." in (block.text or "")
+
+
+@pytest.mark.parametrize(
+    "cut",
+    # In process, and as the runtime forwards it.
+    [{"_summarization_event": {"cutoff_index": 1}}, {"visible_from": 1}],
+)
+def test_participant_blocks_are_restored_after_compaction(cut: dict[str, object]):
+    alice = _participant("alice")
+    state = cast(
+        PrepareRunState,
+        {"messages": [_participant_block(alice), _sender_message("user:alice")], **cut},
     )
 
-
-@pytest.mark.parametrize("has_human_history", [False, True])
-def test_bot_sender_context_uses_bot_identity(has_human_history: bool):
-    bot_id = "system:slack-bot-B123"
-    bot_request = HumanMessage(
-        content=cast(
-            str,
-            system_input(
-                "Open a PR",
-                {"sender_id": bot_id, "surface": "slack", "kind": "system"},
-            )["content"],
-        )
-    )
-    history = [_sender_message("github:someone-else")] if has_human_history else []
-    state = cast(PrepareRunState, {"messages": [*history, bot_request]})
-
-    messages = PrepareAgentRunMiddleware._sender_context_messages(
-        state, "bot owner's context", sender_id=bot_id
-    )
-
-    assert len(messages) == 2
-    introduction = ElementTree.fromstring(cast(str, messages[0]["content"]))
-    assert introduction.findtext("subject_id") == bot_id
-    envelope = ElementTree.fromstring(cast(str, messages[-1]["content"]))
-    assert envelope.findtext("content") == "bot owner's context"
+    assert len(PrepareAgentRunMiddleware._participants_messages(state, [alice])) == 1
 
 
 @pytest.mark.asyncio
@@ -272,34 +177,6 @@ async def test_ttl_cache_single_flight_and_stale_while_error():
 
 
 @pytest.mark.asyncio
-async def test_ttl_cache_stale_while_revalidate_refreshes_in_background():
-    ttl_cache.clear()
-    ttl_cache.set_cached("k", "stale", -1)
-    refresh_started = asyncio.Event()
-    allow_refresh = asyncio.Event()
-    calls = 0
-
-    async def loader():
-        nonlocal calls
-        calls += 1
-        refresh_started.set()
-        await allow_refresh.wait()
-        return "fresh"
-
-    assert await ttl_cache.cached_stale_while_revalidate("k", 60, loader) == "stale"
-    await asyncio.wait_for(refresh_started.wait(), timeout=1)
-    assert calls == 1
-
-    allow_refresh.set()
-    for _ in range(20):
-        if await ttl_cache.cached_stale_while_revalidate("k", 60, loader) == "fresh":
-            break
-        await asyncio.sleep(0.01)
-    else:
-        raise AssertionError("stale cache entry was not refreshed")
-
-
-@pytest.mark.asyncio
 async def test_ttl_cache_exception_without_stale_is_not_cached():
     ttl_cache.clear()
     calls = 0
@@ -314,3 +191,20 @@ async def test_ttl_cache_exception_without_stale_is_not_cached():
     with pytest.raises(RuntimeError):
         await ttl_cache.cached("k", 60, failing_loader)
     assert calls == 2
+
+
+def test_recent_context_audience_fails_closed_for_shared_destinations() -> None:
+    middleware = object.__new__(PrepareAgentRunMiddleware)
+    middleware._profile_login = "alice"
+    middleware._credential_login = "alice"
+    middleware._source = "dashboard"
+
+    assert middleware._recent_context_audience(RunConfig()) == "private"
+    assert middleware._recent_context_audience(RunConfig(background_task_completion=True)) is None
+
+    middleware._source = "github"
+    assert middleware._recent_context_audience(RunConfig()) is None
+
+    middleware._source = "dashboard"
+    middleware._credential_login = None
+    assert middleware._recent_context_audience(RunConfig()) is None

@@ -7,27 +7,39 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { WorkflowApprovalCard } from "./WorkflowApprovalCard"
 import type { WorkflowPushApproval } from "@/features/agents/lib/types"
 
 const mocks = vi.hoisted(() => ({
-  mutateAsync: vi.fn(),
+  mutate: vi.fn(),
   useWorkflowApprovals: vi.fn(),
   useWorkflowApprovalDecision: vi.fn(),
 }))
 
 vi.mock("@/features/agents/lib/queries", () => ({
+  agentMutationKeys: {
+    workflowDecision: (threadId: string) => ["workflow-approvals", threadId],
+  },
   useWorkflowApprovals: mocks.useWorkflowApprovals,
   useWorkflowApprovalDecision: mocks.useWorkflowApprovalDecision,
 }))
 
+function renderCard(props: { threadId: string; pollWhileActive?: boolean }) {
+  return render(
+    <QueryClientProvider client={new QueryClient()}>
+      <WorkflowApprovalCard {...props} />
+    </QueryClientProvider>
+  )
+}
+
 const approval: WorkflowPushApproval = {
   fingerprint: "fingerprint-1",
   status: "pending",
-  repo: "langchain-ai/alephat",
-  branch: "alephat/inline-workflow-approval",
+  repo: "langchain-ai/open-swe",
+  branch: "open-swe/inline-workflow-approval",
   baseSha: "1234567890",
   headSha: "abcdef1234",
   files: [".github/workflows/ci.yml"],
@@ -43,12 +55,11 @@ const approval: WorkflowPushApproval = {
 }
 
 beforeEach(() => {
-  mocks.mutateAsync.mockResolvedValue({})
   mocks.useWorkflowApprovals.mockReturnValue({
     data: { approvals: [approval] },
   })
   mocks.useWorkflowApprovalDecision.mockReturnValue({
-    mutateAsync: mocks.mutateAsync,
+    mutate: mocks.mutate,
     isPending: false,
   })
 })
@@ -60,10 +71,10 @@ afterEach(() => {
 
 describe("WorkflowApprovalCard", () => {
   it("renders the pending approval as a compact inline card", () => {
-    render(<WorkflowApprovalCard threadId="thread-1" pollWhileActive />)
+    renderCard({ threadId: "thread-1", pollWhileActive: true })
 
     const group = screen.getByTestId("workflow-approval-group")
-    expect(group.className).toContain("mt-4")
+    expect(group.className).toContain("mt-space-4")
     expect(
       screen.getByText("Confirm GitHub Actions workflow changes")
     ).toBeTruthy()
@@ -81,23 +92,23 @@ describe("WorkflowApprovalCard", () => {
       data: { approvals: [{ ...approval, inheritedFrom: "main" }] },
     })
 
-    render(<WorkflowApprovalCard threadId="thread-1" />)
+    renderCard({ threadId: "thread-1" })
 
     expect(
       screen.getByText("Confirm workflow changes inherited from main")
     ).toBeTruthy()
-    expect(screen.getByText(/Alephat did not author/)).toBeTruthy()
+    expect(screen.getByText(/Open SWE did not author/)).toBeTruthy()
   })
 
   it("submits the selected decision with the server fingerprint", async () => {
-    render(<WorkflowApprovalCard threadId="thread-1" />)
+    renderCard({ threadId: "thread-1" })
 
     fireEvent.click(
       screen.getByRole("button", { name: "Approve & continue push" })
     )
 
     await waitFor(() =>
-      expect(mocks.mutateAsync).toHaveBeenCalledWith({
+      expect(mocks.mutate).toHaveBeenCalledWith({
         fingerprint: "fingerprint-1",
         decision: "approve",
       })

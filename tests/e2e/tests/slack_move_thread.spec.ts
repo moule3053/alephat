@@ -57,7 +57,7 @@ async function movedRoot(
   return (await messages(request, channel)).find(
     (message) =>
       message.is_bot &&
-      message.text.includes("Continue the existing Alephat task"),
+      message.text.includes("Continue the existing Open SWE task"),
   );
 }
 
@@ -68,7 +68,7 @@ test.describe("Slack thread moves", () => {
     await request.post("/control/reset");
     const source = await send(request, {
       channel: "C_SOURCE",
-      text: "<@U0BOT> E2E_MOVE_THREAD move this Alephat thread",
+      text: "<@U0BOT> E2E_MOVE_THREAD move this Open SWE thread",
       mention_bot: true,
     });
     expect(source.webhook.status).toBe("accepted");
@@ -93,7 +93,7 @@ test.describe("Slack thread moves", () => {
     const sourceRetag = await send(request, {
       channel: "C_SOURCE",
       thread_ts: source.thread_ts,
-      text: "<@U0BOT> E2E_SOURCE_RETAG start a fresh Alephat thread",
+      text: "<@U0BOT> E2E_SOURCE_RETAG start a fresh Open SWE thread",
       mention_bot: true,
     });
     expect(sourceRetag.thread_id).not.toBe(source.thread_id);

@@ -7,7 +7,7 @@ import { RightPanelResizeHandle } from "@/features/agents/components/panel/Right
 
 export type RightPanelMode = "inline" | "sheet" | "embedded"
 
-const RIGHT_PANEL_WIDTH_STORAGE_KEY = "alephat:right-panel-width"
+const RIGHT_PANEL_WIDTH_STORAGE_KEY = "open-swe:right-panel-width"
 const RIGHT_PANEL_MIN_WIDTH = 360
 /**
  * Upper bound as a fraction of the viewport; only binds on wide screens.
@@ -75,11 +75,11 @@ export function RightPanelShell(props: {
     <div
       ref={hostRef}
       className={cn(
-        "relative flex h-full min-h-0 max-w-full min-w-0 flex-col self-stretch bg-background",
+        "relative flex h-full min-h-0 max-w-full min-w-0 flex-col self-stretch bg-surface-level-1",
         isInline
           ? props.maximized
-            ? "flex-1 border-l border-border"
-            : "shrink-0 border-l border-border"
+            ? "flex-1 border-l border-default"
+            : "shrink-0 border-l border-default"
           : "w-full"
       )}
       style={isInline && !props.maximized ? { width: `${width}px` } : undefined}

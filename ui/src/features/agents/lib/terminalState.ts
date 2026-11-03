@@ -16,7 +16,7 @@ export interface TerminalUiState {
   nextTerminalNumber: number
 }
 
-const STORAGE_PREFIX = "alephat.local-terminal.v1:"
+const STORAGE_PREFIX = "open-swe.local-terminal.v1:"
 
 function groupId(terminalId: string): string {
   return `group-${terminalId}`

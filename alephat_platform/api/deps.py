@@ -10,11 +10,11 @@ from fastapi import Depends, Header, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent.dashboard.oauth import COOKIE_NAME, decode_session
 from alephat_platform.common.config import get_settings
 from alephat_platform.common.db import get_session_factory
 from alephat_platform.common.errors import ForbiddenError, PlatformError, UnauthorizedError
 from alephat_platform.common.models import OrgMembership, Task
+from openswe.dashboard.oauth import COOKIE_NAME, decode_session
 
 
 @dataclass
@@ -69,7 +69,9 @@ async def get_auth(
                     detail="Configure PLATFORM_API_TOKEN or PLATFORM_JWT_SECRET",
                     error_code="auth_not_configured",
                 )
-        elif session_token := request.cookies.get(COOKIE_NAME):
+        elif session_token := (
+            request.cookies.get(COOKIE_NAME) or request.cookies.get("alephat_session")
+        ):
             claims = decode_session(session_token)
             github_login = str(claims.get("sub") or "") or None
             email = str(claims.get("email") or "") or None

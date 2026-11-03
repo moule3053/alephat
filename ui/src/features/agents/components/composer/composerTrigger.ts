@@ -1,15 +1,22 @@
 /**
  * Trigger parsing for the composer's autocomplete: `@path` file mentions,
- * `/command` slash commands, and `$skill` skill commands. The prompt stays a
+ * `/command` slash commands, `$skill` skill commands, and `#channel` Slack
+ * channels. The prompt stays a
  * plain string end to end — the Lexical editor only renders chips over it — so
  * everything here operates on
  * text plus a cursor offset rather than on editor nodes.
  */
 
-export type ComposerTriggerKind = "path" | "slash-command" | "skill-command"
+import { detectSlackChannelTrigger } from "@/lib/slack-channels"
 
-/** Slash commands alephat understands. `model` opens the picker rather than editing the prompt. */
-export type ComposerSlashCommand = "plan" | "default" | "model" | "offload"
+export type ComposerTriggerKind =
+  | "path"
+  | "slash-command"
+  | "skill-command"
+  | "slack-channel"
+
+/** Slash commands open-swe understands. `model` opens the picker rather than editing the prompt. */
+export type ComposerSlashCommand = "model" | "offload"
 
 export interface ComposerTrigger {
   kind: ComposerTriggerKind
@@ -22,14 +29,7 @@ export interface ComposerTrigger {
  * Drag payload for dropping a repo path onto the composer. A private type, not
  * `text/plain`, so dragging arbitrary prose in never becomes a file mention.
  */
-export const COMPOSER_PATH_DRAG_MIME = "application/x-alephat-path"
-
-const SIMPLE_MENTION_PATH_REGEX = /^[^\s@"\\]+$/
-
-export function serializeComposerMentionPath(path: string): string {
-  if (SIMPLE_MENTION_PATH_REGEX.test(path)) return path
-  return `"${path.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`
-}
+export const COMPOSER_PATH_DRAG_MIME = "application/x-open-swe-path"
 
 export function basenameOfPath(path: string): string {
   const separatorIndex = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"))
@@ -78,6 +78,10 @@ export function detectComposerTrigger(
   while (tokenIdx >= 0 && !isWhitespace(text[tokenIdx] ?? "")) tokenIdx -= 1
   const tokenStart = tokenIdx + 1
   const token = text.slice(tokenStart, cursor)
+  if (token.startsWith("#")) {
+    const channel = detectSlackChannelTrigger(text, cursor)
+    return channel && { kind: "slack-channel", ...channel }
+  }
   if (
     !token.startsWith("@") &&
     !token.startsWith("/") &&

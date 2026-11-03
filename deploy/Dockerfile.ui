@@ -3,11 +3,13 @@ WORKDIR /app
 RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
 COPY ui/package.json ui/package.json
-RUN pnpm install --frozen-lockfile --filter alephat-dashboard...
+COPY ui/patches ui/patches
+COPY desktop/patches desktop/patches
+RUN pnpm install --frozen-lockfile --filter ./ui...
 COPY ui/ ui/
 ENV VITE_DEVTOOLS=false
 ENV VITE_PLATFORM_API_BASE_URL=""
-RUN pnpm --filter alephat-dashboard run build
+RUN pnpm --filter ./ui run build
 
 FROM nginx:1.27-alpine
 COPY deploy/nginx.ui.conf /etc/nginx/templates/default.conf.template

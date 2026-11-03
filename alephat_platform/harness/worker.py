@@ -12,7 +12,6 @@ from typing import Any
 
 from sqlalchemy import select
 
-from agent.github.app import get_github_app_installation_token
 from alephat_platform.common.config import get_settings
 from alephat_platform.common.db import dispose_engine, get_session_factory
 from alephat_platform.common.enums import ParkReason, TaskStatus
@@ -34,6 +33,7 @@ from alephat_platform.harness.agents import RunContext, get_agent
 from alephat_platform.harness.llm_client import make_llm_client
 from alephat_platform.harness.mcp_runtime import connect_mcp_servers
 from alephat_platform.harness.sandboxes import SandboxProviderBase, SandboxRef, get_sandbox_provider
+from openswe.github.app import get_github_app_installation_token
 
 logger = logging.getLogger(__name__)
 

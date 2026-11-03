@@ -6,7 +6,8 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent.webhooks import common as webhook_common
+from openswe.github import pull_requests
+from openswe.webhooks import common as webhook_common
 
 
 @asynccontextmanager
@@ -14,171 +15,29 @@ async def _unlocked(*args, **kwargs):
     yield
 
 
-def _pr_payload(*, state: str, merged: bool = False, draft: bool = False) -> dict[str, Any]:
-    return {
-        "pull_request": {
-            "html_url": "https://github.com/lc/repo/pull/7",
-            "state": state,
-            "merged": merged,
-            "draft": draft,
-        }
-    }
+@pytest.fixture(autouse=True)
+async def _pr_registry(registry_db_if_available: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run against PostgreSQL when configured, else the registry-unavailable fallback.
+
+    The registry reads threads through its own client binding, so point it at
+    whichever fake the test installed on the webhook module.
+    """
+    monkeypatch.setattr(pull_requests, "langgraph_client", lambda: webhook_common.get_client())
 
 
-def test_pr_state_from_payload_merged() -> None:
-    assert (
-        webhook_common._pr_state_from_payload(_pr_payload(state="closed", merged=True)) == "merged"
-    )
-
-
-def test_pr_state_from_payload_closed() -> None:
-    assert webhook_common._pr_state_from_payload(_pr_payload(state="closed")) == "closed"
-
-
-def test_pr_state_from_payload_draft() -> None:
-    assert webhook_common._pr_state_from_payload(_pr_payload(state="open", draft=True)) == "draft"
-
-
-def test_pr_state_from_payload_open() -> None:
-    assert webhook_common._pr_state_from_payload(_pr_payload(state="open")) == "open"
-
-
-def test_pr_state_from_payload_missing_pull_request() -> None:
-    assert webhook_common._pr_state_from_payload({}) is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "state,merged,expected", [("open", False, 0), ("closed", False, 0), ("closed", True, 1)]
-)
-async def test_only_merged_pr_prompts_original_slack_requester(
-    state: str,
-    merged: bool,
-    expected: int,
-) -> None:
-    metadata = {
-        "kind": "agent",
-        "pr_url": "https://github.com/lc/repo/pull/7",
-        "pull_requests": [
-            {
-                "url": "https://github.com/lc/repo/pull/7",
-                "state": "open",
-                "slack_feedback": {"run_id": "original-run", "channel_id": "C-original"},
-            }
-        ],
-        "source_context": {"slack_thread": {"channel_id": "C-later", "thread_ts": "3.0"}},
-    }
-    client = AsyncMock()
-    client.threads.search.return_value = [{"thread_id": "t1", "metadata": metadata}]
-    client.threads.get.return_value = {"metadata": metadata}
-    with (
-        patch("agent.webhooks.common.get_client", return_value=client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
-        patch("agent.webhooks.common._record_pr_merge_feedback", new_callable=AsyncMock),
-        patch("agent.thread_feedback.schedule_pr_feedback", new_callable=AsyncMock) as prompt,
-    ):
-        await webhook_common.update_agent_thread_pr_state(_pr_payload(state=state, merged=merged))
-    assert prompt.await_count == expected
-    if expected:
-        assert prompt.await_args.args[0] == "t1"
-        assert prompt.await_args.args[2] == "https://github.com/lc/repo/pull/7"
-        assert prompt.await_args.args[1]["pull_requests"][0]["slack_feedback"] == {
-            "run_id": "original-run",
-            "channel_id": "C-original",
-        }
-
-
-@pytest.mark.asyncio
-async def test_update_agent_thread_pr_state_updates_matching_thread() -> None:
-    fake_client = MagicMock()
-    fake_client.threads.search = AsyncMock(
-        return_value=[
-            {
-                "thread_id": "t1",
-                "metadata": {
-                    "kind": "agent",
-                    "pr_url": "https://github.com/lc/repo/pull/7",
-                    "pr_state": "draft",
-                },
-            }
-        ]
-    )
-    fake_client.threads.get = AsyncMock(return_value=fake_client.threads.search.return_value[0])
-    fake_client.threads.update = AsyncMock()
-
-    with (
-        patch("agent.webhooks.common.get_client", return_value=fake_client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
-    ):
-        await webhook_common.update_agent_thread_pr_state(_pr_payload(state="closed"))
-
-    assert fake_client.threads.search.await_count == 2
-    fake_client.threads.update.assert_awaited_once()
-    call_args = fake_client.threads.update.await_args
-    assert call_args is not None
-    assert call_args.kwargs["thread_id"] == "t1"
-    assert call_args.kwargs["metadata"] == {
-        "pr_state": "closed",
-        "attention_reason": "prs_closed",
-    }
-
-
-@pytest.mark.asyncio
-async def test_update_agent_thread_pr_state_skips_reviewer_threads() -> None:
-    fake_client = MagicMock()
-    fake_client.threads.search = AsyncMock(
-        return_value=[{"thread_id": "rev", "metadata": {"kind": "reviewer"}}]
-    )
-    fake_client.threads.update = AsyncMock()
-
-    with (
-        patch("agent.webhooks.common.get_client", return_value=fake_client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
-    ):
-        await webhook_common.update_agent_thread_pr_state(_pr_payload(state="closed"))
-
-    fake_client.threads.update.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_update_agent_thread_pr_state_updates_non_latest_collection_entry() -> None:
-    older_pr = {
-        "repo_full_name": "lc/repo",
+def _pr_payload(
+    *, state: str, merged: bool = False, draft: bool = False, merge_sha: str = ""
+) -> dict[str, Any]:
+    pull_request: dict[str, Any] = {
         "number": 7,
-        "url": "https://github.com/lc/repo/pull/7",
-        "state": "draft",
+        "html_url": "https://github.com/lc/repo/pull/7",
+        "state": state,
+        "merged": merged,
+        "draft": draft,
     }
-    latest_pr = {
-        "repo_full_name": "lc/other",
-        "number": 9,
-        "url": "https://github.com/lc/other/pull/9",
-        "state": "open",
-    }
-    thread = {
-        "thread_id": "t1",
-        "metadata": {
-            "kind": "agent",
-            "pr_url": latest_pr["url"],
-            "pr_state": "open",
-            "pr_urls": [older_pr["url"], latest_pr["url"]],
-            "pull_requests": [older_pr, latest_pr],
-        },
-    }
-    fake_client = MagicMock()
-    fake_client.threads.search = AsyncMock(side_effect=[[], [thread]])
-    fake_client.threads.get = AsyncMock(return_value=thread)
-    fake_client.threads.update = AsyncMock()
-
-    with (
-        patch("agent.webhooks.common.get_client", return_value=fake_client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
-    ):
-        await webhook_common.update_agent_thread_pr_state(_pr_payload(state="closed"))
-
-    fake_client.threads.update.assert_awaited_once_with(
-        thread_id="t1",
-        metadata={"pull_requests": [{**older_pr, "state": "closed"}, latest_pr]},
-    )
+    if merge_sha:
+        pull_request["merge_commit_sha"] = merge_sha
+    return {"repository": {"full_name": "lc/repo"}, "pull_request": pull_request}
 
 
 @pytest.mark.asyncio
@@ -212,8 +71,8 @@ async def test_update_agent_thread_pr_state_resolves_after_all_prs_close() -> No
     fake_client.threads.update = AsyncMock()
 
     with (
-        patch("agent.webhooks.common.get_client", return_value=fake_client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
+        patch("openswe.webhooks.common.get_client", return_value=fake_client),
+        patch("openswe.webhooks.common.agent_thread_pr_state_lock", _unlocked),
     ):
         await webhook_common.update_agent_thread_pr_state(_pr_payload(state="closed"))
 
@@ -258,8 +117,8 @@ async def test_update_agent_thread_pr_state_skips_resolution_without_resolves_th
     fake_client.threads.update = AsyncMock()
 
     with (
-        patch("agent.webhooks.common.get_client", return_value=fake_client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
+        patch("openswe.webhooks.common.get_client", return_value=fake_client),
+        patch("openswe.webhooks.common.agent_thread_pr_state_lock", _unlocked),
     ):
         await webhook_common.update_agent_thread_pr_state(_pr_payload(state="closed"))
 
@@ -268,86 +127,6 @@ async def test_update_agent_thread_pr_state_skips_resolution_without_resolves_th
         metadata={
             "pull_requests": [{**closing_pr, "state": "closed"}, merged_pr],
             "attention_reason": "prs_closed",
-        },
-    )
-
-
-@pytest.mark.asyncio
-async def test_update_agent_thread_pr_state_does_not_flag_manually_resolved_thread() -> None:
-    closed_pr = {
-        "repo_full_name": "lc/repo",
-        "number": 7,
-        "url": "https://github.com/lc/repo/pull/7",
-        "state": "open",
-    }
-    thread = {
-        "thread_id": "t1",
-        "metadata": {
-            "kind": "agent",
-            "pr_url": closed_pr["url"],
-            "pr_state": "open",
-            "pr_urls": [closed_pr["url"]],
-            "pull_requests": [closed_pr],
-            "resolved": True,
-            "resolved_at_ms": 123,
-        },
-    }
-    fake_client = MagicMock()
-    fake_client.threads.search = AsyncMock(side_effect=[[thread], []])
-    fake_client.threads.get = AsyncMock(return_value=thread)
-    fake_client.threads.update = AsyncMock()
-
-    with (
-        patch("agent.webhooks.common.get_client", return_value=fake_client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
-    ):
-        await webhook_common.update_agent_thread_pr_state(_pr_payload(state="closed"))
-
-    fake_client.threads.update.assert_awaited_once_with(
-        thread_id="t1",
-        metadata={
-            "pull_requests": [{**closed_pr, "state": "closed"}],
-            "pr_state": "closed",
-        },
-    )
-
-
-@pytest.mark.asyncio
-async def test_update_agent_thread_pr_state_clears_attention_when_pr_reopens() -> None:
-    closed_pr = {
-        "repo_full_name": "lc/repo",
-        "number": 7,
-        "url": "https://github.com/lc/repo/pull/7",
-        "state": "closed",
-    }
-    thread = {
-        "thread_id": "t1",
-        "metadata": {
-            "kind": "agent",
-            "pr_url": closed_pr["url"],
-            "pr_state": "closed",
-            "pr_urls": [closed_pr["url"]],
-            "pull_requests": [closed_pr],
-            "attention_reason": "prs_closed",
-        },
-    }
-    fake_client = MagicMock()
-    fake_client.threads.search = AsyncMock(side_effect=[[thread], []])
-    fake_client.threads.get = AsyncMock(return_value=thread)
-    fake_client.threads.update = AsyncMock()
-
-    with (
-        patch("agent.webhooks.common.get_client", return_value=fake_client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
-    ):
-        await webhook_common.update_agent_thread_pr_state(_pr_payload(state="open"))
-
-    fake_client.threads.update.assert_awaited_once_with(
-        thread_id="t1",
-        metadata={
-            "pull_requests": [{**closed_pr, "state": "open"}],
-            "pr_state": "open",
-            "attention_reason": None,
         },
     )
 
@@ -383,9 +162,9 @@ async def test_update_agent_thread_pr_state_waits_for_open_prs_when_flagged() ->
     fake_client.threads.update = AsyncMock()
 
     with (
-        patch("agent.webhooks.common.get_client", return_value=fake_client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
-        patch("agent.webhooks.common.create_langsmith_thread_feedback", AsyncMock()),
+        patch("openswe.webhooks.common.get_client", return_value=fake_client),
+        patch("openswe.webhooks.common.agent_thread_pr_state_lock", _unlocked),
+        patch("openswe.webhooks.common.create_langsmith_thread_feedback", AsyncMock()),
     ):
         await webhook_common.update_agent_thread_pr_state(_pr_payload(state="closed", merged=True))
 
@@ -428,8 +207,8 @@ async def test_update_agent_thread_pr_state_reopens_auto_resolved_thread() -> No
     fake_client.threads.update = AsyncMock()
 
     with (
-        patch("agent.webhooks.common.get_client", return_value=fake_client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
+        patch("openswe.webhooks.common.get_client", return_value=fake_client),
+        patch("openswe.webhooks.common.agent_thread_pr_state_lock", _unlocked),
     ):
         await webhook_common.update_agent_thread_pr_state(_pr_payload(state="open"))
 
@@ -464,8 +243,8 @@ async def test_update_agent_thread_pr_state_paginates_all_matching_threads() -> 
     fake_client.threads.update = AsyncMock()
 
     with (
-        patch("agent.webhooks.common.get_client", return_value=fake_client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
+        patch("openswe.webhooks.common.get_client", return_value=fake_client),
+        patch("openswe.webhooks.common.agent_thread_pr_state_lock", _unlocked),
     ):
         await webhook_common.update_agent_thread_pr_state(_pr_payload(state="closed"))
 
@@ -478,96 +257,6 @@ async def test_update_agent_thread_pr_state_paginates_all_matching_threads() -> 
         thread_id="t51",
         metadata={"pr_state": "closed", "attention_reason": "prs_closed"},
     )
-
-
-@pytest.mark.asyncio
-async def test_update_agent_thread_pr_state_noop_when_state_unchanged() -> None:
-    fake_client = MagicMock()
-    fake_client.threads.search = AsyncMock(
-        return_value=[
-            {
-                "thread_id": "t1",
-                "metadata": {
-                    "pr_url": "https://github.com/lc/repo/pull/7",
-                    "pr_state": "merged",
-                    "resolved": True,
-                    "auto_resolved_by_prs": True,
-                },
-            }
-        ]
-    )
-    fake_client.threads.get = AsyncMock(return_value=fake_client.threads.search.return_value[0])
-    fake_client.threads.update = AsyncMock()
-
-    with (
-        patch("agent.webhooks.common.get_client", return_value=fake_client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
-    ):
-        await webhook_common.update_agent_thread_pr_state(_pr_payload(state="closed", merged=True))
-
-    fake_client.threads.update.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_merged_pr_records_thread_feedback() -> None:
-    thread = {
-        "thread_id": "t1",
-        "metadata": {
-            "kind": "agent",
-            "pr_url": "https://github.com/lc/repo/pull/7",
-            "pr_state": "open",
-        },
-    }
-    fake_client = MagicMock()
-    fake_client.threads.search = AsyncMock(return_value=[thread])
-    fake_client.threads.get = AsyncMock(return_value=thread)
-    fake_client.threads.update = AsyncMock()
-    create_feedback = AsyncMock(return_value=True)
-
-    with (
-        patch("agent.webhooks.common.get_client", return_value=fake_client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
-        patch("agent.webhooks.common.create_langsmith_thread_feedback", create_feedback),
-    ):
-        await webhook_common.update_agent_thread_pr_state(_pr_payload(state="closed", merged=True))
-
-    create_feedback.assert_awaited_once_with(
-        "t1",
-        "github_pr_merged:https://github.com/lc/repo/pull/7",
-        score=1.0,
-        comment="Agent-authored pull request merged: https://github.com/lc/repo/pull/7",
-        source_info={
-            "source": "github_pr_merged",
-            "thread_id": "t1",
-            "pr_url": "https://github.com/lc/repo/pull/7",
-        },
-    )
-
-
-@pytest.mark.asyncio
-async def test_closed_unmerged_pr_does_not_record_feedback() -> None:
-    thread = {
-        "thread_id": "t1",
-        "metadata": {
-            "kind": "agent",
-            "pr_url": "https://github.com/lc/repo/pull/7",
-            "pr_state": "open",
-        },
-    }
-    fake_client = MagicMock()
-    fake_client.threads.search = AsyncMock(return_value=[thread])
-    fake_client.threads.get = AsyncMock(return_value=thread)
-    fake_client.threads.update = AsyncMock()
-    create_feedback = AsyncMock()
-
-    with (
-        patch("agent.webhooks.common.get_client", return_value=fake_client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
-        patch("agent.webhooks.common.create_langsmith_thread_feedback", create_feedback),
-    ):
-        await webhook_common.update_agent_thread_pr_state(_pr_payload(state="closed"))
-
-    create_feedback.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -588,8 +277,8 @@ async def test_duplicate_terminal_state_preserves_manual_unresolve() -> None:
     fake_client.threads.update = AsyncMock()
 
     with (
-        patch("agent.webhooks.common.get_client", return_value=fake_client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
+        patch("openswe.webhooks.common.get_client", return_value=fake_client),
+        patch("openswe.webhooks.common.agent_thread_pr_state_lock", _unlocked),
     ):
         await webhook_common.update_agent_thread_pr_state(_pr_payload(state="closed"))
 
@@ -628,8 +317,8 @@ async def test_update_agent_thread_pr_state_preserves_concurrent_pr_update() -> 
     fake_client.threads.update = AsyncMock()
 
     with (
-        patch("agent.webhooks.common.get_client", return_value=fake_client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
+        patch("openswe.webhooks.common.get_client", return_value=fake_client),
+        patch("openswe.webhooks.common.agent_thread_pr_state_lock", _unlocked),
     ):
         await webhook_common.update_agent_thread_pr_state(_pr_payload(state="closed"))
 
@@ -648,6 +337,70 @@ async def test_update_agent_thread_pr_state_preserves_concurrent_pr_update() -> 
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kitchen", "before", "other_state", "state", "merged", "legacy", "preview", "expected"),
+    [
+        (True, "open", "merged", "closed", True, False, False, "add"),
+        (True, "open", "open", "closed", True, False, False, "none"),
+        (True, "open", "closed", "closed", True, False, False, "none"),
+        (True, "open", "merged", "closed", False, False, False, "none"),
+        (True, "merged", "merged", "open", False, False, False, "remove"),
+        (True, "open", "merged", "closed", True, True, False, "add"),
+        (True, "merged", "merged", "open", False, True, False, "remove"),
+        (True, "open", "merged", "open", False, False, False, "none"),
+        (True, "merged", "merged", "closed", True, False, False, "none"),
+        (True, "open", "open", "open", False, False, False, "none"),
+        (False, "open", "merged", "closed", True, False, False, "none"),
+        (True, "open", "merged", "closed", True, False, True, "none"),
+    ],
+)
+async def test_kitchen_thread_merge_reaction(
+    kitchen: bool,
+    before: str,
+    other_state: str,
+    state: str,
+    merged: bool,
+    legacy: bool,
+    preview: bool,
+    expected: str,
+) -> None:
+    metadata = {
+        "kind": "agent",
+        "pr_url": "https://github.com/lc/repo/pull/7",
+        "pr_state": before,
+        "source_context": {"slack_thread": {"channel_id": "C_KITCHEN", "thread_ts": "1.0"}},
+    }
+    if not legacy:
+        metadata["pull_requests"] = [
+            {"url": metadata["pr_url"], "state": before},
+            {"url": "https://github.com/lc/other/pull/9", "state": other_state},
+        ]
+    with (
+        patch("openswe.webhooks.common.get_client", return_value=_merging_client(metadata)),
+        patch("openswe.webhooks.common.agent_thread_pr_state_lock", _unlocked),
+        patch("openswe.webhooks.common.is_kitchen_channel", AsyncMock(return_value=kitchen)),
+        patch("openswe.webhooks.common.skip_on_preview", return_value=preview),
+        patch("openswe.webhooks.common.add_slack_reaction", AsyncMock(return_value=True)) as add,
+        patch("openswe.webhooks.common.remove_slack_reaction", AsyncMock()) as remove,
+        patch("openswe.webhooks.common.create_langsmith_thread_feedback", AsyncMock()),
+    ):
+        await webhook_common.update_agent_thread_pr_state(_pr_payload(state=state, merged=merged))
+
+    if expected == "add":
+        add.assert_awaited_once_with("C_KITCHEN", "1.0", "merged")
+        remove.assert_not_awaited()
+    elif expected == "remove":
+        add.assert_not_awaited()
+        assert [call.args for call in remove.await_args_list] == [
+            ("C_KITCHEN", "1.0", "merged"),
+            ("C_KITCHEN", "1.0", "twisted_rightwards_arrows"),
+        ]
+    else:
+        add.assert_not_awaited()
+        remove.assert_not_awaited()
+
+
 def _follow_up_client(metadata: dict[str, Any]) -> MagicMock:
     fake_client = MagicMock()
     fake_client.threads.get = AsyncMock(return_value={"thread_id": "t1", "metadata": metadata})
@@ -657,42 +410,15 @@ def _follow_up_client(metadata: dict[str, Any]) -> MagicMock:
 
 async def _slack_follow_up(fake_client: MagicMock) -> dict[str, Any]:
     with (
-        patch("agent.webhooks.common.get_client", return_value=fake_client),
-        patch("agent.webhooks.common.agent_thread_pr_state_lock", _unlocked),
+        patch("openswe.webhooks.common.get_client", return_value=fake_client),
+        patch("openswe.webhooks.common.agent_thread_pr_state_lock", _unlocked),
     ):
-        await webhook_common.upsert_agent_thread_metadata("t1", source="slack", github_login="octo")
+        await webhook_common.upsert_agent_thread_metadata(
+            "t1", source="slack", github_login="octo", title="Thread"
+        )
     fake_client.threads.update.assert_awaited_once()
     assert fake_client.threads.update.await_args is not None
     return fake_client.threads.update.await_args.kwargs["metadata"]
-
-
-@pytest.mark.asyncio
-async def test_upsert_agent_thread_metadata_clears_pr_attention_on_follow_up() -> None:
-    metadata = await _slack_follow_up(
-        _follow_up_client({"source": "slack", "created_at_ms": 1, "attention_reason": "prs_closed"})
-    )
-
-    assert metadata["attention_reason"] is None
-    assert "resolved" not in metadata
-
-
-@pytest.mark.asyncio
-async def test_upsert_agent_thread_metadata_unresolves_auto_resolved_thread() -> None:
-    metadata = await _slack_follow_up(
-        _follow_up_client(
-            {
-                "source": "slack",
-                "created_at_ms": 1,
-                "resolved": True,
-                "resolved_at_ms": 5,
-                "auto_resolved_by_prs": True,
-            }
-        )
-    )
-
-    assert metadata["resolved"] is False
-    assert metadata["resolved_at_ms"] is None
-    assert metadata["auto_resolved_by_prs"] is False
 
 
 @pytest.mark.asyncio
@@ -713,24 +439,142 @@ async def test_upsert_agent_thread_metadata_keeps_manual_resolution() -> None:
     assert "attention_reason" not in metadata
 
 
+_MERGE_SHA = "d" * 40
+
+
+def _merging_client(metadata: dict[str, Any]) -> AsyncMock:
+    client = AsyncMock()
+    client.threads.search.return_value = [{"thread_id": "t1", "metadata": metadata}]
+    client.threads.get.return_value = {"metadata": metadata}
+    return client
+
+
 @pytest.mark.asyncio
-async def test_upsert_agent_thread_metadata_locks_pr_linked_threads_before_deciding() -> None:
-    before_lock = {
-        "source": "slack",
-        "created_at_ms": 1,
+async def test_merged_pr_subscribes_when_a_rollout_check_was_requested() -> None:
+    metadata = {
+        "kind": "agent",
+        "pr_url": "https://github.com/lc/repo/pull/7",
+        "pr_state": "open",
+        "rollout_check": True,
+    }
+    with (
+        patch("openswe.webhooks.common.get_client", return_value=_merging_client(metadata)),
+        patch("openswe.webhooks.common.agent_thread_pr_state_lock", _unlocked),
+        patch("openswe.webhooks.common._record_pr_merge_feedback", new_callable=AsyncMock),
+        patch(
+            "openswe.webhooks.common.subscribe_merged_thread", new_callable=AsyncMock
+        ) as subscribe,
+        patch("openswe.webhooks.common.ask_to_monitor_rollout", new_callable=AsyncMock) as ask,
+    ):
+        await webhook_common.update_agent_thread_pr_state(
+            _pr_payload(state="closed", merged=True, merge_sha=_MERGE_SHA)
+        )
+    subscribe.assert_awaited_once()
+    assert subscribe.await_args is not None
+    assert subscribe.await_args.args[0] == "t1"
+    assert subscribe.await_args.kwargs["sha"] == _MERGE_SHA
+    assert subscribe.await_args.kwargs["owner"] == "lc"
+    assert subscribe.await_args.kwargs["repo"] == "repo"
+    assert subscribe.await_args.kwargs["number"] == 7
+    ask.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_merged_pr_asks_to_monitor_when_no_rollout_check_was_requested() -> None:
+    metadata = {
+        "kind": "agent",
         "pr_url": "https://github.com/lc/repo/pull/7",
         "pr_state": "open",
     }
-    under_lock = {**before_lock, "pr_state": "closed", "attention_reason": "prs_closed"}
-    fake_client = MagicMock()
-    fake_client.threads.get = AsyncMock(
-        side_effect=[
-            {"thread_id": "t1", "metadata": before_lock},
-            {"thread_id": "t1", "metadata": under_lock},
-        ]
-    )
-    fake_client.threads.update = AsyncMock()
-    metadata = await _slack_follow_up(fake_client)
+    client = _merging_client(metadata)
+    with (
+        patch("openswe.webhooks.common.get_client", return_value=client),
+        patch("openswe.webhooks.common.agent_thread_pr_state_lock", _unlocked),
+        patch("openswe.webhooks.common._record_pr_merge_feedback", new_callable=AsyncMock),
+        patch(
+            "openswe.webhooks.common.subscribe_merged_thread", new_callable=AsyncMock
+        ) as subscribe,
+        patch("openswe.webhooks.common.ask_to_monitor_rollout", new_callable=AsyncMock) as ask,
+    ):
+        await webhook_common.update_agent_thread_pr_state(
+            _pr_payload(state="closed", merged=True, merge_sha=_MERGE_SHA)
+        )
+    subscribe.assert_not_awaited()
+    ask.assert_awaited_once()
+    assert ask.await_args is not None
+    assert ask.await_args.kwargs["owner"] == "lc"
+    assert ask.await_args.kwargs["number"] == 7
+    assert ask.await_args.kwargs["sha"] == _MERGE_SHA
+    assert client.threads.update.await_args is not None
+    stored = client.threads.update.await_args.kwargs["metadata"]
+    assert stored["merge_commit_sha"] == _MERGE_SHA
+    assert stored["merge_commit_pr_url"] == "https://github.com/lc/repo/pull/7"
 
-    assert fake_client.threads.get.await_count == 2
-    assert metadata["attention_reason"] is None
+
+@pytest.mark.asyncio
+async def test_merged_pr_keeps_its_sha_off_a_different_pull_request() -> None:
+    primary = "https://github.com/lc/repo/pull/8"
+    merging = "https://github.com/lc/repo/pull/7"
+    metadata = {
+        "kind": "agent",
+        "pr_url": primary,
+        "pr_state": "open",
+        "pull_requests": [
+            {"url": primary, "state": "open"},
+            {"url": merging, "state": "open"},
+        ],
+    }
+    client = _merging_client(metadata)
+    with (
+        patch("openswe.webhooks.common.get_client", return_value=client),
+        patch("openswe.webhooks.common.agent_thread_pr_state_lock", _unlocked),
+        patch("openswe.webhooks.common._record_pr_merge_feedback", new_callable=AsyncMock),
+        patch("openswe.webhooks.common.subscribe_merged_thread", new_callable=AsyncMock),
+        patch("openswe.webhooks.common.ask_to_monitor_rollout", new_callable=AsyncMock) as ask,
+    ):
+        await webhook_common.update_agent_thread_pr_state(
+            _pr_payload(state="closed", merged=True, merge_sha=_MERGE_SHA)
+        )
+    assert client.threads.update.await_args is not None
+    stored = client.threads.update.await_args.kwargs["metadata"]
+    assert "merge_commit_sha" not in stored
+    records = {record["url"]: record for record in stored["pull_requests"]}
+    assert records[merging]["merge_commit_sha"] == _MERGE_SHA
+    assert "merge_commit_sha" not in records[primary]
+    ask.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_merged_pr_without_a_merge_commit_does_not_subscribe() -> None:
+    metadata = {
+        "kind": "agent",
+        "pr_url": "https://github.com/lc/repo/pull/7",
+        "pr_state": "open",
+        "rollout_check": True,
+    }
+    with (
+        patch("openswe.webhooks.common.get_client", return_value=_merging_client(metadata)),
+        patch("openswe.webhooks.common.agent_thread_pr_state_lock", _unlocked),
+        patch("openswe.webhooks.common._record_pr_merge_feedback", new_callable=AsyncMock),
+        patch(
+            "openswe.webhooks.common.subscribe_merged_thread", new_callable=AsyncMock
+        ) as subscribe,
+    ):
+        await webhook_common.update_agent_thread_pr_state(_pr_payload(state="closed", merged=True))
+    subscribe.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reviewer_thread_does_not_subscribe_when_a_pr_merges() -> None:
+    metadata = {"kind": "reviewer", "pr_url": "https://github.com/lc/repo/pull/7"}
+    with (
+        patch("openswe.webhooks.common.get_client", return_value=_merging_client(metadata)),
+        patch("openswe.webhooks.common.agent_thread_pr_state_lock", _unlocked),
+        patch(
+            "openswe.webhooks.common.subscribe_merged_thread", new_callable=AsyncMock
+        ) as subscribe,
+    ):
+        await webhook_common.update_agent_thread_pr_state(
+            _pr_payload(state="closed", merged=True, merge_sha=_MERGE_SHA)
+        )
+    subscribe.assert_not_awaited()

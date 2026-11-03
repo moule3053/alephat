@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "Alephat Desktop can only be installed with this command on macOS." >&2
+  echo "Open SWE Desktop can only be installed with this command on macOS." >&2
   exit 1
 fi
 
@@ -13,8 +13,8 @@ for command in node ditto; do
   }
 done
 
-command -v uv >/dev/null || {
-  echo "Missing uv. Install it from https://docs.astral.sh/uv/, then try again." >&2
+command -v bun >/dev/null || {
+  echo "Missing bun. Install it from https://bun.com/docs/installation, then try again." >&2
   exit 1
 }
 
@@ -35,14 +35,14 @@ cd "$repo_root"
 rm -rf desktop/dist
 "${pnpm[@]}" --dir desktop run pack
 
-apps=(desktop/dist/mac*/"Alephat.app")
+apps=(desktop/dist/mac*/"Open SWE.app")
 if [[ ${#apps[@]} -ne 1 || ! -d "${apps[0]}" ]]; then
-  echo "Could not find the packaged Alephat application." >&2
+  echo "Could not find the packaged Open SWE application." >&2
   exit 1
 fi
 
-system_app="/Applications/Alephat.app"
-user_app="$HOME/Applications/Alephat.app"
+system_app="/Applications/Open SWE.app"
+user_app="$HOME/Applications/Open SWE.app"
 if [[ -w /Applications ]]; then
   target="$system_app"
 else
@@ -53,9 +53,9 @@ fi
 staged="${target}.installing.$$"
 trap 'rm -rf "$staged"' EXIT
 ditto "${apps[0]}" "$staged"
-osascript -e 'tell application id "com.langchain.alephat" to quit' >/dev/null 2>&1 || true
+osascript -e 'tell application id "com.langchain.openswe" to quit' >/dev/null 2>&1 || true
 rm -rf "$target"
 mv "$staged" "$target"
 trap - EXIT
 open "$target"
-echo "Alephat Desktop installed at $target"
+echo "Open SWE Desktop installed at $target"

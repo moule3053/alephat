@@ -1,21 +1,30 @@
-import { Component, createElement, memo, useMemo } from "react"
+import { Link as MacawLink } from "@langchain/macaw-components/Link"
+import {
+  InfoRegularIcon,
+  WarningRegularIcon,
+} from "@langchain/macaw-components/icons"
+import { Component, createElement, memo, useMemo, useState } from "react"
+import { ChatCenteredTextIcon } from "@phosphor-icons/react/dist/ssr/ChatCenteredText"
+import { LightbulbIcon } from "@phosphor-icons/react/dist/ssr/Lightbulb"
+import { WarningOctagonIcon } from "@phosphor-icons/react/dist/ssr/WarningOctagon"
+import { Dialog, DialogContent } from "@langchain/macaw-components/Dialog"
 import {
   Streamdown,
   defaultRemarkPlugins,
   defaultUrlTransform,
 } from "streamdown"
 import type { ComponentProps, ReactNode } from "react"
+import type { IconComponent } from "@langchain/macaw-components/Icon"
 import type { Components, ExtraProps } from "streamdown"
-import {
-  Info,
-  Lightbulb,
-  MessageSquareWarning,
-  OctagonAlert,
-  TriangleAlert,
-} from "lucide-react"
 import "streamdown/styles.css"
-import { PreviewablePullRequestLink } from "@/features/agents/components/PullRequestPreview"
+import { cn } from "@/lib/utils"
+import {
+  PreviewablePullRequestCard,
+  PreviewablePullRequestLink,
+} from "@/features/agents/components/PullRequestPreview"
 import { CodeBlock } from "./CodeBlock"
+import { MermaidDiagram } from "./MermaidDiagram"
+import { TableScroll } from "./TableScroll"
 import {
   orderedListGutterStyle,
   remarkGithubAlerts,
@@ -32,21 +41,9 @@ interface MarkdownProps {
    * leave it as-is.
    */
   transformImageUrl?: (src: string) => string
+  enlargeImages?: boolean
+  className?: string
 }
-
-/**
- * Must stay referentially and structurally stable while a message is streaming.
- * Streamdown keys its animate plugin on JSON.stringify(animated); changing
- * stagger/duration recreates the plugin, resets prevContentLength, and
- * re-animates text that was already on screen.
- */
-const STREAMDOWN_ANIMATED = {
-  sep: "word",
-  animation: "slideUp",
-  duration: 60,
-  stagger: 10,
-  easing: "ease-out",
-} as const
 
 const REMARK_PLUGINS = [
   ...Object.values(defaultRemarkPlugins),
@@ -63,12 +60,12 @@ const SHIKI_THEME: ["github-light", "github-dark"] = [
 ]
 
 /** GitHub's own five alert kinds; the colours live in styles/markdown.css. */
-const ALERTS: Record<string, { label: string; Icon: typeof Info }> = {
-  note: { label: "Note", Icon: Info },
-  tip: { label: "Tip", Icon: Lightbulb },
-  important: { label: "Important", Icon: MessageSquareWarning },
-  warning: { label: "Warning", Icon: TriangleAlert },
-  caution: { label: "Caution", Icon: OctagonAlert },
+const ALERTS: Record<string, { label: string; Icon: IconComponent }> = {
+  note: { label: "Note", Icon: InfoRegularIcon },
+  tip: { label: "Tip", Icon: LightbulbIcon },
+  important: { label: "Important", Icon: ChatCenteredTextIcon },
+  warning: { label: "Warning", Icon: WarningRegularIcon },
+  caution: { label: "Caution", Icon: WarningOctagonIcon },
 }
 
 /**
@@ -120,6 +117,27 @@ function fencedCode(node: HastElement | undefined) {
   }
 }
 
+function GithubAttachment({ href }: { href: string }) {
+  const [failed, setFailed] = useState(false)
+  if (failed)
+    return (
+      <MacawLink variant="xs" href={href} target="_blank" rel="noreferrer">
+        {href}
+      </MacawLink>
+    )
+  return (
+    <video
+      src={href}
+      controls
+      playsInline
+      preload="metadata"
+      aria-label="GitHub attachment video"
+      className="max-h-[70vh] max-w-full rounded-lg border border-subtle"
+      onError={() => setFailed(true)}
+    />
+  )
+}
+
 const COMPONENTS: Components = {
   h1: passthrough("h1"),
   h2: passthrough("h2"),
@@ -127,7 +145,46 @@ const COMPONENTS: Components = {
   h4: passthrough("h4"),
   h5: passthrough("h5"),
   h6: passthrough("h6"),
-  p: passthrough("p"),
+  p: ({ node, children, ...props }: ExtraProps & ComponentProps<"p">) => {
+    const content = node?.children.filter(
+      (child) => child.type !== "text" || child.value.trim()
+    )
+    const link = content?.length === 1 ? content[0] : undefined
+    const href = link?.type === "element" ? link.properties.href : undefined
+    if (
+      link?.type === "element" &&
+      link.tagName === "a" &&
+      typeof href === "string" &&
+      /^https:\/\/github\.com\/user-attachments\/assets\/[\da-f-]+$/i.test(
+        href
+      ) &&
+      link.children.length === 1 &&
+      link.children[0]?.type === "text" &&
+      link.children[0].value === href
+    )
+      return (
+        <p {...props}>
+          <GithubAttachment key={href} href={href} />
+        </p>
+      )
+    const paragraph = <p {...props}>{children}</p>
+    const label = link?.type === "element" ? link.children[0] : undefined
+    if (
+      link?.type === "element" &&
+      link.tagName === "a" &&
+      typeof href === "string" &&
+      link.children.length === 1 &&
+      label?.type === "text"
+    )
+      return (
+        <PreviewablePullRequestCard
+          href={href}
+          label={label.value}
+          fallback={paragraph}
+        />
+      )
+    return paragraph
+  },
   ul: passthrough("ul"),
   li: passthrough("li"),
   hr: passthrough("hr"),
@@ -137,6 +194,8 @@ const COMPONENTS: Components = {
   pre: ({ node, children, ...props }: ExtraProps & ComponentProps<"pre">) => {
     const fence = fencedCode(node)
     if (!fence) return <pre {...props}>{children}</pre>
+    if (fence.language === "mermaid")
+      return <MermaidDiagram source={fence.text} />
     return (
       <CodeBlock
         text={fence.text}
@@ -170,7 +229,12 @@ const COMPONENTS: Components = {
     return (
       <div role="note" data-alert={props["data-alert"]}>
         <p>
-          <alert.Icon aria-hidden className="size-3.5 shrink-0" />
+          <alert.Icon
+            size={14}
+            weight="regular"
+            aria-hidden
+            className="shrink-0"
+          />
           {alert.label}
         </p>
         {children}
@@ -182,9 +246,9 @@ const COMPONENTS: Components = {
     children,
     ...props
   }: ExtraProps & ComponentProps<"table">) => (
-    <div className="chat-markdown-table">
+    <TableScroll className="chat-markdown-table">
       <table {...props}>{children}</table>
-    </div>
+    </TableScroll>
   ),
   inlineCode: ({
     node: _node,
@@ -195,7 +259,7 @@ const COMPONENTS: Components = {
       src={typeof src === "string" ? src : undefined}
       alt={alt ?? ""}
       loading="lazy"
-      className="border border-border/60"
+      className="border border-subtle"
     />
   ),
   a: ({
@@ -219,9 +283,8 @@ interface BoundaryState {
   key: string
 }
 
-// Streamdown bundles Mermaid and renders ```mermaid blocks itself; a diagram it
-// can't parse throws during render and, with no boundary, white-screens the
-// whole page. Contain it and fall back to the raw markdown text.
+// A render-time throw anywhere in the markdown tree would otherwise white-screen
+// the whole page; contain it and fall back to the raw markdown text.
 class MarkdownErrorBoundary extends Component<BoundaryProps, BoundaryState> {
   state: BoundaryState = { failed: false, key: this.props.content }
 
@@ -241,7 +304,7 @@ class MarkdownErrorBoundary extends Component<BoundaryProps, BoundaryState> {
   render(): ReactNode {
     if (this.state.failed) {
       return (
-        <pre className="font-sans [overflow-wrap:anywhere] break-words whitespace-pre-wrap text-foreground">
+        <pre className="font-sans [overflow-wrap:anywhere] break-words whitespace-pre-wrap text-primary">
           {this.props.content}
         </pre>
       )
@@ -254,7 +317,41 @@ export const Markdown = memo(function Markdown({
   content,
   isLive = false,
   transformImageUrl,
+  enlargeImages = false,
+  className,
 }: MarkdownProps) {
+  const [image, setImage] = useState<{ src: string; alt: string } | null>(null)
+  const components = useMemo(
+    () =>
+      enlargeImages
+        ? {
+            ...COMPONENTS,
+            img: ({ src, alt }: ExtraProps & ComponentProps<"img">) => (
+              <img
+                src={typeof src === "string" ? src : undefined}
+                alt={alt ?? ""}
+                loading="lazy"
+                role="button"
+                tabIndex={0}
+                aria-label={`Enlarge ${alt || "image"}`}
+                className="cursor-zoom-in border border-subtle focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none"
+                onClick={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  if (typeof src === "string") setImage({ src, alt: alt ?? "" })
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault()
+                    event.currentTarget.click()
+                  }
+                }}
+              />
+            ),
+          }
+        : COMPONENTS,
+    [enlargeImages]
+  )
   const urlTransform = useMemo(() => {
     if (!transformImageUrl) return undefined
     return (
@@ -268,16 +365,20 @@ export const Markdown = memo(function Markdown({
   }, [transformImageUrl])
 
   return (
-    <div className="chat-markdown max-w-full min-w-0 text-[14px] leading-[1.6] [overflow-wrap:anywhere] break-words text-foreground">
+    <div
+      className={cn(
+        "chat-markdown max-w-full min-w-0 text-sm leading-[1.6] [overflow-wrap:anywhere] break-words text-primary",
+        className
+      )}
+    >
       <MarkdownErrorBoundary content={content}>
         <Streamdown
           mode={isLive ? "streaming" : "static"}
           parseIncompleteMarkdown={isLive}
           isAnimating={isLive}
-          animated={isLive ? STREAMDOWN_ANIMATED : false}
           shikiTheme={SHIKI_THEME}
           className="streamdown-agent max-w-full min-w-0 space-y-0"
-          components={COMPONENTS}
+          components={components}
           remarkPlugins={REMARK_PLUGINS}
           allowedTags={ALLOWED_TAGS}
           urlTransform={urlTransform}
@@ -285,6 +386,26 @@ export const Markdown = memo(function Markdown({
           {content}
         </Streamdown>
       </MarkdownErrorBoundary>
+      <Dialog
+        open={image !== null}
+        onOpenChange={(open) => {
+          if (!open) setImage(null)
+        }}
+      >
+        <DialogContent
+          title={image?.alt || "Image preview"}
+          className="h-[calc(100dvh-2rem)] w-[95vw] max-w-[95vw]"
+          childrenClassName="flex-1 items-center justify-center"
+        >
+          {image && (
+            <img
+              src={image.src}
+              alt={image.alt}
+              className="h-full min-h-0 w-full object-contain"
+            />
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 })

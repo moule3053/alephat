@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 
-from agent.dashboard.oauth import (
+from openswe.dashboard.oauth import (
     COOKIE_NAME,
     SESSION_TTL_SECONDS,
     STATE_COOKIE_NAME,
@@ -117,7 +117,8 @@ async def auth_callback(request: Request, code: str, state: str) -> RedirectResp
     if not isinstance(access_token, str) or not access_token:
         raise HTTPException(400, "oauth exchange missing access_token")
     user, email = await fetch_github_user(access_token)
-    login = user.get("login")
+    login = user.get("login") if isinstance(user, dict) else user.login
+    avatar_url = user.get("avatar_url") if isinstance(user, dict) else user.avatar_url
     if not isinstance(login, str) or not login:
         raise HTTPException(400, "could not resolve GitHub login")
     await enforce_github_login_gate(login)
@@ -128,7 +129,7 @@ async def auth_callback(request: Request, code: str, state: str) -> RedirectResp
     session_token = issue_session(
         login=login,
         email=email,
-        avatar_url=user.get("avatar_url"),
+        avatar_url=avatar_url if isinstance(avatar_url, str) else None,
     )
     response = RedirectResponse(redirect_to, status_code=302)
     _set_session_cookie(response, session_token)

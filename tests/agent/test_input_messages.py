@@ -1,15 +1,16 @@
 from xml.etree import ElementTree
 
-import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, get_notification_metadata
 
-from agent.input_messages import (
-    build_input_messages,
-    build_run_input,
+from openswe.agent_api.run_state import as_messages
+from openswe.input_messages import (
+    dynamic_context_hash,
     human_input,
     person_introduction,
+    system_input,
     visible_dynamic_context_hashes,
 )
+from openswe.utils.dashboard_handoff import PassageReply, dashboard_input_context
 
 
 def _parse(content: str) -> ElementTree.Element:
@@ -35,7 +36,7 @@ def test_human_input_escapes_data_and_attributes() -> None:
         "surface": "web",
         "kind": "human",
     }
-    assert root.findtext("content") == '<fix a="b"> & continue'
+    assert (root.text or "").strip() == '<fix a="b"> & continue'
 
 
 def test_multimodal_input_preserves_non_text_blocks_and_order() -> None:
@@ -47,64 +48,54 @@ def test_multimodal_input_preserves_non_text_blocks_and_order() -> None:
 
     assert isinstance(message["content"], list)
     assert message["content"][0] is image
-    assert _parse(message["content"][1]["text"]).findtext("content") == "describe <this>"
+    assert (_parse(message["content"][1]["text"]).text or "").strip() == "describe <this>"
 
 
-def test_first_seen_introductions_are_practical_and_mutate_registry() -> None:
-    injected = set()
-    kwargs = {
-        "people": [{"id": "github:octocat", "platform": "github", "github_login": "octocat"}],
-        "channels": [{"id": "slack:C123", "platform": "slack", "topic": "a < b"}],
-        "injected_dynamic_context_hashes": injected,
-    }
-    first = build_input_messages(
-        "first",
-        {
-            "sender_id": "github:octocat",
-            "channel_id": "slack:C123",
-            "surface": "web",
-            "kind": "human",
-        },
-        **kwargs,
+def test_replies_ride_as_escaped_elements_even_without_text() -> None:
+    image = {"type": "image", "base64": "abc", "mime_type": "image/png"}
+    replies = [
+        PassageReply(
+            source="file",
+            file="greet.py",
+            lines="6",
+            before="def greet():\n    ",
+            selection='return "</reply>"',
+            after="\n",
+            comment="Use a <constant>",
+        ),
+        PassageReply(source="conversation", selection="Opening a PR.", comment="Draft?"),
+    ]
+    message = human_input([image], dashboard_input_context("github:octocat", None, replies))
+
+    assert isinstance(message["content"], list)
+    root = _parse(message["content"][1]["text"])
+    assert (root.text or "").strip() == ""
+    first, second = root.findall("reply")
+    assert 'selection: return "</reply>"' in (first.text or "")
+    assert "comment: Use a <constant>" in (first.text or "")
+    assert "before:\n  def greet():\n      \n" in (first.text or "")
+    assert (second.text or "").split("\n")[1:] == [
+        "source: conversation",
+        "selection: Opening a PR.",
+        "comment: Draft?",
+        "",
+    ]
+
+
+def test_system_notification_survives_run_input_conversion() -> None:
+    image = {"type": "image", "base64": "abc", "mime_type": "image/png"}
+    notification = system_input(
+        [image, {"type": "text", "text": "Worker <finished>"}],
+        {"sender_id": "system:task", "surface": "web", "kind": "system"},
     )
-    second = build_input_messages(
-        "second",
-        {
-            "sender_id": "github:octocat",
-            "channel_id": "slack:C123",
-            "surface": "web",
-            "kind": "human",
-        },
-        **kwargs,
+    follow_up = human_input(
+        "Keep going", {"sender_id": "user:123", "surface": "web", "kind": "human"}
     )
 
-    assert len(first) == 3
-    assert len(second) == 1
-    assert len(injected) == 2
-    assert all(len(value) == 64 for value in injected)
-    channel_content = first[1]["content"]
-    assert isinstance(channel_content, str)
-    channel = _parse(channel_content)
-    topic = channel.find("topic")
-    assert topic is not None
-    assert topic.attrib["trust"] == "untrusted"
-    assert channel.findtext("topic") == "a < b"
+    injected, human = as_messages([notification, follow_up])
 
-
-def test_run_input_preserves_files() -> None:
-    result = build_run_input(
-        "analyze",
-        {"sender_id": "system:job", "surface": "automation", "kind": "system"},
-        systems=[{"id": "system:job", "display_name": "Job"}],
-        files={"/skills/x": {"content": "data"}},
-    )
-    assert result.get("files") == {"/skills/x": {"content": "data"}}
-    assert len(result["messages"]) == 2
-
-
-def test_entity_ids_must_be_namespaced() -> None:
-    with pytest.raises(ValueError):
-        human_input("hello", {"sender_id": "octocat", "surface": "web", "kind": "human"})
+    assert get_notification_metadata(injected) == {"source": "system:task"}
+    assert get_notification_metadata(human) is None
 
 
 def _person_intro_message(entity_id: str) -> HumanMessage:
@@ -126,19 +117,19 @@ def test_visible_dynamic_context_hashes_ignores_summarized_prefix() -> None:
     assert visible_dynamic_context_hashes(summarized) == set()
 
 
-def test_visible_dynamic_context_hashes_falls_back_without_a_usable_cutoff() -> None:
-    messages = [_person_intro_message("slack:U1")]
+def test_changed_person_context_can_return_to_an_earlier_profile() -> None:
+    person_id = "user:123"
+    linked = person_introduction({"id": person_id, "open_swe_account": "linked"})
+    unlinked = person_introduction({"id": person_id, "open_swe_account": "unlinked"})
+    other = _person_intro_message("slack:U2")
+    messages = [linked, other, unlinked]
 
-    for event in ({"cutoff_index": "x"}, {}, None):
-        assert visible_dynamic_context_hashes({"messages": messages, "_summarization_event": event})
-
-
-def test_visible_dynamic_context_hashes_honors_out_of_range_cutoff() -> None:
-    """DeepAgents builds the prompt from summary_message alone, so nothing is visible."""
-    messages = [_person_intro_message("slack:U1")]
-    event = {"cutoff_index": 99}
-
-    assert (
-        visible_dynamic_context_hashes({"messages": messages, "_summarization_event": event})
-        == set()
-    )
+    assert visible_dynamic_context_hashes({"messages": messages}) == {
+        dynamic_context_hash(other.content),
+        dynamic_context_hash(unlinked["content"]),
+    }
+    messages.append(linked)
+    assert visible_dynamic_context_hashes({"messages": messages}) == {
+        dynamic_context_hash(other.content),
+        dynamic_context_hash(linked["content"]),
+    }

@@ -12,26 +12,20 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { AgentThreadHeader } from "./AgentThreadHeader"
 
 vi.mock("@/lib/session", () => ({ useSession: () => ({ data: null }) }))
-vi.mock("@/features/agents/lib/desktopProjects", () => ({
-  useDesktopProjects: () => ({ projects: [] }),
-}))
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }))
 vi.mock("@/features/agents/lib/desktopLocal", () => ({
-  useRefreshLocalThreads: () => vi.fn(),
+  useLocalThread: () => null,
 }))
 vi.mock("@/features/agents/lib/sidebarPrefs", () => ({
-  useSidebarPrefs: () => ({
-    prefs: { pinnedLocalIds: [], filters: {} },
-    toggleLocalPin: vi.fn(),
-  }),
+  useSidebarPrefs: () => ({ prefs: { filters: {} } }),
 }))
 vi.mock("@/features/agents/lib/queries", () => ({
   useSidebarPinnedThreads: () => ({ data: [] }),
-  useSidebarProjects: () => ({ data: [] }),
+  useSidebarRepos: () => ({ data: [] }),
   usePinAgentThread: () => ({ isPending: false, mutate: vi.fn() }),
   useResolveAgentThread: () => ({ isPending: false, mutate: vi.fn() }),
   useDeleteAgentThread: () => ({ isPending: false, mutate: vi.fn() }),
   useContinueThreadPrivately: () => ({ isPending: false, mutate: vi.fn() }),
+  useShareThreadWithWorkspace: () => ({ isPending: false, mutate: vi.fn() }),
 }))
 
 const title = "Show the thread title"
@@ -39,6 +33,17 @@ const title = "Show the thread title"
 afterEach(cleanup)
 
 describe("AgentThreadHeader", () => {
+  it.each(["Cloud", "This Mac", "Local CLI"] as const)(
+    "only shows the run target indicator for local targets: %s",
+    (target) => {
+      render(<AgentThreadHeader target={target} panelCollapsed={false} />)
+      const indicator = screen.queryByRole("img", {
+        name: `Runs on ${target}`,
+      })
+      expect(Boolean(indicator)).toBe(target !== "Cloud")
+    }
+  )
+
   it("saves a trimmed title once on Enter then blur", async () => {
     const onRename = vi.fn().mockResolvedValue(undefined)
     render(

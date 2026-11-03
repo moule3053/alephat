@@ -3,31 +3,32 @@ import type { ApprovalCallbacks } from "./types"
 import { CodeBlock } from "@/features/agents/components/chat/CodeBlock"
 import { Markdown } from "@/features/agents/components/chat/Markdown"
 import { ToolExecution } from "@/features/agents/components/chat/ToolExecution"
+import { MessageImage } from "./MessageImage"
 
 export function ChunkRenderer({
   chunk,
-  projectPath,
+  repoPath,
   isMarkdownLive,
   ...callbacks
 }: {
   chunk: Chunk
-  projectPath?: string
+  repoPath?: string
   isMarkdownLive?: boolean
 } & ApprovalCallbacks) {
   switch (chunk.kind) {
     case "text":
       return (
-        <div className="text-foreground">
+        <div className="text-primary">
           <Markdown content={chunk.text} isLive={isMarkdownLive} />
         </div>
       )
     case "code":
       return <CodeBlock text={chunk.text} language={chunk.language} />
     case "error":
-      return <span className="text-destructive">{chunk.text}</span>
+      return <span className="text-error-secondary">{chunk.text}</span>
     case "list":
       return (
-        <div className="ml-2 text-muted-foreground">
+        <div className="ml-space-2 text-secondary">
           {chunk.lines.map((line, i) => (
             <div key={i}>- {line}</div>
           ))}
@@ -37,7 +38,7 @@ export function ChunkRenderer({
       return (
         <ToolExecution
           chunk={chunk}
-          projectPath={projectPath}
+          repoPath={repoPath}
           onApprove={callbacks.onApprove}
           onReject={callbacks.onReject}
           onAutoApprove={callbacks.onAutoApprove}
@@ -45,10 +46,9 @@ export function ChunkRenderer({
       )
     case "image":
       return (
-        <img
-          src={`data:${chunk.mimeType};base64,${chunk.base64}`}
-          alt={chunk.fileName || "image"}
-          className="max-h-48 max-w-48 rounded border border-border"
+        <MessageImage
+          chunk={chunk}
+          className="max-h-48 max-w-48 rounded-sm border border-default"
         />
       )
   }

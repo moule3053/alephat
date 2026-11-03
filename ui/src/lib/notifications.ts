@@ -1,14 +1,9 @@
 import type { AgentThread } from "@/features/agents/lib/types"
 
-export const NOTIFICATIONS_PREF_KEY = "alephat-notifications-enabled"
+export const NOTIFICATIONS_PREF_KEY = "open-swe-notifications-enabled"
 
 export function notificationsSupported(): boolean {
   return typeof window !== "undefined" && "Notification" in window
-}
-
-export function getNotificationPermission(): NotificationPermission | null {
-  if (!notificationsSupported()) return null
-  return Notification.permission
 }
 
 export function notificationsEnabled(): boolean {
@@ -36,31 +31,50 @@ export function setNotificationsPref(enabled: boolean) {
   }
 }
 
+interface DesktopNotificationOptions {
+  body: string
+  tag: string
+  onClick: () => void
+  onShow?: () => void
+}
+
+/** A native OS notification, shown only when this browser has opted in. */
+export class DesktopNotification {
+  static show(title: string, options: DesktopNotificationOptions): boolean {
+    if (!notificationsEnabled()) return false
+    try {
+      const notification = new Notification(title, {
+        body: options.body,
+        icon: `${import.meta.env.BASE_URL}logo-mark.png`,
+        tag: options.tag,
+      })
+      notification.onshow = () => options.onShow?.()
+      notification.onclick = () => {
+        window.focus()
+        options.onClick()
+        notification.close()
+      }
+      return true
+    } catch (error) {
+      console.warn("Could not show desktop notification", error)
+      return false
+    }
+  }
+}
+
 export function showRunNotification(
   thread: AgentThread,
   onClick: (threadId: string) => void
 ) {
-  if (!notificationsEnabled()) return
   const statusLabel =
     thread.status === "error"
       ? "encountered an error"
       : thread.status === "interrupted"
         ? "was interrupted"
         : "finished"
-  const title = thread.title || "Agent run"
-  const body = `Run ${statusLabel}.`
-  try {
-    const n = new Notification(title, {
-      body,
-      icon: `${import.meta.env.BASE_URL}logo-mark.png`,
-      tag: `run-${thread.id}`,
-    })
-    n.onclick = () => {
-      window.focus()
-      onClick(thread.id)
-      n.close()
-    }
-  } catch {
-    /* ignore */
-  }
+  DesktopNotification.show(thread.title || "Agent run", {
+    body: `Run ${statusLabel}.`,
+    tag: `run-${thread.id}`,
+    onClick: () => onClick(thread.id),
+  })
 }

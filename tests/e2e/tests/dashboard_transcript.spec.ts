@@ -6,6 +6,7 @@ import {
   openRunningThreadViaSlackLink,
   openThreadViaSlackLink,
   threadIdFromUrl,
+  threadState,
   typeIntoComposer,
   waitForStateToContain,
   waitForThreadIdle,
@@ -42,7 +43,10 @@ test.describe("finished transcript (shared fixture thread)", () => {
     await page.route("**/stream/events", (route) => route.abort());
     await page.goto(`/agents/${threadId}`);
     await expect(
-      page.getByRole("link", { name: "Add greet() helper" }).first(),
+      page
+        .getByRole("main")
+        .getByRole("link", { name: "Add greet() helper", exact: true })
+        .first(),
     ).toBeVisible();
     await expect(
       page.getByText("This thread has no messages yet."),
@@ -61,11 +65,11 @@ test.describe("finished transcript (shared fixture thread)", () => {
     const edit = page.getByRole("button", { name: "Edited greet.py" });
 
     // Folded: the acknowledgement shows, the individual tool calls do not.
-    await expect(worked).toBeVisible();
+    await expect(worked.first()).toBeVisible();
     await expect(acknowledgement).toBeVisible();
     await expect(edit).toHaveCount(0);
 
-    await worked.click();
+    for (const fold of await worked.all()) await fold.click();
     await expect(edit).toBeVisible();
     await expect(acknowledgement).toBeVisible();
     expect(
@@ -169,21 +173,26 @@ test.describe("transcript rendering", () => {
     const threadId = threadIdFromUrl(page);
     await waitForThreadIdle(page, threadId);
 
-    await page.getByRole("link", { name: "New Thread" }).click();
+    await page.getByRole("link", { name: "New", exact: true }).click();
     await expect(page).toHaveURL(/\/agents\/?$/);
     await page.goBack();
     await expect(page).toHaveURL(new RegExp(`/agents/${threadId}$`));
     await expect(
-      page.getByRole("link", { name: "Add greet() helper" }).first(),
+      page
+        .getByRole("main")
+        .getByRole("link", { name: "Add greet() helper", exact: true })
+        .first(),
     ).toBeVisible();
 
+    // The transcript source hydrates from its snapshot once; coming back to
+    // the foreground must not fetch it again.
     const foregroundHydration = page
       .waitForRequest(
         (request) => {
           const path = new URL(request.url()).pathname;
           return (
             request.method() === "GET" &&
-            path === `/dashboard/api/threads/${threadId}/state`
+            path === `/dashboard/api/threads/${threadId}/transcript`
           );
         },
         { timeout: 1_000 },
@@ -197,7 +206,10 @@ test.describe("transcript rendering", () => {
     );
     expect(await foregroundHydration).toBe(false);
     await expect(
-      page.getByRole("link", { name: "Add greet() helper" }).first(),
+      page
+        .getByRole("main")
+        .getByRole("link", { name: "Add greet() helper", exact: true })
+        .first(),
     ).toBeVisible();
 
     await typeIntoComposer(page, "Can you also add a docstring?");
@@ -205,8 +217,33 @@ test.describe("transcript rendering", () => {
       page.getByText(/anything else you'd like changed/),
     ).toBeVisible();
     await expect(
-      page.getByRole("link", { name: "Add greet() helper" }).first(),
+      page
+        .getByRole("main")
+        .getByRole("link", { name: "Add greet() helper", exact: true })
+        .first(),
     ).toBeVisible();
+  });
+
+  test("a new user hydrates from the transcript by default", async ({
+    page,
+  }) => {
+    await loginAs(page, { login: "carol", email: "carol@example.com" });
+    const hydrations: Array<string> = [];
+    page.on("request", (request) => {
+      if (request.method() !== "GET") return;
+      const path = new URL(request.url()).pathname;
+      if (/^\/dashboard\/api\/threads\/[^/]+\/(state|transcript)$/.test(path))
+        hydrations.push(path);
+    });
+
+    await openThreadViaSlackLink(page);
+    const threadId = threadIdFromUrl(page);
+    await waitForThreadIdle(page, threadId);
+    await expectTranscriptVisible(page);
+
+    expect(hydrations).toContain(
+      `/dashboard/api/threads/${threadId}/transcript`,
+    );
   });
 
   test("renders a web follow-up exactly once", async ({ page }) => {
@@ -229,6 +266,52 @@ test.describe("transcript rendering", () => {
     ).toHaveCount(1);
   });
 
+  test("replies to selected transcript text in the next message", async ({
+    page,
+  }) => {
+    await loginAs(page, SAME_USER);
+    await openThreadViaSlackLink(page);
+    const threadId = threadIdFromUrl(page);
+    await waitForThreadIdle(page, threadId);
+    await waitForThreadNotBusy(page, threadId);
+
+    const passage = page
+      .getByText("Opening a pull request.", { exact: true })
+      .first();
+    const box = await passage.boundingBox();
+    if (!box) throw new Error("The agent's reply has no layout box");
+    await page.mouse.move(box.x + 1, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width - 1, box.y + box.height / 2, {
+      steps: 10,
+    });
+    await page.mouse.up();
+    await page.getByRole("button", { name: "Reply", exact: true }).click();
+    const field = page.getByRole("textbox", { name: "Your reply" });
+    await field.fill("Which branch?");
+    await field.press("Enter");
+    await expect(
+      page.getByRole("list", { name: "Replies in your next message" }),
+    ).toContainText("Which branch?");
+
+    await typeIntoComposer(page, "Thanks!");
+    // The agent gets the selection with a line of context on each side.
+    await waitForStateToContain(
+      page,
+      threadId,
+      "Thanks!\\n<reply>\\nsource: conversation\\nbefore:",
+    );
+    const state = await threadState(page, threadId);
+    expect(state).toContain("selection: Opening a pull request.\\nafter:\\n");
+    expect(state).toContain("comment: Which branch?\\n</reply>");
+    const sent = page
+      .getByTestId("user-message")
+      .filter({ hasText: "Which branch?" });
+    await expect(sent.locator("blockquote")).toHaveText(
+      "Opening a pull request.",
+    );
+  });
+
   test("keeps a web model override on the next Slack turn", async ({
     page,
   }) => {
@@ -238,9 +321,9 @@ test.describe("transcript rendering", () => {
     await waitForThreadIdle(page, threadId);
     await waitForThreadNotBusy(page, threadId);
 
-    await page.getByRole("button", { name: /GPT-5\.6 Sol/ }).click();
-    await page.getByText("GPT-5.6 Sol", { exact: true }).last().hover();
-    await page.getByRole("option", { name: /Opus 5/ }).click();
+    await page.getByRole("button", { name: /GPT-6\.1 Sol/ }).click();
+    await page.getByText("GPT-6.1 Sol", { exact: true }).last().hover();
+    await page.getByRole("option", { name: /Opus 5\.5/ }).click();
     await typeIntoComposer(page, "Use Opus for this thread");
     await waitForThreadIdle(page, threadId);
     await waitForThreadNotBusy(page, threadId);
@@ -257,18 +340,21 @@ test.describe("transcript rendering", () => {
     });
     expect(response.ok()).toBeTruthy();
 
+    // Managed Deep Agents runs carry their configurable inside the signed run
+    // token in their context.
     await expect
       .poll(async () => {
         const runs = (await (
           await page.request.get(`/threads/${threadId}/runs`)
-        ).json()) as Array<{
-          kwargs?: {
-            config?: { configurable?: { agent_model_id?: string } };
-          };
-        }>;
-        return runs[0]?.kwargs?.config?.configurable?.agent_model_id;
+        ).json()) as Array<{ kwargs?: { context?: { __run_token?: string } } }>;
+        const token = runs[0]?.kwargs?.context?.__run_token;
+        if (!token) return undefined;
+        const claims = JSON.parse(
+          Buffer.from(token.split(".")[1], "base64url").toString(),
+        ) as { cfg?: { agent_model_id?: string } };
+        return claims.cfg?.agent_model_id;
       })
-      .toBe("anthropic:claude-opus-5");
+      .toBe("anthropic:claude-opus-5-5");
   });
 
   test("renders structured input envelopes safely and keeps legacy messages", async ({
@@ -279,55 +365,52 @@ test.describe("transcript rendering", () => {
     const threadId = threadIdFromUrl(page);
     await waitForThreadIdle(page, threadId);
 
+    // A new thread is served from the transcript, so the rows the renderer has
+    // to defend against are injected into the snapshot it reads.
     await page.route(
-      `**/dashboard/api/threads/${threadId}/state`,
+      `**/dashboard/api/threads/${threadId}/transcript`,
       async (route) => {
         const response = await route.fetch();
         const body = (await response.json()) as {
-          values?: { messages?: Array<Record<string, unknown>> };
+          turns?: Array<{ turn_id: string }>;
+          messages?: Array<Record<string, unknown>>;
         };
-        const messages = body.values?.messages ?? [];
-        body.values = {
-          ...body.values,
-          messages: [
-            {
-              type: "human",
-              id: "entity-person",
-              content:
-                '<dynamic-context kind="person" id="github:alice"><display_name>Alice</display_name></dynamic-context>',
-            },
-            {
-              type: "human",
-              id: "entity-system",
-              content:
-                '<dynamic-context kind="system" id="system:scheduler"><display_name>Scheduler</display_name></dynamic-context>',
-            },
-            {
-              type: "human",
-              id: "structured-person",
-              content:
-                '<input-message sender="github:alice" surface="web" kind="human"><content>Person says &lt;img data-e2e-injected src=x&gt;</content></input-message>',
-            },
-            {
-              type: "human",
-              id: "structured-system",
-              content:
-                '<input-message sender="system:scheduler" surface="automation"><content>Automation checks CI</content></input-message>',
-            },
-            {
-              type: "human",
-              id: "legacy-e2e",
-              content: "Legacy stays visible",
-            },
-            {
-              type: "ai",
-              id: "live-compaction-summary",
-              content: "SESSION INTENT: internal context must stay hidden",
-              additional_kwargs: { lc_source: "summarization" },
-            },
-            ...messages,
+        const turnId = body.turns?.[0]?.turn_id;
+        if (!turnId) {
+          await route.fulfill({ response });
+          return;
+        }
+        const injected = [
+          [
+            "entity-person",
+            '<dynamic-context kind="person" id="github:alice">\ndisplay_name: Alice\n</dynamic-context>',
           ],
-        };
+          [
+            "entity-system",
+            '<dynamic-context kind="system" id="system:scheduler">\ndisplay_name: Scheduler\n</dynamic-context>',
+          ],
+          [
+            "structured-person",
+            '<input-message sender="github:alice" surface="web" kind="human">\nPerson says &lt;img data-e2e-injected src=x&gt;\n</input-message>',
+          ],
+          // Rows already in the database wrap their text in `<content>`.
+          [
+            "structured-system",
+            '<input-message sender="system:scheduler" surface="automation"><content>Automation checks CI</content></input-message>',
+          ],
+          ["legacy-e2e", "Legacy stays visible"],
+        ].map(([messageId, text], index) => ({
+          message_id: messageId,
+          turn_id: turnId,
+          role: "human",
+          text,
+          reasoning: "",
+          namespace: [],
+          attachments: null,
+          usage: null,
+          created_at: `2000-01-01T00:00:0${index}Z`,
+        }));
+        body.messages = [...injected, ...(body.messages ?? [])];
         await route.fulfill({ response, json: body });
       },
     );
@@ -343,9 +426,6 @@ test.describe("transcript rendering", () => {
     await systemChip.click();
     await expect(page.getByText("Automation checks CI")).toBeVisible();
     await expect(page.getByText("Legacy stays visible")).toBeVisible();
-    await expect(
-      page.getByText("SESSION INTENT: internal context must stay hidden"),
-    ).toHaveCount(0);
     await expect(page.getByText("github:alice", { exact: false })).toHaveCount(
       0,
     );

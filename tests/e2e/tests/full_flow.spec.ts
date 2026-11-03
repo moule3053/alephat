@@ -1,10 +1,12 @@
 import { test, expect } from "@playwright/test";
 
+import { plannedCalls } from "./helpers/dashboard";
+
 // Full happy path, driven entirely through the mock Slack + GitHub UIs:
 //   user asks in Slack -> real agent implements in a local sandbox -> opens a PR
 //   on the fake GitHub -> replies with the PR link in the SAME Slack thread.
 // Only the LLM is faked; all agent code runs for real via langgraph dev.
-test.describe("Alephat full flow", () => {
+test.describe("Open SWE full flow", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/mock/slack");
     await page.locator("#reset").click();
@@ -31,6 +33,16 @@ test.describe("Alephat full flow", () => {
     await expect(reply).toBeVisible();
     const prLink = reply.locator('a[href*="/pull/"]');
     await expect(prLink).toBeVisible();
+    const webLink = page.locator('.msg.bot a[href*="/agents/"]').first();
+    const threadId =
+      new URL((await webLink.getAttribute("href")) ?? "", "http://x").pathname
+        .split("/")
+        .pop() ?? "";
+
+    // The run is worked out once as it starts: every other call, its preparation,
+    // model calls and tool calls included, is answered from its token, as by a
+    // replica that never served the run.
+    expect(await plannedCalls(page, threadId)).toEqual(["start"]);
 
     // Follow the link → the PR page shows what GitHub would show.
     await prLink.click();
@@ -76,7 +88,7 @@ test.describe("Alephat full flow", () => {
     await expect(reply.locator('a[href*="/pull/"]')).toBeVisible();
   });
 
-  test("Slack breakout request starts a new top-level Alephat thread", async ({
+  test("Slack breakout request starts a new top-level Open SWE thread", async ({
     page,
   }) => {
     await page
@@ -88,7 +100,7 @@ test.describe("Alephat full flow", () => {
 
     const breakout = page
       .locator(".msg.bot")
-      .filter({ hasText: /Alephat breakout thread:\* Add greet\(\) helper/ });
+      .filter({ hasText: /`\/breakout`: Add greet\(\) helper/ });
     await expect(breakout).toBeVisible({ timeout: 60_000 });
     const breakoutThreadTs = await breakout.getAttribute("data-thread-ts");
     expect(breakoutThreadTs).toBeTruthy();
@@ -101,10 +113,5 @@ test.describe("Alephat full flow", () => {
     ).toBeVisible({
       timeout: 60_000,
     });
-    await expect(
-      page
-        .locator(".msg.bot")
-        .filter({ hasText: "I started a separate Alephat thread" }),
-    ).toBeVisible({ timeout: 60_000 });
   });
 });

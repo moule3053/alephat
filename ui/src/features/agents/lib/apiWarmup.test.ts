@@ -34,21 +34,24 @@ function stubFetch() {
 async function recordedSidebarUrl({
   includeAutomations = false,
   includeResolved = false,
-  projectMode = true,
+  includeClaudeCode = true,
+  repoMode = true,
   sort = "created",
 }: {
   includeAutomations?: boolean
   includeResolved?: boolean
-  projectMode?: boolean
+  includeClaudeCode?: boolean
+  repoMode?: boolean
   sort?: ChatSort
 } = {}): Promise<string> {
   const spy = stubFetch()
   await agentsApi
     .listThreadsPage({
       ...sidebarRecentsParams({
-        projectMode,
+        repoMode,
         includeAutomations,
         includeResolved,
+        includeClaudeCode,
         sort,
       }),
       limit: SIDEBAR_PAGE_SIZE,
@@ -77,8 +80,6 @@ describe("apiWarmupScript", () => {
   it("only matches the routes that render a sidebar or transcript", () => {
     expect(apiWarmupScript("/")).toBeNull()
     expect(apiWarmupScript("/login")).toBeNull()
-    expect(apiWarmupScript("/agents/threads")).toBeNull()
-    expect(apiWarmupScript(`/agents/local/${THREAD_ID}`)).toBeNull()
     expect(apiWarmupScript(`/agents/${THREAD_ID}/plan`)).toBeNull()
     expect(apiWarmupScript("/agents")).toContain("/threads/page")
     expect(apiWarmupScript(`/agents/${THREAD_ID}`)).toContain(STATE_PATH)
@@ -155,13 +156,18 @@ describe("apiWarmupScript", () => {
     },
     {
       name: "list mode",
-      expected: { projectMode: false },
+      expected: { repoMode: false, sort: "updated" as ChatSort },
       prefs: { organize: "list" },
     },
     {
       name: "resolved included",
       expected: { includeResolved: true },
       prefs: { filters: { includeResolved: true } },
+    },
+    {
+      name: "Claude Code sessions hidden",
+      expected: { includeClaudeCode: false },
+      prefs: { filters: { includeClaudeCode: false } },
     },
     {
       name: "sorted by last update",

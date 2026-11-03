@@ -1,16 +1,15 @@
-import { Link, createFileRoute } from "@tanstack/react-router"
+import { createFileRoute } from "@tanstack/react-router"
 import { useEffect, useMemo } from "react"
 
-import { buttonVariants } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
-import { Skeleton } from "@/components/ui/skeleton"
+import { Button } from "@langchain/macaw-components/Button"
+import { Card } from "@langchain/macaw-components/Card"
+import { Skeleton } from "@langchain/macaw-components/Skeleton"
+import { Text } from "@langchain/macaw-components/Text"
+
+import { LogoMark } from "@/components/Branding"
 import { loginUrl } from "@/lib/api"
+import { appDistribution } from "@/lib/pageTitle"
+import { pageTitle } from "@/lib/pageTitle"
 import {
   DEFAULT_AUTH_REDIRECT,
   consumeAuthRedirect,
@@ -18,8 +17,6 @@ import {
   rememberAuthRedirect,
 } from "@/lib/auth-redirect"
 import { useSession } from "@/lib/session"
-import { cn } from "@/lib/utils"
-import { enableDesktopLocalMode } from "@/lib/desktop-local-mode"
 
 type LoginSearch = { redirect?: string }
 
@@ -27,9 +24,9 @@ export const Route = createFileRoute("/login")({
   validateSearch: (search: Record<string, unknown>): LoginSearch => ({
     redirect: typeof search.redirect === "string" ? search.redirect : undefined,
   }),
+  head: () => ({ meta: [{ title: pageTitle("Sign in") }] }),
   component: Login,
 })
-
 function Login() {
   const session = useSession()
   const search = Route.useSearch()
@@ -45,12 +42,9 @@ function Login() {
     () => (session.data ? consumeAuthRedirect(redirectParam) : null),
     [redirectParam, session.data]
   )
-  const isDesktop =
-    typeof window !== "undefined" && Boolean(window.openSweDesktop)
-
   if (session.isLoading) {
     return (
-      <main className="flex min-h-svh items-center justify-center p-6">
+      <main className="flex min-h-svh items-center justify-center bg-surface-level-1 p-space-5">
         <Skeleton className="h-40 w-80" />
       </main>
     )
@@ -61,36 +55,28 @@ function Login() {
   }
 
   return (
-    <main className="flex min-h-svh items-center justify-center p-6">
-      <Card className="w-full max-w-md">
-        <CardHeader>
-          <CardTitle>Sign in to Alephat</CardTitle>
-          <CardDescription>
-            Use your GitHub account. We'll configure your default model,
-            reasoning effort, and default repo for Slack/Linear/GitHub triggered
-            runs.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <a
-            href={loginUrl(intendedPath)}
-            className={cn(buttonVariants({ size: "lg" }), "w-full")}
-          >
-            Continue with GitHub
-          </a>
-          {isDesktop && (
-            <Link
-              to="/agents"
-              onClick={enableDesktopLocalMode}
-              className={cn(
-                buttonVariants({ size: "lg", variant: "outline" }),
-                "w-full"
-              )}
-            >
-              Continue in local mode
-            </Link>
-          )}
-        </CardContent>
+    <main className="flex min-h-svh items-center justify-center bg-surface-level-1 p-space-5">
+      <Card
+        intent="plain"
+        className="flex w-full max-w-md flex-col gap-space-5 p-space-6 shadow-md"
+      >
+        <div className="flex flex-col items-center gap-space-3 text-center">
+          <LogoMark alt={appDistribution.name} className="size-8" />
+          <Text as="h1" variant="h3">
+            {`Sign in to ${appDistribution.name}`}
+          </Text>
+        </div>
+        <Button
+          as={<a href={loginUrl(intendedPath)} />}
+          size="md"
+          className="w-full"
+        >
+          Continue with LangSmith
+        </Button>
+        <Text as="p" variant="sm" color="secondary">
+          Link your GitHub account after signing in to use coding features and
+          return to your existing coding threads.
+        </Text>
       </Card>
     </main>
   )
@@ -102,7 +88,7 @@ function ClientRedirect({ path }: { path: string }) {
   }, [path])
 
   return (
-    <main className="flex min-h-svh items-center justify-center p-6">
+    <main className="flex min-h-svh items-center justify-center bg-surface-level-1 p-space-5">
       <Skeleton className="h-40 w-80" />
     </main>
   )

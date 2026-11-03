@@ -2,48 +2,63 @@ import asyncio
 
 import pytest
 
-from agent import server
-from agent.run_config import RunConfig
+from openswe import server
+from openswe.dashboard.workspace_settings import WorkspaceSettings
+from openswe.run_config import RunConfig
+from openswe.users import User
+from tests.conftest import FakeUserRecords
 
 
-def test_resolve_prompt_default_repo_uses_explicit_repo(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (
+            RunConfig.parse({"repo": {"owner": "octo", "name": "repo"}}),
+            {"owner": "octo", "name": "repo"},
+        ),
+        (RunConfig(repo_explicitly_none=True), None),
+        (RunConfig(auth_provider="langsmith"), None),
+    ],
+)
+def test_resolve_prompt_default_repo_never_loads_team_default(
+    monkeypatch: pytest.MonkeyPatch, config: RunConfig, expected: dict[str, str] | None
 ) -> None:
-    async def fake_get_team_default_repo() -> dict[str, str] | None:
-        raise AssertionError("team default should not be loaded")
+    async def fake_get_workspace_settings(workspace: str | None = None) -> WorkspaceSettings:
+        raise AssertionError("workspace settings should not be loaded")
 
-    monkeypatch.setattr(server, "get_team_default_repo", fake_get_team_default_repo)
+    monkeypatch.setattr(server, "get_workspace_settings", fake_get_workspace_settings)
 
-    repo = asyncio.run(
-        server._resolve_prompt_default_repo(
-            RunConfig.parse({"repo": {"owner": "octo", "name": "repo"}})
-        )
+    assert asyncio.run(server._resolve_prompt_default_repo(config)) == expected
+
+
+async def test_prompt_default_uses_the_users_workspace_repository(
+    user_records: FakeUserRecords, registry_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ALLOWED_GITHUB_USERS", "alice")
+    await User.sign_in("github", "alice", login="alice")
+    user_records.seed(
+        "profile",
+        "alice",
+        {"default_repo": "user/global", "workspace_default_repos": {"oss": "user/scoped"}},
     )
-
-    assert repo == {"owner": "octo", "name": "repo"}
-
-
-def test_resolve_prompt_default_repo_skips_team_default_for_repo_less_run(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def fake_get_team_default_repo() -> dict[str, str] | None:
-        raise AssertionError("team default should not be loaded")
-
-    monkeypatch.setattr(server, "get_team_default_repo", fake_get_team_default_repo)
-
-    repo = asyncio.run(server._resolve_prompt_default_repo(RunConfig(repo_explicitly_none=True)))
-
-    assert repo is None
+    repo = await server._resolve_prompt_default_repo(
+        RunConfig(workspace="oss", github_login="alice")
+    )
+    assert repo == {"owner": "user", "name": "scoped"}
 
 
 def test_resolve_prompt_default_repo_falls_back_to_team_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_get_team_default_repo() -> dict[str, str] | None:
-        return {"owner": "team", "name": "repo"}
+    seen: list[str | None] = []
 
-    monkeypatch.setattr(server, "get_team_default_repo", fake_get_team_default_repo)
+    async def fake_get_workspace_settings(workspace: str | None = None) -> WorkspaceSettings:
+        seen.append(workspace)
+        return WorkspaceSettings({"default_repo": "team/repo"})
 
-    repo = asyncio.run(server._resolve_prompt_default_repo(RunConfig()))
+    monkeypatch.setattr(server, "get_workspace_settings", fake_get_workspace_settings)
+
+    repo = asyncio.run(server._resolve_prompt_default_repo(RunConfig(workspace="oss")))
 
     assert repo == {"owner": "team", "name": "repo"}
+    assert seen == ["oss"]

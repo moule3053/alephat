@@ -3,31 +3,31 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import { experienceStore } from "@/lib/experience"
 import { AppCommandPalette } from "./AppCommandPalette"
-import type { DesktopLocalThreadSummary } from "@/desktop"
 import type { AgentThread } from "@/features/agents/lib/types"
 import type { AppCommand } from "@/lib/appCommands"
 
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
   fetchNextPage: vi.fn(),
-  cloudThread: { id: "cloud-1", title: "Cloud result" } as AgentThread,
-  localThread: {
-    id: "local-1",
-    title: "Local result",
-    cwd: "/tmp/repo",
-    worktreePath: "/tmp/worktrees/repo-local1",
-    status: "idle",
-    viewed: true,
-    createdAt: 1,
-    updatedAt: 2,
-    modelId: null,
-    effort: null,
-  } as DesktopLocalThreadSummary,
+  cloudThread: {
+    id: "cloud-1",
+    title: "Cloud result",
+    experience: "agent_workspace",
+  } as AgentThread,
+}))
+
+vi.mock("@/lib/session", () => ({
+  useSession: () => ({ data: { login: "alice" } }),
 }))
 
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => mocks.navigate,
+  useRouterState: () => ({
+    home: "/agents",
+    thread: "/agents/$threadId",
+  }),
 }))
 vi.mock("@/features/agents/lib/queries", () => ({
   useInfiniteThreadsPages: () => ({
@@ -39,13 +39,14 @@ vi.mock("@/features/agents/lib/queries", () => ({
     fetchNextPage: mocks.fetchNextPage,
   }),
 }))
-vi.mock("@/features/agents/lib/desktopLocal", () => ({
-  useDesktopLocalThreads: () => ({ data: [mocks.localThread] }),
+vi.mock("@/features/reviews/lib/usePullRequestSearch", () => ({
+  usePullRequestSearch: () => ({ data: undefined }),
 }))
 
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  localStorage.clear()
 })
 
 const commands: Array<AppCommand> = [
@@ -74,22 +75,6 @@ describe("AppCommandPalette", () => {
     })
   })
 
-  it("filters thread titles as text and routes local results", () => {
-    render(
-      <AppCommandPalette commands={commands} open onOpenChange={vi.fn()} />
-    )
-
-    fireEvent.change(screen.getByRole("combobox"), {
-      target: { value: "LOCAL RESULT" },
-    })
-    fireEvent.click(screen.getByRole("option", { name: /Local result/ }))
-
-    expect(mocks.navigate).toHaveBeenCalledWith({
-      to: "/agents/local/$sessionId",
-      params: { sessionId: "local-1" },
-    })
-  })
-
   it("loads additional cloud thread pages", () => {
     render(
       <AppCommandPalette commands={commands} open onOpenChange={vi.fn()} />
@@ -100,6 +85,36 @@ describe("AppCommandPalette", () => {
     expect(mocks.fetchNextPage).toHaveBeenCalledOnce()
   })
 
+  it("keeps server-resolved Slack threads and opens a PR review from a link", async () => {
+    render(
+      <AppCommandPalette commands={commands} open onOpenChange={vi.fn()} />
+    )
+    const input = screen.getByRole("combobox")
+    fireEvent.change(input, {
+      target: {
+        value: "https://example.slack.com/archives/C123/p1788431248678809",
+      },
+    })
+    expect(
+      await screen.findByRole("option", { name: "Cloud result" })
+    ).toBeTruthy()
+
+    experienceStore.write("alice", "coding")
+    fireEvent.change(input, {
+      target: {
+        value:
+          "https://github.com/langchain-ai/open-swe/pull/42/files#diff-123",
+      },
+    })
+    fireEvent.click(
+      await screen.findByRole("option", { name: /Open Review Page/ })
+    )
+    expect(mocks.navigate).toHaveBeenCalledWith({
+      to: "/agents/reviews/$owner/$repo/$number",
+      params: { owner: "langchain-ai", repo: "open-swe", number: "42" },
+    })
+  })
+
   it("closes on Escape", () => {
     const onOpenChange = vi.fn()
     render(
@@ -107,6 +122,6 @@ describe("AppCommandPalette", () => {
     )
 
     fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" })
-    expect(onOpenChange).toHaveBeenCalledWith(false, expect.anything())
+    expect(onOpenChange).toHaveBeenCalledWith(false)
   })
 })

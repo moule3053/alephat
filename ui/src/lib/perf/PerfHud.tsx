@@ -1,0 +1,113 @@
+import { Button } from "@langchain/macaw-components/Button"
+import { useEffect, useState } from "react"
+
+import {
+  clearPerfSpans,
+  exportPerfSpans,
+  formatSpan,
+  getPerfSpans,
+  subscribePerfSpans,
+} from "./trace"
+import type { PerfSpan } from "./trace"
+
+function attributeSummary(span: PerfSpan): string {
+  return Object.entries(span.attributes)
+    .filter(([, value]) => value !== null && value !== false)
+    .map(([key, value]) => (value === true ? key : `${key}=${String(value)}`))
+    .join("  ")
+}
+
+/** Development overlay for the perf spans, toggled with `?perf=1` / `?perf=0`. Newest first. */
+export default function PerfHud() {
+  const [spans, setSpans] = useState<ReadonlyArray<PerfSpan>>(() =>
+    getPerfSpans()
+  )
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => subscribePerfSpans(() => setSpans([...getPerfSpans()])), [])
+
+  const visible = spans.slice(-8).reverse()
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(exportPerfSpans())
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1200)
+    } catch {}
+  }
+
+  return (
+    <aside
+      aria-label="Performance"
+      className="fixed bottom-3 left-3 z-dev-tool-panel w-[26rem] max-w-[calc(100vw-1.5rem)] rounded-md border border-default bg-surface-level-1/95 font-mono text-xxs leading-snug text-primary shadow-lg backdrop-blur"
+    >
+      <header className="flex items-center gap-space-2 border-b border-default px-space-2 py-space-1">
+        <span className="font-semibold">perf</span>
+        <span className="text-secondary">{spans.length} spans</span>
+        <span className="flex-1" />
+        <Button
+          color="secondary"
+          variant="plain"
+          size="xs"
+          aria-label={copied ? "copied" : "copy json"}
+          type="button"
+          className="h-auto border-0 px-0 hover:underline"
+          onClick={copy}
+        >
+          {copied ? "copied" : "copy json"}
+        </Button>
+        <Button
+          color="secondary"
+          variant="plain"
+          size="xs"
+          aria-label="clear"
+          type="button"
+          className="h-auto border-0 px-0 hover:underline"
+          onClick={clearPerfSpans}
+        >
+          clear
+        </Button>
+      </header>
+      <ul className="max-h-[40vh] overflow-y-auto">
+        {visible.length === 0 && (
+          <li className="px-space-2 py-space-1 text-secondary">
+            Open a thread or send a message to record a span.
+          </li>
+        )}
+        {visible.map((span) => (
+          <li key={span.id} className="border-b border-subtle last:border-0">
+            <Button
+              color="secondary"
+              variant="plain"
+              size="sm"
+              aria-label={formatSpan(span)}
+              type="button"
+              className="h-auto w-full justify-start px-space-2 py-space-1 text-left whitespace-normal hover:bg-surface-level-1-hover/40"
+              onClick={() =>
+                setExpanded((current) => (current === span.id ? null : span.id))
+              }
+            >
+              <span
+                className={
+                  span.status === "abandoned"
+                    ? "text-secondary line-through"
+                    : span.status === "open"
+                      ? "text-secondary"
+                      : undefined
+                }
+              >
+                {formatSpan(span)}
+              </span>
+            </Button>
+            {expanded === span.id && (
+              <p className="px-space-2 pb-space-1 break-all whitespace-pre-wrap text-secondary">
+                {attributeSummary(span) || "no attributes"}
+              </p>
+            )}
+          </li>
+        ))}
+      </ul>
+    </aside>
+  )
+}

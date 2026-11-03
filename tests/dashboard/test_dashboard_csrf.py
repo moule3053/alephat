@@ -5,8 +5,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from agent.dashboard import oauth, routes
-from agent.dashboard.threads import proxy as thread_proxy
+from openswe.dashboard import oauth, routes
+from openswe.threads import proxy as thread_proxy
 
 
 def _request(
@@ -68,7 +68,7 @@ async def test_require_same_origin_allows_backend_origin(monkeypatch) -> None:
 async def test_require_same_origin_allows_desktop_origin(monkeypatch) -> None:
     monkeypatch.setenv("DASHBOARD_BASE_URL", "https://dashboard.example")
 
-    oauth.require_same_origin(_request(origin="alephat://app"))
+    oauth.require_same_origin(_request(origin="open-swe://app"))
 
 
 @pytest.mark.asyncio

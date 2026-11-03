@@ -1,0 +1,390 @@
+import json
+from unittest.mock import AsyncMock, MagicMock
+
+import httpx2
+import pytest
+from fastapi import HTTPException
+
+from openswe.github import http as github_http
+from openswe.github import pull_request_actions as actions
+from openswe.github import squash_message
+from openswe.github.http import GitHubClient
+from openswe.github.pull_request_status import PullRequestClient
+
+
+def _pull(number: int) -> PullRequestClient:
+    return GitHubClient(MagicMock()).repo("acme", "app").pull_request(number)
+
+
+def response(payload, status=200):
+    return httpx2.Response(
+        status, json=payload, request=httpx2.Request("GET", "https://api.github.com")
+    )
+
+
+@pytest.fixture
+def github(monkeypatch):
+    def _install(request: AsyncMock) -> AsyncMock:
+        monkeypatch.setattr(actions, "github_request", request)
+        monkeypatch.setattr(squash_message, "github_request", request)
+        return request
+
+    return _install
+
+
+@pytest.mark.parametrize(
+    ("keep_review_id", "keep_commit", "scope_to_review_id", "dismissed"),
+    [
+        (None, "new", None, {1, 5, 6}),
+        (3, None, None, {1, 5, 6, 7}),
+        (None, None, None, {1, 3, 5, 6, 7}),
+        (None, None, 4, {1, 3, 7}),
+        (None, None, 999, set()),
+    ],
+    ids=[
+        "head-moved",
+        "approved-again",
+        "not-approved",
+        "scoped-to-own-login",
+        "own-review-missing",
+    ],
+)
+async def test_only_open_swe_approvals_other_than_the_kept_one_are_withdrawn(
+    keep_review_id: int | None,
+    keep_commit: str | None,
+    scope_to_review_id: int | None,
+    dismissed: set[int],
+) -> None:
+    def review(review_id: int, login: str, state: str, commit: str) -> dict[str, object]:
+        return {
+            "id": review_id,
+            "user": {"id": review_id, "login": login},
+            "state": state,
+            "commit_id": commit,
+        }
+
+    reviews = [
+        review(1, "open-swe[bot]", "APPROVED", "old"),
+        review(2, "alice", "APPROVED", "old"),
+        review(3, "open-swe[bot]", "APPROVED", "new"),
+        review(4, "open-swe[bot]", "COMMENTED", "old"),
+        review(5, "Open-SWE-Preview[bot]", "APPROVED", "old"),
+        review(6, "openswe-dev[bot]", "APPROVED", "old"),
+        review(7, "open-swe[bot]", "APPROVED", "new"),
+    ]
+    dismissals: list[int] = []
+
+    def github(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "GET":
+            return httpx2.Response(200, json=reviews)
+        review_id = int(request.url.path.split("/")[-2])
+        dismissals.append(review_id)
+        # A review GitHub no longer has is as good as dismissed; a refusal must be reported.
+        return httpx2.Response({5: 404, 6: 403}.get(review_id, 200), json={})
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(github)) as http:
+        pull = GitHubClient(http).repo("acme", "app").pull_request(9)
+        refused = await pull.withdraw_open_swe_approvals(
+            reason="stale",
+            keep_review_id=keep_review_id,
+            keep_commit=keep_commit,
+            scope_to_review_id=scope_to_review_id,
+        )
+
+    assert set(dismissals) == dismissed
+    # Scoping to a login excludes review 6 (a different login) before it is ever
+    # attempted, and an unknown scope review attempts nothing at all.
+    assert refused == ([6] if scope_to_review_id is None else [])
+
+
+@pytest.mark.parametrize("status,merged", [(200, True), (200, False), (409, False), (403, False)])
+async def test_merge_requires_github_confirmation(github, status, merged):
+    request = github(
+        AsyncMock(return_value=response({"merged": merged, "message": "Head changed"}, status))
+    )
+    action = actions.MergeAction(action="merge", sha="a" * 40, merge_method="squash")
+    if status == 200 and merged:
+        result = await actions.act_on_pull_request(_pull(1), action)
+        assert result == actions.PullRequestActionResult(action="merge", done=True)
+    else:
+        with pytest.raises(HTTPException, match="Head changed") as error:
+            await actions.act_on_pull_request(_pull(1), action)
+        assert error.value.status_code == (status if 400 <= status < 500 else 502)
+    assert request.await_args.args[1:] == (
+        "PUT",
+        "https://api.github.com/repos/acme/app/pulls/1/merge",
+    )
+    assert request.await_args.kwargs == {
+        "json": {"sha": "a" * 40, "merge_method": "squash"},
+        "max_retries": 0,
+    }
+
+
+async def test_pending_merge_enables_github_auto_merge() -> None:
+    requests: list[dict[str, object]] = []
+
+    def github(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "GET":
+            return response({"node_id": "PR_1", "head": {"sha": "a" * 40}})
+        requests.append(json.loads(request.content))
+        return response(
+            {
+                "data": {
+                    "enablePullRequestAutoMerge": {
+                        "pullRequest": {"autoMergeRequest": {"enabledAt": "2026-10-31T00:00:00Z"}}
+                    }
+                }
+            }
+        )
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(github)) as http:
+        pull = GitHubClient(http).repo("acme", "app").pull_request(1)
+        result = await actions.act_on_pull_request(
+            pull,
+            actions.MergeAction(
+                action="merge", sha="a" * 40, merge_method="merge", auto_merge=True
+            ),
+        )
+    assert result.done
+    assert requests[0]["variables"] == {
+        "input": {
+            "pullRequestId": "PR_1",
+            "mergeMethod": "MERGE",
+            "expectedHeadOid": "a" * 40,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"errors": [{"message": "Auto-merge is not allowed"}]},
+        {"data": {"enablePullRequestAutoMerge": {"pullRequest": {"autoMergeRequest": None}}}},
+    ],
+)
+async def test_auto_merge_requires_github_confirmation(payload: dict[str, object]) -> None:
+    def github(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "GET":
+            return response({"node_id": "PR_1", "head": {"sha": "a" * 40}})
+        return response(payload)
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(github)) as http:
+        pull = GitHubClient(http).repo("acme", "app").pull_request(1)
+        with pytest.raises(HTTPException) as error:
+            await actions.act_on_pull_request(
+                pull,
+                actions.MergeAction(
+                    action="merge", sha="a" * 40, merge_method="merge", auto_merge=True
+                ),
+            )
+    assert error.value.status_code == (422 if "errors" in payload else 502)
+
+
+async def test_auto_merge_refuses_a_changed_head() -> None:
+    def github(request: httpx2.Request) -> httpx2.Response:
+        assert request.method == "GET"
+        return response({"node_id": "PR_1", "head": {"sha": "b" * 40}})
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(github)) as http:
+        pull = GitHubClient(http).repo("acme", "app").pull_request(1)
+        with pytest.raises(HTTPException, match="head changed") as error:
+            await actions.act_on_pull_request(
+                pull,
+                actions.MergeAction(
+                    action="merge", sha="a" * 40, merge_method="squash", auto_merge=True
+                ),
+            )
+    assert error.value.status_code == 409
+
+
+@pytest.mark.parametrize("auto_merge", [False, True])
+async def test_squash_merge_sends_the_description_and_commits(github, monkeypatch, auto_merge):
+    commit = {
+        "commit": {"message": "fix: spelling", "author": {"name": "Ada", "email": "ada@x.com"}},
+        "author": {"login": "ada"},
+        "parents": [{"sha": "b" * 40}],
+    }
+    payloads = {
+        "https://api.github.com/repos/acme/app/pulls/1": {
+            "title": "fix: typo",
+            "body": "Fix.",
+            "node_id": "PR_1",
+            "head": {"sha": "a" * 40},
+        },
+        "https://api.github.com/graphql": {
+            "data": {
+                "enablePullRequestAutoMerge": {
+                    "pullRequest": {"autoMergeRequest": {"enabledAt": "2026-10-31T00:00:00Z"}}
+                }
+            }
+        },
+        "https://api.github.com/repos/acme/app/pulls/1/commits": [commit],
+        "https://api.github.com/user": {"login": "octocat"},
+        "https://api.github.com/repos/acme/app/pulls/1/merge": {"merged": True},
+    }
+    request = github(AsyncMock(side_effect=lambda _, __, url, **___: response(payloads[url])))
+    monkeypatch.setattr(github_http, "github_request", request)
+    action = actions.MergeAction(
+        action="merge", sha="a" * 40, merge_method="squash", auto_merge=auto_merge
+    )
+
+    await actions.act_on_pull_request(_pull(1), action)
+
+    if auto_merge:
+        assert request.await_args.kwargs["json"]["variables"]["input"] == {
+            "pullRequestId": "PR_1",
+            "mergeMethod": "SQUASH",
+            "expectedHeadOid": "a" * 40,
+            "commitBody": "Fix.\n\n* fix: spelling\n\nCo-authored-by: Ada <ada@x.com>",
+        }
+        return
+    assert request.await_args.kwargs["json"] == {
+        "sha": "a" * 40,
+        "merge_method": "squash",
+        "commit_message": "Fix.\n\n* fix: spelling\n\nCo-authored-by: Ada <ada@x.com>",
+    }
+
+
+@pytest.mark.parametrize("status,state", [(200, "closed"), (200, "open"), (403, "open")])
+async def test_close_requires_github_confirmation(github, status, state):
+    request = github(
+        AsyncMock(return_value=response({"state": state, "message": "Not permitted"}, status))
+    )
+    action = actions.CloseAction(action="close")
+    if status == 200 and state == "closed":
+        result = await actions.act_on_pull_request(_pull(7), action)
+        assert result == actions.PullRequestActionResult(action="close", done=True)
+    else:
+        with pytest.raises(HTTPException, match="Not permitted"):
+            await actions.act_on_pull_request(_pull(7), action)
+    assert request.await_args.args[1:] == ("PATCH", "https://api.github.com/repos/acme/app/pulls/7")
+    assert request.await_args.kwargs == {"json": {"state": "closed"}, "max_retries": 0}
+
+
+async def test_a_close_reason_is_posted_as_a_comment_before_closing(github):
+    request = github(
+        AsyncMock(
+            side_effect=[
+                response({"comments": 0}),
+                response({"id": 1}, 201),
+                response({"state": "closed"}),
+            ]
+        )
+    )
+    action = actions.CloseAction(action="close", reason="  Superseded by #8  ")
+
+    await actions.act_on_pull_request(_pull(7), action)
+
+    calls = [(call.args[1:], call.kwargs.get("json")) for call in request.await_args_list]
+    assert calls == [
+        (("GET", "https://api.github.com/repos/acme/app/issues/7"), None),
+        (
+            ("POST", "https://api.github.com/repos/acme/app/issues/7/comments"),
+            {"body": "Superseded by #8"},
+        ),
+        (("PATCH", "https://api.github.com/repos/acme/app/pulls/7"), {"state": "closed"}),
+    ]
+
+
+async def test_retrying_a_close_does_not_post_the_same_reason_twice(github):
+    request = github(
+        AsyncMock(
+            side_effect=[
+                response({"comments": 101}),
+                response([{"body": "Stale"}]),
+                response({"state": "closed"}),
+            ]
+        )
+    )
+    action = actions.CloseAction(action="close", reason="Stale")
+
+    await actions.act_on_pull_request(_pull(7), action)
+
+    assert [call.args[1:] for call in request.await_args_list] == [
+        ("GET", "https://api.github.com/repos/acme/app/issues/7"),
+        ("GET", "https://api.github.com/repos/acme/app/issues/7/comments?per_page=100&page=2"),
+        ("PATCH", "https://api.github.com/repos/acme/app/pulls/7"),
+    ]
+
+
+async def test_a_refused_reason_comment_leaves_the_pull_request_open(github):
+    request = github(
+        AsyncMock(side_effect=[response({"comments": 0}), response({"message": "Locked"}, 403)])
+    )
+    action = actions.CloseAction(action="close", reason="Stale")
+
+    with pytest.raises(HTTPException, match="Locked"):
+        await actions.act_on_pull_request(_pull(7), action)
+
+    assert request.await_count == 2
+
+
+async def test_marking_ready_reads_the_node_id_over_rest_then_confirms_the_mutation(
+    github, monkeypatch
+):
+    monkeypatch.setattr(actions, "GITHUB_API_BASE", "https://fake-gh")
+    monkeypatch.setattr(actions, "GITHUB_GRAPHQL", "https://fake-gh/graphql")
+    request = github(
+        AsyncMock(
+            side_effect=[
+                response({"node_id": "PR_node_7", "draft": True}),
+                response(
+                    {"data": {"markPullRequestReadyForReview": {"pullRequest": {"isDraft": False}}}}
+                ),
+            ]
+        )
+    )
+    result = await actions.act_on_pull_request(
+        _pull(7), actions.MarkReadyAction(action="mark-ready")
+    )
+    assert result == actions.PullRequestActionResult(action="mark-ready", done=True)
+    assert [call.args[1:] for call in request.await_args_list] == [
+        ("GET", "https://fake-gh/repos/acme/app/pulls/7"),
+        ("POST", "https://fake-gh/graphql"),
+    ]
+    assert request.await_args_list[0].kwargs == {"max_retries": 0}
+    assert request.await_args_list[1].kwargs["json"]["variables"] == {"pullRequestId": "PR_node_7"}
+
+
+@pytest.mark.parametrize("draft", [True, False])
+async def test_a_closed_pull_request_cannot_be_marked_ready(github, draft):
+    request = github(
+        AsyncMock(
+            return_value=response({"node_id": "PR_node_7", "state": "closed", "draft": draft})
+        )
+    )
+    with pytest.raises(HTTPException, match="closed and cannot be marked ready") as error:
+        await actions.act_on_pull_request(_pull(7), actions.MarkReadyAction(action="mark-ready"))
+    assert error.value.status_code == 409
+    assert request.await_count == 1
+
+
+async def test_an_unreadable_pull_request_never_reaches_the_mutation(github):
+    request = github(AsyncMock(return_value=response({"message": "Not Found"}, 404)))
+    with pytest.raises(HTTPException, match="Not Found") as error:
+        await actions.act_on_pull_request(_pull(7), actions.MarkReadyAction(action="mark-ready"))
+    assert error.value.status_code == 404
+    assert request.await_count == 1
+
+
+@pytest.mark.parametrize("status", [202, 422])
+async def test_updating_the_branch_pins_the_head_the_viewer_saw(github, status):
+    request = github(
+        AsyncMock(return_value=response({"message": "expected head sha didn't match"}, status))
+    )
+    action = actions.UpdateBranchAction(action="update-branch", sha="b" * 40)
+    if status == 202:
+        result = await actions.act_on_pull_request(_pull(7), action)
+        assert result == actions.PullRequestActionResult(action="update-branch", done=True)
+    else:
+        with pytest.raises(HTTPException, match="expected head sha") as error:
+            await actions.act_on_pull_request(_pull(7), action)
+        assert error.value.status_code == 422
+    assert request.await_args.args[1:] == (
+        "PUT",
+        "https://api.github.com/repos/acme/app/pulls/7/update-branch",
+    )
+    assert request.await_args.kwargs == {
+        "json": {"expected_head_sha": "b" * 40},
+        "max_retries": 0,
+    }

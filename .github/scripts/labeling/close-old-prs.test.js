@@ -48,7 +48,7 @@ function fixture({ createdAt, comments = [], labels = [] }) {
   return { calls, core, github }
 }
 
-const context = { repo: { owner: "langchain-ai", repo: "alephat" } }
+const context = { repo: { owner: "langchain-ai", repo: "open-swe" } }
 const now = new Date("2026-09-10T00:00:00Z")
 
 test("calculates PR age in whole days", () => {

@@ -1,20 +1,35 @@
 /** @vitest-environment jsdom */
 
+import { TooltipProvider } from "@langchain/macaw-components/Tooltip"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { AutomationEditor } from "./AutomationEditor"
 import { useSession } from "@/lib/session"
 
+const mocks = vi.hoisted(() => ({
+  createMutate: vi.fn(),
+  updateMutate: vi.fn(),
+  triggerMutate: vi.fn(),
+  navigate: vi.fn(),
+  triggerPending: false,
+  workspaces: [
+    { slug: "default", name: "Default", repos: [], is_default: true },
+    { slug: "oss", name: "OSS", repos: ["acme/oss"], is_default: false },
+    { slug: "core", name: "Core", repos: [], is_default: false },
+  ],
+}))
+
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a>,
-  useNavigate: () => vi.fn(),
+  useNavigate: () => mocks.navigate,
 }))
 vi.mock("@/features/agents/lib/queries", () => ({
   useCreateAgentSchedule: () => ({
     error: null,
     isPending: false,
-    mutate: vi.fn(),
+    mutate: mocks.createMutate,
   }),
   useDeleteAgentSchedule: () => ({
     error: null,
@@ -24,7 +39,14 @@ vi.mock("@/features/agents/lib/queries", () => ({
   useUpdateAgentSchedule: () => ({
     error: null,
     isPending: false,
-    mutate: vi.fn(),
+    mutate: mocks.updateMutate,
+  }),
+  useTriggerAgentSchedule: () => ({
+    isPending: mocks.triggerPending,
+    mutate: mocks.triggerMutate,
+  }),
+  useWorkspaceOptions: () => ({
+    data: { default_slug: "default", workspaces: mocks.workspaces },
   }),
 }))
 vi.mock("@/features/agents/lib/provider/useModelOptions", () => ({
@@ -39,42 +61,128 @@ vi.mock("@/lib/profile", () => ({
 vi.mock("@/lib/session", () => ({
   useSession: vi.fn(),
 }))
+vi.mock("@/lib/slack-channels", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/slack-channels")>()),
+  useSlackChannelDirectory: () => ({
+    data: undefined,
+    isLoading: false,
+    isError: false,
+  }),
+}))
 vi.mock("@/features/settings/components/RepoSelector", () => ({
-  RepoSelector: () => <div />,
+  RepoSelector: ({
+    onRepoChange,
+    placeholder,
+  }: {
+    onRepoChange: (repo: string | null) => void
+    placeholder: string
+  }) => <button onClick={() => onRepoChange("acme/oss")}>{placeholder}</button>,
 }))
 vi.mock("@/features/automations/components/AutomationRuns", () => ({
   AutomationRuns: () => <div />,
 }))
-vi.mock("@/features/automations/components/ScheduleTriggerPicker", () => ({
-  ScheduleTriggerPicker: () => <div />,
+vi.mock("@/features/automations/components/TriggerMenu", () => ({
+  TriggerMenu: ({
+    onGitHub,
+    onLinear,
+  }: {
+    onGitHub?: () => void
+    onLinear?: () => void
+  }) =>
+    onGitHub ? (
+      <>
+        <button onClick={onGitHub}>Add GitHub trigger</button>
+        <button onClick={onLinear}>Add Linear trigger</button>
+      </>
+    ) : null,
 }))
 vi.mock("@/features/agents/components/ModelPicker", () => ({
   ModelPicker: () => <div />,
 }))
-vi.mock("@/components/ui/switch", () => ({
-  Switch: () => <input type="checkbox" />,
-}))
-vi.mock("@/components/ui/select", () => ({
-  Select: ({ children }: { children: React.ReactNode }) => (
-    <div>{children}</div>
-  ),
-  SelectContent: ({ children }: { children: React.ReactNode }) => (
-    <div>{children}</div>
-  ),
-  SelectItem: ({ children }: { children: React.ReactNode }) => (
-    <div>{children}</div>
-  ),
-  SelectTrigger: ({ children }: { children: React.ReactNode }) => (
-    <div>{children}</div>
-  ),
-  SelectValue: () => <div />,
-}))
-
 afterEach(() => {
+  cleanup()
   vi.clearAllMocks()
+  mocks.triggerPending = false
 })
 
+const TEMPLATE = {
+  id: "nightly",
+  name: "Nightly",
+  description: "",
+  prompt: "Check dependencies",
+  schedule: "0 9 * * *",
+  icon: (() => null) as never,
+}
+
+function signInAsAdmin() {
+  vi.mocked(useSession).mockReturnValue({
+    data: { is_admin: true },
+  } as unknown as ReturnType<typeof useSession>)
+}
+
+const SCHEDULE = {
+  id: "sched_1",
+  name: "Nightly",
+  prompt: "Check dependencies",
+  schedule: "0 9 * * *",
+  triggers: [{ id: "trigger_1", kind: "schedule" as const, cron: "0 9 * * *" }],
+  scope: "workspace" as const,
+  workspace: "default",
+  adminThread: false,
+  model: "Default",
+  enabled: false,
+}
+
 describe("AutomationEditor", () => {
+  it("runs a saved automation, including a paused one, and opens its thread", () => {
+    signInAsAdmin()
+    mocks.triggerMutate.mockImplementationOnce(
+      (
+        _id: string,
+        options: { onSuccess: (result: { thread_id: string }) => void }
+      ) => options.onSuccess({ thread_id: "run_1" })
+    )
+    render(<AutomationEditor mode="edit" schedule={SCHEDULE} />, {
+      wrapper: TooltipProvider,
+    })
+
+    fireEvent.click(screen.getByRole("button", { name: "Run now" }))
+
+    expect(mocks.triggerMutate.mock.calls[0]?.[0]).toBe("sched_1")
+    expect(mocks.navigate).toHaveBeenCalledWith({
+      to: "/agents/$threadId",
+      params: { threadId: "run_1" },
+    })
+  })
+
+  it("requires saving edits before running and prevents duplicate runs", () => {
+    signInAsAdmin()
+    const { rerender } = render(
+      <AutomationEditor mode="edit" schedule={SCHEDULE} />,
+      { wrapper: TooltipProvider }
+    )
+    fireEvent.change(screen.getByLabelText("Automation name"), {
+      target: { value: "Changed" },
+    })
+    const run = screen.getByRole("button", {
+      name: "Run now",
+    }) as HTMLButtonElement
+    expect(run.disabled).toBe(true)
+    fireEvent.click(run)
+    expect(mocks.triggerMutate).not.toHaveBeenCalled()
+
+    fireEvent.change(screen.getByLabelText("Automation name"), {
+      target: { value: SCHEDULE.name },
+    })
+    expect(run.disabled).toBe(false)
+    mocks.triggerPending = true
+    rerender(<AutomationEditor mode="edit" schedule={SCHEDULE} />)
+    expect(
+      (screen.getByRole("button", { name: "Starting…" }) as HTMLButtonElement)
+        .disabled
+    ).toBe(true)
+  })
+
   it("shows the admin-thread checkbox only to admins", () => {
     vi.mocked(useSession).mockReturnValue({
       data: { is_admin: true },
@@ -95,5 +203,171 @@ describe("AutomationEditor", () => {
     expect(memberMarkup).not.toContain("Run as admin thread")
     expect(memberMarkup).toContain("This workspace automation is read-only")
     expect(memberMarkup).not.toContain("Save changes")
+  })
+
+  it("shows the workspace an existing automation runs in", () => {
+    vi.mocked(useSession).mockReturnValue({
+      data: { is_admin: true },
+    } as unknown as ReturnType<typeof useSession>)
+
+    const markup = renderToStaticMarkup(
+      <TooltipProvider>
+        <AutomationEditor
+          mode="edit"
+          schedule={{
+            id: "sched_1",
+            name: "Nightly",
+            prompt: "Check dependencies",
+            schedule: "0 9 * * *",
+            triggers: [
+              { id: "trigger_1", kind: "schedule", cron: "0 9 * * *" },
+            ],
+            scope: "workspace",
+            workspace: "core",
+            adminThread: false,
+            model: "Default",
+            enabled: true,
+          }}
+        />
+      </TooltipProvider>
+    )
+
+    expect(markup).toContain(">Core<")
+    expect(markup).not.toContain(">OSS<")
+  })
+
+  it("starts a new automation in the default workspace", () => {
+    signInAsAdmin()
+    render(<AutomationEditor mode="create" template={TEMPLATE} />, {
+      wrapper: TooltipProvider,
+    })
+
+    expect(
+      screen.getByRole("button", { name: "Workspace" }).textContent
+    ).toContain("Default")
+    fireEvent.click(screen.getByRole("button", { name: "Create" }))
+
+    expect(mocks.createMutate.mock.calls[0]?.[0]).toMatchObject({
+      workspace: "default",
+    })
+  })
+
+  it("sends a workspace the user picked", () => {
+    signInAsAdmin()
+    render(<AutomationEditor mode="create" template={TEMPLATE} />, {
+      wrapper: TooltipProvider,
+    })
+
+    fireEvent.keyDown(screen.getByRole("button", { name: "Workspace" }), {
+      key: "Enter",
+    })
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Core/ }))
+    fireEvent.click(screen.getByRole("button", { name: "Create" }))
+
+    expect(mocks.createMutate.mock.calls[0]?.[0]).toMatchObject({
+      workspace: "core",
+    })
+  })
+
+  it("lets an automation whose workspace was deleted move to the only one left", () => {
+    signInAsAdmin()
+    const previous = mocks.workspaces
+    mocks.workspaces = [previous[0]!]
+    try {
+      render(
+        <AutomationEditor
+          mode="edit"
+          schedule={{
+            id: "sched_1",
+            name: "Nightly",
+            prompt: "Check dependencies",
+            schedule: "0 9 * * *",
+            triggers: [
+              { id: "trigger_1", kind: "schedule", cron: "0 9 * * *" },
+            ],
+            scope: "workspace",
+            workspace: "gone",
+            adminThread: false,
+            model: "Default",
+            enabled: true,
+          }}
+        />,
+        { wrapper: TooltipProvider }
+      )
+
+      expect(screen.getByText(/gone.*no longer exists/)).toBeTruthy()
+      fireEvent.keyDown(screen.getByRole("button", { name: "Workspace" }), {
+        key: "Enter",
+      })
+      expect(screen.getByRole("menuitem", { name: /^Default/ })).toBeTruthy()
+    } finally {
+      mocks.workspaces = previous
+    }
+  })
+
+  it("saves a GitHub trigger with its own repository beside the schedule", () => {
+    signInAsAdmin()
+    render(
+      <AutomationEditor
+        mode="edit"
+        schedule={{
+          id: "sched_1",
+          name: "Nightly",
+          prompt: "Check dependencies",
+          schedule: "0 9 * * *",
+          triggers: [{ id: "trigger_1", kind: "schedule", cron: "0 9 * * *" }],
+          scope: "workspace",
+          workspace: "default",
+          adminThread: false,
+          model: "Default",
+          enabled: true,
+        }}
+      />,
+      { wrapper: TooltipProvider }
+    )
+
+    fireEvent.click(screen.getByRole("button", { name: "Add GitHub trigger" }))
+    fireEvent.click(screen.getByRole("button", { name: "Choose repository" }))
+    fireEvent.click(screen.getByRole("button", { name: "PR merged" }))
+    fireEvent.click(screen.getByRole("button", { name: "PR closed" }))
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }))
+
+    expect(mocks.updateMutate.mock.calls[0]?.[0].body.triggers).toEqual([
+      { kind: "schedule", cron: "0 9 * * *" },
+      {
+        kind: "github",
+        repo: "acme/oss",
+        events: ["pull_request.closed", "pull_request.merged"],
+      },
+    ])
+  })
+
+  it("saves a Linear trigger with its team and filters", () => {
+    signInAsAdmin()
+    render(<AutomationEditor mode="create" template={TEMPLATE} />, {
+      wrapper: TooltipProvider,
+    })
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Linear trigger" }))
+    fireEvent.change(screen.getByLabelText("Team key"), {
+      target: { value: "eng" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: "Label added" }))
+    fireEvent.change(screen.getByLabelText("Labels"), {
+      target: { value: "agent-fix, p1" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: "Create" }))
+
+    expect(mocks.createMutate.mock.calls[0]?.[0].triggers).toEqual([
+      { kind: "schedule", cron: "0 9 * * *" },
+      {
+        kind: "linear",
+        team: "ENG",
+        events: ["issue.labeled"],
+        labels: ["agent-fix", "p1"],
+        project: null,
+        max_runs_per_hour: null,
+      },
+    ])
   })
 })

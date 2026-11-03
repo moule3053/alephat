@@ -13,6 +13,9 @@ import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary"
 import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin"
 import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin"
 import { PlainTextPlugin } from "@lexical/react/LexicalPlainTextPlugin"
+import { Tooltip } from "@langchain/macaw-components/Tooltip"
+import { FileIcon } from "@phosphor-icons/react/dist/ssr/File"
+import { HashIcon } from "@phosphor-icons/react/dist/ssr/Hash"
 import {
   $applyNodeReplacement,
   $createLineBreakNode,
@@ -34,8 +37,8 @@ import {
   KEY_ESCAPE_COMMAND,
   KEY_TAB_COMMAND,
 } from "lexical"
-import { File as FileIcon } from "lucide-react"
 
+import { SlackUserMention } from "../messages/SlackMrkdwn"
 import { SkillBadge } from "../SkillBadge"
 import { splitPromptIntoSegments } from "./composerMentions"
 import { basenameOfPath, serializeComposerFileLink } from "./composerTrigger"
@@ -47,7 +50,6 @@ import type {
   SerializedLexicalNode,
   Spread,
 } from "lexical"
-import { Tooltip, TooltipPopup, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 
 export type ComposerCommandKey =
@@ -66,7 +68,7 @@ export interface ComposerPromptEditorHandle {
 
 const EMPTY_SKILL_NAMES = new Set<string>()
 const MENTION_CHIP_CLASS_NAME =
-  "inline-flex max-w-full select-none items-center gap-1 rounded-md border border-border/70 bg-accent/40 px-1.5 py-px align-middle text-[12px] font-medium leading-[1.1] text-foreground"
+  "inline-flex max-w-full select-none items-center gap-space-1 rounded-md border border-subtle bg-surface-level-1-hover/40 px-space-1 py-px align-middle text-xxs font-medium leading-[1.1] text-primary"
 
 type SerializedComposerMentionNode = Spread<
   { path: string; source: string; type: "composer-mention"; version: 1 },
@@ -80,27 +82,25 @@ type SerializedComposerSkillNode = Spread<
 
 function ComposerMentionChip({ path }: { path: string }) {
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <span
-            className={MENTION_CHIP_CLASS_NAME}
-            contentEditable={false}
-            spellCheck={false}
-          >
-            <FileIcon className="size-3.5 shrink-0 opacity-70" aria-hidden />
-            <span className="truncate leading-tight select-none">
-              {basenameOfPath(path)}
-            </span>
-          </span>
-        }
-      />
-      <TooltipPopup
-        className="max-w-[30rem] leading-tight break-words whitespace-normal"
-        side="top"
+    <Tooltip
+      side="top"
+      title={path}
+      tooltipClassName="max-w-[30rem] break-words text-primary"
+    >
+      <span
+        className={MENTION_CHIP_CLASS_NAME}
+        contentEditable={false}
+        spellCheck={false}
       >
-        {path}
-      </TooltipPopup>
+        <FileIcon
+          aria-hidden
+          className="size-3.5 shrink-0 opacity-70"
+          weight="regular"
+        />
+        <span className="truncate leading-tight select-none">
+          {basenameOfPath(path)}
+        </span>
+      </span>
     </Tooltip>
   )
 }
@@ -244,11 +244,143 @@ function $createComposerSkillNode(
   return $applyNodeReplacement(new ComposerSkillNode(name, source))
 }
 
+type SlackReferenceKind = "user" | "channel"
+
+type SerializedComposerSlackNode = Spread<
+  {
+    kind: SlackReferenceKind
+    referenceId: string
+    name: string
+    source: string
+    type: "composer-slack"
+    version: 1
+  },
+  SerializedLexicalNode
+>
+
+/** A Slack reference rendered as a chip over its canonical token. */
+class ComposerSlackNode extends DecoratorNode<React.ReactElement> {
+  __kind: SlackReferenceKind
+  __referenceId: string
+  __name: string
+  __source: string
+
+  static override getType(): string {
+    return "composer-slack"
+  }
+
+  static override clone(node: ComposerSlackNode): ComposerSlackNode {
+    return new ComposerSlackNode(
+      node.__kind,
+      node.__referenceId,
+      node.__name,
+      node.__source,
+      node.__key
+    )
+  }
+
+  static override importJSON(
+    serialized: SerializedComposerSlackNode
+  ): ComposerSlackNode {
+    return $createComposerSlackNode(
+      serialized.kind,
+      serialized.referenceId,
+      serialized.name,
+      serialized.source
+    ).updateFromJSON(serialized)
+  }
+
+  constructor(
+    kind: SlackReferenceKind,
+    referenceId: string,
+    name: string,
+    source: string,
+    key?: NodeKey
+  ) {
+    super(key)
+    this.__kind = kind
+    this.__referenceId = referenceId
+    this.__name = name
+    this.__source = source
+  }
+
+  override exportJSON(): SerializedComposerSlackNode {
+    return {
+      ...super.exportJSON(),
+      kind: this.__kind,
+      referenceId: this.__referenceId,
+      name: this.__name,
+      source: this.__source,
+      type: "composer-slack",
+      version: 1,
+    }
+  }
+
+  override createDOM(): HTMLElement {
+    const dom = document.createElement("span")
+    dom.className = "relative inline-flex align-middle leading-none"
+    return dom
+  }
+
+  override updateDOM(): false {
+    return false
+  }
+
+  override getTextContent(): string {
+    return this.__source
+  }
+
+  override isInline(): true {
+    return true
+  }
+
+  override decorate(): React.ReactElement {
+    return (
+      <span
+        className={MENTION_CHIP_CLASS_NAME}
+        contentEditable={false}
+        spellCheck={false}
+        title={this.__referenceId}
+      >
+        {this.__kind === "user" ? (
+          <span className="truncate leading-tight select-none">
+            <SlackUserMention userId={this.__referenceId} />
+          </span>
+        ) : (
+          <>
+            <HashIcon
+              aria-hidden
+              className="size-3.5 shrink-0 opacity-70"
+              weight="regular"
+            />
+            <span className="truncate leading-tight select-none">
+              {this.__name}
+            </span>
+          </>
+        )}
+      </span>
+    )
+  }
+}
+
+function $createComposerSlackNode(
+  kind: SlackReferenceKind,
+  referenceId: string,
+  name: string,
+  source: string
+): ComposerSlackNode {
+  return $applyNodeReplacement(
+    new ComposerSlackNode(kind, referenceId, name, source)
+  )
+}
+
 function isDecoratorNode(
   node: unknown
-): node is ComposerMentionNode | ComposerSkillNode {
+): node is ComposerMentionNode | ComposerSkillNode | ComposerSlackNode {
   return (
-    node instanceof ComposerMentionNode || node instanceof ComposerSkillNode
+    node instanceof ComposerMentionNode ||
+    node instanceof ComposerSkillNode ||
+    node instanceof ComposerSlackNode
   )
 }
 
@@ -432,6 +564,19 @@ function $setComposerPrompt(
       $appendTextWithLineBreaks(paragraph, segment.text)
     } else if (segment.type === "mention") {
       paragraph.append($createComposerMentionNode(segment.path, segment.source))
+    } else if (segment.type === "user") {
+      paragraph.append(
+        $createComposerSlackNode("user", segment.userId, "", segment.source)
+      )
+    } else if (segment.type === "channel") {
+      paragraph.append(
+        $createComposerSlackNode(
+          "channel",
+          segment.channelId,
+          segment.name,
+          segment.source
+        )
+      )
     } else {
       paragraph.append($createComposerSkillNode(segment.name, segment.source))
     }
@@ -643,7 +788,7 @@ function ComposerPromptEditorInner({
             aria-label="Message"
             aria-placeholder={placeholder}
             className={cn(
-              "block max-h-50 w-full overflow-y-auto bg-transparent text-[14px] leading-relaxed break-words whitespace-pre-wrap text-foreground focus:outline-none",
+              "block max-h-50 w-full overflow-y-auto bg-transparent text-sm leading-relaxed break-words whitespace-pre-wrap text-primary focus:outline-none",
               className
             )}
             data-testid="composer-editor"
@@ -652,7 +797,7 @@ function ComposerPromptEditorInner({
           />
         }
         placeholder={
-          <div className="pointer-events-none absolute inset-0 text-[14px] leading-relaxed text-muted-foreground/60">
+          <div className="pointer-events-none absolute inset-0 text-sm leading-relaxed text-placeholder">
             {placeholder}
           </div>
         }
@@ -669,9 +814,9 @@ export function ComposerPromptEditor(props: ComposerPromptEditorProps) {
   const initialSkillNamesRef = useRef(props.skillNames ?? new Set<string>())
   const initialConfig = useMemo<InitialConfigType>(
     () => ({
-      namespace: "alephat-composer",
+      namespace: "open-swe-composer",
       editable: true,
-      nodes: [ComposerMentionNode, ComposerSkillNode],
+      nodes: [ComposerMentionNode, ComposerSkillNode, ComposerSlackNode],
       editorState: () => {
         $setComposerPrompt(
           initialValueRef.current,

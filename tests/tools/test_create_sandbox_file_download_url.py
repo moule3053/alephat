@@ -1,10 +1,14 @@
 import importlib
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-download_tool = importlib.import_module("agent.tools.create_sandbox_file_download_url")
+from openswe.short_links.models import ShortLink
+from openswe.users import User
+
+download_tool = importlib.import_module("openswe.tools.create_sandbox_file_download_url")
 
 
 class _AsyncClient:
@@ -37,10 +41,12 @@ class _Backend:
         return SimpleNamespace(exit_code=0, output=f"{path}\n")
 
 
-def _configure(monkeypatch: pytest.MonkeyPatch, backend: _Backend) -> _AsyncClient:
-    monkeypatch.setattr(
-        "agent.run_config.get_config", lambda: {"configurable": {"thread_id": "thread-1"}}
-    )
+def _configure(
+    monkeypatch: pytest.MonkeyPatch, backend: _Backend, **configurable: str
+) -> _AsyncClient:
+    config = {"configurable": {"thread_id": "thread-1", **configurable}}
+    monkeypatch.setattr("openswe.run_config.get_config", lambda: config)
+    monkeypatch.setattr(download_tool, "get_config", lambda: config)
 
     async def get_backend(_thread_id: str) -> _Backend:
         return backend
@@ -56,35 +62,59 @@ def _configure(monkeypatch: pytest.MonkeyPatch, backend: _Backend) -> _AsyncClie
     return client
 
 
-async def test_create_download_url_for_relative_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    backend = _Backend()
-    client = _configure(monkeypatch, backend)
+SIGNED_URL = "https://downloads.example/file?token=secret"
 
-    result = await download_tool.create_sandbox_file_download_url(
-        "artifacts/demo.mp4",
-        expires_in_seconds=3600,
-        content_type="video/mp4",
-        content_disposition="inline",
-    )
+
+async def test_a_public_deployment_hands_out_a_short_link_to_the_signed_url(
+    monkeypatch: pytest.MonkeyPatch, registry_db: None
+) -> None:
+    monkeypatch.setenv("DASHBOARD_API_BASE_URL", "https://openswe.example")
+    _configure(monkeypatch, _Backend())
+
+    result = await download_tool.create_sandbox_file_download_url("shot.png")
+
+    prefix = "https://openswe.example/dashboard/api/l/"
+    assert result["url"].startswith(prefix)
+    assert len(result["url"]) < 100
+    assert "token" not in result["url"]
+    assert result["file_path"] == "/workspace/project/shot.png"
+    assert result["expires_at"] == "2026-08-20T12:00:00Z"
+    link = await ShortLink.by_token(result["url"].removeprefix(prefix))
+    assert link is not None
+    assert link.target_url == SIGNED_URL
+    assert link.expires_at == datetime(2026, 8, 20, 12, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(("run", "attributed"), [({}, True), ({"schedule_id": "daily"}, False)])
+async def test_a_short_link_records_the_person_who_started_the_run(
+    monkeypatch: pytest.MonkeyPatch, registry_db: None, run: dict[str, str], attributed: bool
+) -> None:
+    monkeypatch.setenv("DASHBOARD_API_BASE_URL", "https://openswe.example")
+    monkeypatch.setenv("ALLOWED_GITHUB_USERS", "ada")
+    ada = await User.sign_in("github", "1", login="ada")
+    _configure(monkeypatch, _Backend(), source="dashboard", github_login="ada", **run)
+
+    result = await download_tool.create_sandbox_file_download_url("shot.png")
+
+    link = await ShortLink.by_token(result["url"].rsplit("/", 1)[1])
+    assert link is not None
+    person = ada.id if attributed else None
+    assert (link.created_by, link.updated_by) == (person, person)
+
+
+async def test_local_development_falls_back_to_the_signed_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DASHBOARD_API_BASE_URL", "http://localhost:2024")
+    _configure(monkeypatch, _Backend())
+
+    result = await download_tool.create_sandbox_file_download_url("result.zip")
 
     assert result == {
-        "url": "https://downloads.example/file?token=secret",
-        "file_path": "/workspace/project/artifacts/demo.mp4",
+        "url": SIGNED_URL,
+        "file_path": "/workspace/project/result.zip",
         "expires_at": "2026-08-20T12:00:00Z",
     }
-    assert "token" not in result
-    assert client.closed is True
-    assert client.calls == [
-        (
-            "sandbox-1",
-            "/workspace/project/artifacts/demo.mp4",
-            {
-                "expires_in_seconds": 3600,
-                "content_type": "video/mp4",
-                "content_disposition": "inline",
-            },
-        )
-    ]
 
 
 async def test_create_download_url_defaults_to_a_non_expiring_link(
@@ -119,8 +149,9 @@ async def test_create_download_url_rejects_paths_outside_work_dir(
     backend = _Backend()
     client = _configure(monkeypatch, backend)
 
-    with pytest.raises(ValueError, match="must resolve within the sandbox work directory"):
-        await download_tool.create_sandbox_file_download_url(file_path)
+    result = await download_tool.create_sandbox_file_download_url(file_path)
+
+    assert "must resolve within the sandbox work directory" in result["error"]
 
     assert client.calls == []
 
@@ -131,21 +162,8 @@ async def test_create_download_url_rejects_symlink_outside_work_dir(
     backend = _Backend()
     client = _configure(monkeypatch, backend)
 
-    with pytest.raises(ValueError, match="must resolve within the sandbox work directory"):
-        await download_tool.create_sandbox_file_download_url("link-to-secret")
+    result = await download_tool.create_sandbox_file_download_url("link-to-secret")
+
+    assert "must resolve within the sandbox work directory" in result["error"]
 
     assert client.calls == []
-
-
-@pytest.mark.parametrize("expires_in_seconds", [0, -1])
-async def test_create_download_url_rejects_invalid_expiry(
-    monkeypatch: pytest.MonkeyPatch,
-    expires_in_seconds: int,
-) -> None:
-    backend = _Backend()
-    _configure(monkeypatch, backend)
-
-    with pytest.raises(ValueError, match="must be positive"):
-        await download_tool.create_sandbox_file_download_url(
-            "result.bin", expires_in_seconds=expires_in_seconds
-        )

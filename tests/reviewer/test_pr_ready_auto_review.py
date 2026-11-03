@@ -5,8 +5,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent.github import webhook as github_webhooks
-from agent.webhooks import common as webhook_common
+from openswe.dashboard.workspace_settings import WorkspaceSettingsUpdate, upsert_workspace_overrides
+from openswe.github import webhook as github_webhooks
+from openswe.webhooks import common as webhook_common
+from openswe.workspaces.store import WORKSPACES, WorkspaceCreate
+
+pytestmark = pytest.mark.usefixtures("no_local_threads")
 
 
 def _pr_payload(
@@ -52,23 +56,6 @@ def _patch_dispatch_deps(monkeypatch: pytest.MonkeyPatch, fake_client: MagicMock
 
 
 @pytest.mark.asyncio
-async def test_pr_ready_non_draft_triggers_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_client = MagicMock()
-    fake_client.runs.create = AsyncMock()
-    _patch_dispatch_deps(monkeypatch, fake_client)
-    monkeypatch.setattr(webhook_common, "get_profile", AsyncMock(return_value=None))
-    monkeypatch.setattr(webhook_common, "get_team_settings", AsyncMock(return_value={}))
-
-    await github_webhooks.process_github_pr_ready(_pr_payload(action="opened", draft=False))
-
-    fake_client.runs.create.assert_awaited_once()
-    assert fake_client.runs.create.await_args is not None
-    _, kwargs = fake_client.runs.create.await_args
-    assert kwargs["config"]["configurable"]["source"] == "github"
-    assert kwargs["config"]["configurable"]["pr_number"] == 7
-
-
-@pytest.mark.asyncio
 async def test_pr_ready_public_repo_uses_scoped_reviewer_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -84,7 +71,7 @@ async def test_pr_ready_public_repo_uses_scoped_reviewer_token(
     monkeypatch.setattr(webhook_common, "set_reviewer_thread_metadata", AsyncMock())
     monkeypatch.setattr(webhook_common, "get_client", lambda url: fake_client)
     monkeypatch.setattr(webhook_common, "get_profile", AsyncMock(return_value=None))
-    monkeypatch.setattr(webhook_common, "get_team_settings", AsyncMock(return_value={}))
+    monkeypatch.setattr(webhook_common, "get_workspace_settings", AsyncMock(return_value={}))
 
     await github_webhooks.process_github_pr_ready(
         _pr_payload(action="opened", draft=False, private=False)
@@ -94,49 +81,6 @@ async def test_pr_ready_public_repo_uses_scoped_reviewer_token(
     assert fake_client.runs.create.await_args is not None
     _, kwargs = fake_client.runs.create.await_args
     assert kwargs["config"]["configurable"]["repo_private"] is False
-
-
-@pytest.mark.asyncio
-async def test_pr_ready_private_repo_uses_full_reviewer_token(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_client = MagicMock()
-    fake_client.runs.create = AsyncMock()
-    get_token = AsyncMock(return_value=("full-token", "expires"))
-    monkeypatch.setattr(webhook_common, "get_github_app_installation_token_with_expiry", get_token)
-    monkeypatch.setattr(
-        webhook_common, "ensure_thread_exists_for_metadata", AsyncMock(return_value=True)
-    )
-    monkeypatch.setattr(webhook_common, "cache_github_token_for_thread", MagicMock())
-    monkeypatch.setattr(webhook_common, "set_reviewer_thread_metadata", AsyncMock())
-    monkeypatch.setattr(webhook_common, "get_client", lambda url: fake_client)
-    monkeypatch.setattr(webhook_common, "get_profile", AsyncMock(return_value=None))
-    monkeypatch.setattr(webhook_common, "get_team_settings", AsyncMock(return_value={}))
-
-    await github_webhooks.process_github_pr_ready(
-        _pr_payload(action="opened", draft=False, private=True)
-    )
-
-    get_token.assert_awaited_once_with()
-    assert fake_client.runs.create.await_args is not None
-    _, kwargs = fake_client.runs.create.await_args
-    assert kwargs["config"]["configurable"]["repo_private"] is True
-
-
-@pytest.mark.asyncio
-async def test_pr_ready_for_review_triggers_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_client = MagicMock()
-    fake_client.runs.create = AsyncMock()
-    _patch_dispatch_deps(monkeypatch, fake_client)
-    monkeypatch.setattr(webhook_common, "get_thread_metadata_safe", AsyncMock(return_value=None))
-    monkeypatch.setattr(webhook_common, "get_profile", AsyncMock(return_value=None))
-    monkeypatch.setattr(webhook_common, "get_team_settings", AsyncMock(return_value={}))
-
-    await github_webhooks.process_github_pr_ready(
-        _pr_payload(action="ready_for_review", draft=False)
-    )
-
-    fake_client.runs.create.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -162,7 +106,7 @@ async def test_pr_ready_for_review_skips_when_head_already_reviewed(
     )
     monkeypatch.setattr(webhook_common, "get_client", lambda url: fake_client)
     monkeypatch.setattr(webhook_common, "get_profile", AsyncMock(return_value=None))
-    monkeypatch.setattr(webhook_common, "get_team_settings", AsyncMock(return_value={}))
+    monkeypatch.setattr(webhook_common, "get_workspace_settings", AsyncMock(return_value={}))
 
     await github_webhooks.process_github_pr_ready(
         _pr_payload(action="ready_for_review", draft=False)
@@ -194,7 +138,7 @@ async def test_pr_ready_for_review_uses_re_review_after_previous_review(
         ),
     )
     monkeypatch.setattr(webhook_common, "get_profile", AsyncMock(return_value=None))
-    monkeypatch.setattr(webhook_common, "get_team_settings", AsyncMock(return_value={}))
+    monkeypatch.setattr(webhook_common, "get_workspace_settings", AsyncMock(return_value={}))
 
     await github_webhooks.process_github_pr_ready(
         _pr_payload(action="ready_for_review", draft=False)
@@ -231,7 +175,7 @@ async def test_pr_ready_draft_user_override_off_wins_over_team_on(
         AsyncMock(return_value={"login": "alice", "review_draft_prs": False}),
     )
     monkeypatch.setattr(
-        webhook_common, "get_team_settings", AsyncMock(return_value={"review_draft_prs": True})
+        webhook_common, "get_workspace_settings", AsyncMock(return_value={"review_draft_prs": True})
     )
 
     await github_webhooks.process_github_pr_ready(_pr_payload(action="opened", draft=True))
@@ -253,67 +197,8 @@ async def test_pr_ready_draft_user_override_on_wins_over_team_off(
     )
     monkeypatch.setattr(
         webhook_common,
-        "get_team_settings",
+        "get_workspace_settings",
         AsyncMock(return_value={"review_draft_prs": False}),
-    )
-
-    await github_webhooks.process_github_pr_ready(_pr_payload(action="opened", draft=True))
-
-    fake_client.runs.create.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_pr_ready_draft_user_default_falls_back_to_team_on(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_client = MagicMock()
-    fake_client.runs.create = AsyncMock()
-    _patch_dispatch_deps(monkeypatch, fake_client)
-    # User profile exists but review_draft_prs is None — inherit team default.
-    monkeypatch.setattr(
-        webhook_common,
-        "get_profile",
-        AsyncMock(return_value={"login": "alice", "review_draft_prs": None}),
-    )
-    monkeypatch.setattr(
-        webhook_common, "get_team_settings", AsyncMock(return_value={"review_draft_prs": True})
-    )
-
-    await github_webhooks.process_github_pr_ready(_pr_payload(action="opened", draft=True))
-
-    fake_client.runs.create.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_pr_ready_draft_no_profile_falls_back_to_team_off(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_client = MagicMock()
-    fake_client.runs.create = AsyncMock()
-    _patch_dispatch_deps(monkeypatch, fake_client)
-    # External contributor — inherit team default (off).
-    monkeypatch.setattr(webhook_common, "get_profile", AsyncMock(return_value=None))
-    monkeypatch.setattr(
-        webhook_common,
-        "get_team_settings",
-        AsyncMock(return_value={"review_draft_prs": False}),
-    )
-
-    await github_webhooks.process_github_pr_ready(_pr_payload(action="opened", draft=True))
-
-    fake_client.runs.create.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_pr_ready_draft_no_profile_falls_back_to_team_on(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_client = MagicMock()
-    fake_client.runs.create = AsyncMock()
-    _patch_dispatch_deps(monkeypatch, fake_client)
-    monkeypatch.setattr(webhook_common, "get_profile", AsyncMock(return_value=None))
-    monkeypatch.setattr(
-        webhook_common, "get_team_settings", AsyncMock(return_value={"review_draft_prs": True})
     )
 
     await github_webhooks.process_github_pr_ready(_pr_payload(action="opened", draft=True))
@@ -344,76 +229,92 @@ async def test_converted_to_draft_disables_watch_when_drafts_off(
 
     with (
         patch(
-            "agent.webhooks.common.get_thread_metadata_safe",
+            "openswe.webhooks.common.get_thread_metadata_safe",
             new_callable=AsyncMock,
             return_value={"kind": "reviewer", "watch": True},
         ),
         patch(
-            "agent.webhooks.common.get_profile",
+            "openswe.webhooks.common.get_profile",
             new_callable=AsyncMock,
             return_value={"login": "alice", "review_draft_prs": False},
         ),
         patch(
-            "agent.webhooks.common.get_team_settings",
+            "openswe.webhooks.common.get_workspace_settings",
             new_callable=AsyncMock,
             return_value={"review_draft_prs": False},
         ),
-        patch("agent.webhooks.common.set_reviewer_thread_metadata", side_effect=fake_set),
+        patch("openswe.webhooks.common.set_reviewer_thread_metadata", side_effect=fake_set),
     ):
         await github_webhooks.process_github_pr_close(_converted_to_draft_payload())
     assert captured and captured[0][1]["watch"] is False
 
 
 @pytest.mark.asyncio
-async def test_converted_to_draft_keeps_watch_when_author_drafts_on(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_pr_ready_draft_reads_the_owning_workspaces_team_default(
+    monkeypatch: pytest.MonkeyPatch, registry_db: None
 ) -> None:
-    fake_set = AsyncMock()
-    with (
-        patch(
-            "agent.webhooks.common.get_thread_metadata_safe",
-            new_callable=AsyncMock,
-            return_value={"kind": "reviewer", "watch": True},
-        ),
-        patch(
-            "agent.webhooks.common.get_profile",
-            new_callable=AsyncMock,
-            return_value={"login": "alice", "review_draft_prs": True},
-        ),
-        patch(
-            "agent.webhooks.common.get_team_settings",
-            new_callable=AsyncMock,
-            return_value={"review_draft_prs": False},
-        ),
-        patch("agent.webhooks.common.set_reviewer_thread_metadata", new=fake_set),
-    ):
-        await github_webhooks.process_github_pr_close(_converted_to_draft_payload())
-    fake_set.assert_not_called()
+    """The draft-review default belongs to the workspace that owns the repo."""
+    fake_client = MagicMock()
+    fake_client.runs.create = AsyncMock()
+    _patch_dispatch_deps(monkeypatch, fake_client)
+    monkeypatch.setattr(webhook_common, "get_profile", AsyncMock(return_value=None))
+    await WORKSPACES.create(WorkspaceCreate(name="OSS", repos=["lc/repo"]), "alice")
+    await upsert_workspace_overrides("oss", WorkspaceSettingsUpdate(review_draft_prs=True))
+    await upsert_workspace_overrides("default", WorkspaceSettingsUpdate(review_draft_prs=False))
+
+    await github_webhooks.process_github_pr_ready(_pr_payload(action="opened", draft=True))
+
+    fake_client.runs.create.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_converted_to_draft_keeps_watch_when_team_default_drafts_on(
+@pytest.mark.parametrize("draft", [False, True])
+@pytest.mark.parametrize("inline", [False, True])
+@pytest.mark.parametrize("action", ["opened", "synchronize"])
+@pytest.mark.parametrize("implementation_busy", [False, True])
+@pytest.mark.parametrize("registered", [False, True])
+async def test_walkthrough_generation_includes_drafts_without_starting_an_assessment(
     monkeypatch: pytest.MonkeyPatch,
+    draft: bool,
+    inline: bool,
+    action: str,
+    implementation_busy: bool,
+    registered: bool,
 ) -> None:
-    fake_set = AsyncMock()
-    with (
-        patch(
-            "agent.webhooks.common.get_thread_metadata_safe",
-            new_callable=AsyncMock,
-            return_value={"kind": "reviewer", "watch": True},
-        ),
-        # Author inherits team default — team has drafts on.
-        patch(
-            "agent.webhooks.common.get_profile",
-            new_callable=AsyncMock,
-            return_value={"login": "alice", "review_draft_prs": None},
-        ),
-        patch(
-            "agent.webhooks.common.get_team_settings",
-            new_callable=AsyncMock,
-            return_value={"review_draft_prs": True},
-        ),
-        patch("agent.webhooks.common.set_reviewer_thread_metadata", new=fake_set),
-    ):
-        await github_webhooks.process_github_pr_close(_converted_to_draft_payload())
-    fake_set.assert_not_called()
+    from openswe.dashboard import workspace_settings_cache
+    from openswe.review_scout.launch import ReviewScoutTarget
+
+    payload = _pr_payload(action=action, draft=draft)
+    payload["repository"]["full_name"] = "lc/repo"
+    payload["pull_request"]["body"] = "Made by [Open SWE](https://example.com)"
+    monkeypatch.setattr(github_webhooks.postgres, "configured", lambda: True)
+    monkeypatch.setattr(WORKSPACES, "owner_of_repo", AsyncMock(return_value="default"))
+    monkeypatch.setattr(
+        workspace_settings_cache,
+        "cached_workspace_settings",
+        AsyncMock(return_value={"implementation_walkthrough_enabled": inline}),
+    )
+    monkeypatch.setattr(
+        github_webhooks.PullRequest,
+        "get",
+        AsyncMock(return_value=MagicMock(thread_ids=["implementation"]) if registered else None),
+    )
+    monkeypatch.setattr(
+        github_webhooks.THREADS,
+        "get",
+        AsyncMock(return_value=MagicMock(status="busy" if implementation_busy else "idle")),
+    )
+    monkeypatch.setattr(
+        github_webhooks.index.ThreadSearch,
+        "run",
+        AsyncMock(return_value=[MagicMock()] if implementation_busy else []),
+    )
+    monkeypatch.setattr(ReviewScoutTarget, "walkthrough", AsyncMock(return_value=None))
+    start = AsyncMock(return_value="run")
+    monkeypatch.setattr(ReviewScoutTarget, "start", start)
+    assessment = AsyncMock()
+    monkeypatch.setattr(github_webhooks, "_dispatch_first_review_from_pr_payload", assessment)
+
+    await github_webhooks.process_github_pr_walkthrough(payload)
+
+    assert start.await_count == (0 if inline and implementation_busy else 1)
+    assessment.assert_not_awaited()

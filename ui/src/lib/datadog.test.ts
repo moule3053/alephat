@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { getDatadogSessionLink, initializeDatadogRum } from "./datadog"
 import type { RumInitConfiguration } from "@datadog/browser-rum"
@@ -17,6 +17,34 @@ function rumLoader(rum = rumClient()) {
 }
 
 describe("initializeDatadogRum", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ environment: "staging" }))
+    )
+  })
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("does not mislabel telemetry when backend configuration is unavailable", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 503 }))
+    )
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const { load } = rumLoader()
+    await initializeDatadogRum(
+      {
+        VITE_DATADOG_APPLICATION_ID: "app-id",
+        VITE_DATADOG_CLIENT_TOKEN: "client-token",
+      },
+      load
+    )
+    expect(load).not.toHaveBeenCalled()
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
   it("does nothing without both public identifiers", () => {
     const { load } = rumLoader()
 
@@ -30,7 +58,8 @@ describe("initializeDatadogRum", () => {
 
     await initializeDatadogRum(
       {
-        MODE: "staging",
+        MODE: "production",
+        VITE_DATADOG_ENV: "outdated-build-environment",
         VITE_DATADOG_APPLICATION_ID: " app-id ",
         VITE_DATADOG_CLIENT_TOKEN: " client-token ",
         VITE_DATADOG_SITE: "datadoghq.eu",
@@ -66,11 +95,11 @@ describe("initializeDatadogRum", () => {
         id: "view-id",
         url: "https://example.com/agents/thread-id?access=secret#message",
         referrer:
-          "https://example.com/agents/reviews/langchain-ai/alephat/2203?tab=files",
+          "https://example.com/agents/reviews/langchain-ai/open-swe/2203?tab=files",
       },
       resource: {
         type: "fetch",
-        url: "https://example.com/langchain-ai/alephat/pull/2203?token=secret#preview",
+        url: "https://example.com/langchain-ai/open-swe/pull/2203?token=secret#preview",
       },
       performance: {
         lcp: {
@@ -79,15 +108,14 @@ describe("initializeDatadogRum", () => {
       },
       routes: [
         { url: "/agents/thread-id/plan" },
-        { url: "/agents/local/session-id" },
         { url: "/agents/automations/schedule-id" },
         { url: "/review/repositories/langchain-ai" },
-        { url: "/agents/environments" },
+        { url: "/agents/workspaces" },
         { url: "/agents/instructions" },
         { url: "/agents/sandbox" },
       ],
       urlClasses: [
-        { url: "https://github.com/langchain-ai/alephat/pull/2203?tab=files" },
+        { url: "https://github.com/langchain-ai/open-swe/pull/2203?tab=files" },
         { url: "//example.com/agents/another-thread?secret=value" },
         { url: "assets/image.png?secret=value" },
         { url: "blob:https://example.com/id?secret=value" },
@@ -115,15 +143,14 @@ describe("initializeDatadogRum", () => {
       },
       routes: [
         { url: "/agents/:threadId/plan" },
-        { url: "/agents/local/:sessionId" },
         { url: "/agents/automations/:scheduleId" },
         { url: "/review/repositories/:owner" },
-        { url: "/agents/environments" },
+        { url: "/agents/workspaces" },
         { url: "/agents/instructions" },
         { url: "/agents/sandbox" },
       ],
       urlClasses: [
-        { url: "https://github.com/langchain-ai/alephat/pull/2203" },
+        { url: "https://github.com/langchain-ai/open-swe/pull/2203" },
         { url: "//example.com/agents/:threadId" },
         { url: "assets/image.png" },
         { url: "blob:https://example.com/id" },

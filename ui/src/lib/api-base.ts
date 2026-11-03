@@ -9,7 +9,7 @@ export function resolveDashboardApiBase(
   protocol: string,
   basePath = "/"
 ): string {
-  if (protocol === "alephat:") return ""
+  if (protocol === "open-swe:") return ""
   return (configured || basePath).replace(/\/$/, "")
 }
 
@@ -24,7 +24,7 @@ export function dashboardApiBase(): string {
 
 /**
  * True when the backend answers on a different origin than the dashboard, which
- * is what decides whether a server render can see the session: `alephat_session` is
+ * is what decides whether a server render can see the session: `osw_session` is
  * set on the API's origin, so a cross-origin deployment's own requests never
  * carry it however the browser's do.
  */

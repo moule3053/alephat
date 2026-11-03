@@ -1,39 +1,22 @@
 """Tests for the public-repo org-membership gate on GitHub webhooks."""
 
-import hashlib
-import hmac
-import json
 from typing import Any, cast
 
 import pytest
-from fastapi.testclient import TestClient
 from httpx2 import Response
 
-from agent.api.app import app
-from agent.github import webhook as github_webhooks
-from agent.webhooks import common as webhook_common
+from openswe.github import forwarding
+from openswe.github import webhook as github_webhooks
+from openswe.webhooks import common as webhook_common
+from tests.conftest import post_signed_github_webhook, register_github_logins
 
 _TEST_WEBHOOK_SECRET = "test-secret-for-webhook"
 
 
-def _sign_body(body: bytes, secret: str = _TEST_WEBHOOK_SECRET) -> str:
-    sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    return f"sha256={sig}"
-
-
-def _post_github_webhook(client: TestClient, event_type: str, payload: dict[str, Any]) -> Response:
-    body = json.dumps(payload, separators=(",", ":")).encode()
+async def _post_github_webhook(event_type: str, payload: dict[str, Any]) -> Response:
     return cast(
         Response,
-        client.post(
-            "/webhooks/github",
-            content=body,
-            headers={
-                "X-GitHub-Event": event_type,
-                "X-Hub-Signature-256": _sign_body(body),
-                "Content-Type": "application/json",
-            },
-        ),
+        await post_signed_github_webhook(event_type, payload, secret=_TEST_WEBHOOK_SECRET),
     )
 
 
@@ -53,9 +36,21 @@ def _common_setup(monkeypatch, *, gate: str = "langchain-ai") -> None:
     monkeypatch.setattr(webhook_common, "GITHUB_WEBHOOK_SECRET", _TEST_WEBHOOK_SECRET)
     monkeypatch.setattr(webhook_common, "PUBLIC_REPO_ORG_GATE", gate)
     monkeypatch.setattr(webhook_common, "ALLOWED_GITHUB_ORGS", frozenset())
+    register_github_logins(monkeypatch, "stranger", "insider")
 
 
-def test_gate_blocks_non_member_on_public_pr_comment(monkeypatch) -> None:
+@pytest.mark.parametrize("sender", ["Configured[bot]", "CONFIGURED[BOT]"])
+async def test_gate_recognizes_internal_bots_case_insensitively(
+    monkeypatch: pytest.MonkeyPatch, sender: str
+) -> None:
+    monkeypatch.setattr(webhook_common, "PUBLIC_REPO_ORG_GATE", "langchain-ai")
+    monkeypatch.setattr(webhook_common, "INTERNAL_BOT_LOGINS", frozenset({"configured[bot]"}))
+    assert await webhook_common._is_sender_allowed_for_public_repo(
+        {"repository": {"private": False}, "sender": {"login": sender}}
+    )
+
+
+async def test_gate_blocks_non_member_on_public_pr_comment(monkeypatch, registry_db) -> None:
     _common_setup(monkeypatch)
     seen = _install_membership_stub(monkeypatch, members={"insider"})
 
@@ -66,9 +61,7 @@ def test_gate_blocks_non_member_on_public_pr_comment(monkeypatch) -> None:
         github_webhooks, "process_github_pr_comment", fake_process_github_pr_comment
     )
 
-    client = TestClient(app)
-    response = _post_github_webhook(
-        client,
+    response = await _post_github_webhook(
         "issue_comment",
         {
             "action": "created",
@@ -77,13 +70,13 @@ def test_gate_blocks_non_member_on_public_pr_comment(monkeypatch) -> None:
                 "number": 7,
                 "title": "PR title",
                 "pull_request": {
-                    "url": "https://api.github.com/repos/langchain-ai/alephat/pulls/7"
+                    "url": "https://api.github.com/repos/langchain-ai/open-swe/pulls/7"
                 },
             },
-            "comment": {"body": "@alephat review"},
+            "comment": {"body": "@open-swe review"},
             "repository": {
                 "owner": {"login": "langchain-ai"},
-                "name": "alephat",
+                "name": "open-swe",
                 "private": False,
             },
             "sender": {"login": "stranger", "type": "User"},
@@ -97,7 +90,7 @@ def test_gate_blocks_non_member_on_public_pr_comment(monkeypatch) -> None:
     assert seen["calls"] == ["stranger"]
 
 
-def test_gate_allows_org_member_on_public_pr_comment(monkeypatch) -> None:
+async def test_gate_allows_org_member_on_public_pr_comment(monkeypatch, registry_db) -> None:
     _common_setup(monkeypatch)
     _install_membership_stub(monkeypatch, members={"insider"})
 
@@ -110,9 +103,7 @@ def test_gate_allows_org_member_on_public_pr_comment(monkeypatch) -> None:
         github_webhooks, "process_github_pr_comment", fake_process_github_pr_comment
     )
 
-    client = TestClient(app)
-    response = _post_github_webhook(
-        client,
+    response = await _post_github_webhook(
         "issue_comment",
         {
             "action": "created",
@@ -121,13 +112,13 @@ def test_gate_allows_org_member_on_public_pr_comment(monkeypatch) -> None:
                 "number": 7,
                 "title": "PR title",
                 "pull_request": {
-                    "url": "https://api.github.com/repos/langchain-ai/alephat/pulls/7"
+                    "url": "https://api.github.com/repos/langchain-ai/open-swe/pulls/7"
                 },
             },
-            "comment": {"body": "@alephat review"},
+            "comment": {"body": "@open-swe review"},
             "repository": {
                 "owner": {"login": "langchain-ai"},
-                "name": "alephat",
+                "name": "open-swe",
                 "private": False,
             },
             "sender": {"login": "insider", "type": "User"},
@@ -139,7 +130,7 @@ def test_gate_allows_org_member_on_public_pr_comment(monkeypatch) -> None:
     assert called["event"] == "issue_comment"
 
 
-def test_gate_skipped_on_private_repo(monkeypatch) -> None:
+async def test_gate_skipped_on_private_repo(monkeypatch, registry_db) -> None:
     _common_setup(monkeypatch)
     seen = _install_membership_stub(monkeypatch, members=set())
 
@@ -152,9 +143,7 @@ def test_gate_skipped_on_private_repo(monkeypatch) -> None:
         github_webhooks, "process_github_pr_comment", fake_process_github_pr_comment
     )
 
-    client = TestClient(app)
-    response = _post_github_webhook(
-        client,
+    response = await _post_github_webhook(
         "issue_comment",
         {
             "action": "created",
@@ -163,13 +152,13 @@ def test_gate_skipped_on_private_repo(monkeypatch) -> None:
                 "number": 7,
                 "title": "PR title",
                 "pull_request": {
-                    "url": "https://api.github.com/repos/langchain-ai/alephat/pulls/7"
+                    "url": "https://api.github.com/repos/langchain-ai/open-swe/pulls/7"
                 },
             },
-            "comment": {"body": "@alephat please look at this"},
+            "comment": {"body": "@open-swe please look at this"},
             "repository": {
                 "owner": {"login": "langchain-ai"},
-                "name": "alephat",
+                "name": "open-swe",
                 "private": True,
             },
             "sender": {"login": "stranger", "type": "User"},
@@ -182,7 +171,7 @@ def test_gate_skipped_on_private_repo(monkeypatch) -> None:
     assert seen["calls"] == []
 
 
-def test_gate_disabled_when_env_unset(monkeypatch) -> None:
+async def test_gate_disabled_when_env_unset(monkeypatch, registry_db) -> None:
     _common_setup(monkeypatch, gate="")
     seen = _install_membership_stub(monkeypatch, members=set())
 
@@ -195,9 +184,7 @@ def test_gate_disabled_when_env_unset(monkeypatch) -> None:
         github_webhooks, "process_github_pr_comment", fake_process_github_pr_comment
     )
 
-    client = TestClient(app)
-    response = _post_github_webhook(
-        client,
+    response = await _post_github_webhook(
         "issue_comment",
         {
             "action": "created",
@@ -206,13 +193,13 @@ def test_gate_disabled_when_env_unset(monkeypatch) -> None:
                 "number": 7,
                 "title": "PR title",
                 "pull_request": {
-                    "url": "https://api.github.com/repos/langchain-ai/alephat/pulls/7"
+                    "url": "https://api.github.com/repos/langchain-ai/open-swe/pulls/7"
                 },
             },
-            "comment": {"body": "@alephat please look at this"},
+            "comment": {"body": "@open-swe please look at this"},
             "repository": {
                 "owner": {"login": "langchain-ai"},
-                "name": "alephat",
+                "name": "open-swe",
                 "private": False,
             },
             "sender": {"login": "stranger", "type": "User"},
@@ -225,30 +212,28 @@ def test_gate_disabled_when_env_unset(monkeypatch) -> None:
     assert seen["calls"] == []
 
 
-def test_gate_blocks_non_member_on_public_issue(monkeypatch) -> None:
+async def test_gate_blocks_non_member_on_public_issue(monkeypatch, registry_db) -> None:
     _common_setup(monkeypatch)
     _install_membership_stub(monkeypatch, members={"insider"})
 
-    async def fake_process_github_issue(*_args, **_kwargs) -> None:
+    async def fake_forward(*_args, **_kwargs) -> None:
         raise AssertionError("should not be called")
 
-    monkeypatch.setattr(github_webhooks, "process_github_issue", fake_process_github_issue)
+    monkeypatch.setattr(forwarding, "queue_forward", fake_forward)
 
-    client = TestClient(app)
-    response = _post_github_webhook(
-        client,
+    response = await _post_github_webhook(
         "issues",
         {
             "action": "opened",
             "issue": {
                 "id": 1,
                 "number": 7,
-                "title": "@alephat please help",
+                "title": "@openswe please help",
                 "body": "x",
             },
             "repository": {
                 "owner": {"login": "langchain-ai"},
-                "name": "alephat",
+                "name": "open-swe",
                 "private": False,
             },
             "sender": {"login": "stranger", "type": "User"},
@@ -261,26 +246,26 @@ def test_gate_blocks_non_member_on_public_issue(monkeypatch) -> None:
     assert "not a member" in body["reason"]
 
 
-def test_review_requested_is_unsupported_before_public_repo_gate(monkeypatch) -> None:
+async def test_review_requested_is_unsupported_before_public_repo_gate(
+    monkeypatch, registry_db
+) -> None:
     _common_setup(monkeypatch)
     seen = _install_membership_stub(monkeypatch, members={"insider"})
 
-    client = TestClient(app)
-    response = _post_github_webhook(
-        client,
+    response = await _post_github_webhook(
         "pull_request",
         {
             "action": "review_requested",
-            "requested_reviewer": {"login": "alephat[bot]"},
+            "requested_reviewer": {"login": "open-swe[bot]"},
             "pull_request": {
                 "number": 1244,
-                "html_url": "https://github.com/langchain-ai/alephat/pull/1244",
+                "html_url": "https://github.com/langchain-ai/open-swe/pull/1244",
                 "base": {"sha": "base-sha"},
                 "head": {"sha": "head-sha", "ref": "feature-branch"},
             },
             "repository": {
                 "owner": {"login": "langchain-ai"},
-                "name": "alephat",
+                "name": "open-swe",
                 "private": False,
             },
             "sender": {"login": "stranger", "type": "User"},
@@ -295,7 +280,7 @@ def test_review_requested_is_unsupported_before_public_repo_gate(monkeypatch) ->
     assert seen["calls"] == []
 
 
-def test_gate_allows_internal_bot_sender(monkeypatch) -> None:
+async def test_internal_bot_comment_never_prompts_the_agent(monkeypatch, registry_db) -> None:
     _common_setup(monkeypatch)
     seen = _install_membership_stub(monkeypatch, members=set())
 
@@ -308,9 +293,7 @@ def test_gate_allows_internal_bot_sender(monkeypatch) -> None:
         github_webhooks, "process_github_pr_comment", fake_process_github_pr_comment
     )
 
-    client = TestClient(app)
-    response = _post_github_webhook(
-        client,
+    response = await _post_github_webhook(
         "issue_comment",
         {
             "action": "created",
@@ -319,28 +302,28 @@ def test_gate_allows_internal_bot_sender(monkeypatch) -> None:
                 "number": 7,
                 "title": "PR title",
                 "pull_request": {
-                    "url": "https://api.github.com/repos/langchain-ai/alephat/pulls/7"
+                    "url": "https://api.github.com/repos/langchain-ai/open-swe/pulls/7"
                 },
             },
-            "comment": {"body": "@alephat please look at this"},
+            "comment": {"body": "@open-swe please look at this"},
             "repository": {
                 "owner": {"login": "langchain-ai"},
-                "name": "alephat",
+                "name": "open-swe",
                 "private": False,
             },
-            "sender": {"login": "alephat[bot]", "type": "Bot"},
+            "sender": {"login": "open-swe[bot]", "type": "Bot"},
         },
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "accepted"
-    assert called["event"] == "issue_comment"
+    assert response.json()["status"] == "ignored"
+    assert called == {}
     assert seen["calls"] == []
 
 
 @pytest.mark.asyncio
 async def test_is_user_active_org_member_returns_false_when_no_token(monkeypatch) -> None:
-    from agent.github import org_membership as github_org_membership
+    from openswe.github import org_membership as github_org_membership
 
     async def fake_installation(_org: str) -> int:
         return 1
@@ -366,7 +349,7 @@ class _FakeAsyncClient:
     async def __aexit__(self, *_args) -> None:
         return None
 
-    async def get(self, *_args, **_kwargs):
+    async def request(self, *_args, **_kwargs):
         return self._response
 
 
@@ -380,7 +363,7 @@ class _FakeResponse:
 
 
 def _patch_membership_http(monkeypatch, response: _FakeResponse) -> dict[str, Any]:
-    from agent.github import org_membership as github_org_membership
+    from openswe.github import org_membership as github_org_membership
 
     seen: dict[str, Any] = {}
 
@@ -405,7 +388,7 @@ def _patch_membership_http(monkeypatch, response: _FakeResponse) -> dict[str, An
 
 @pytest.mark.asyncio
 async def test_is_user_active_org_member_handles_404(monkeypatch) -> None:
-    from agent.github import org_membership as github_org_membership
+    from openswe.github import org_membership as github_org_membership
 
     _patch_membership_http(monkeypatch, _FakeResponse(404))
 
@@ -414,7 +397,7 @@ async def test_is_user_active_org_member_handles_404(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_is_user_active_org_member_active(monkeypatch) -> None:
-    from agent.github import org_membership as github_org_membership
+    from openswe.github import org_membership as github_org_membership
 
     seen = _patch_membership_http(monkeypatch, _FakeResponse(200, {"state": "active"}))
 
@@ -424,7 +407,7 @@ async def test_is_user_active_org_member_active(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_is_user_active_org_member_pending_returns_false(monkeypatch) -> None:
-    from agent.github import org_membership as github_org_membership
+    from openswe.github import org_membership as github_org_membership
 
     _patch_membership_http(monkeypatch, _FakeResponse(200, {"state": "pending"}))
 

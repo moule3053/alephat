@@ -2,12 +2,12 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain.agents.middleware import AgentState, ModelResponse
+from langchain.agents.middleware import AgentState, ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
-from agent.agent_cost import finalize_agent_invocation_usage
-from agent.middleware.record_run_usage import record_run_usage
+from openswe.agent_cost import finalize_agent_invocation_usage
+from openswe.middleware.record_run_usage import record_run_usage
 
 
 def _message(input_tokens: int, output_tokens: int) -> AIMessage:
@@ -24,9 +24,9 @@ def _message(input_tokens: int, output_tokens: int) -> AIMessage:
 @pytest.mark.asyncio
 async def test_records_whole_run_across_queued_human_messages() -> None:
     first = _message(100, 10)
-    first.response_metadata["alephat_run_id"] = "run-1"
+    first.response_metadata["open_swe_run_id"] = "run-1"
     second = _message(200, 20)
-    second.response_metadata["alephat_run_id"] = "run-1"
+    second.response_metadata["open_swe_run_id"] = "run-1"
     state: AgentState = {
         "messages": [
             HumanMessage(content="old"),
@@ -39,21 +39,21 @@ async def test_records_whole_run_across_queued_human_messages() -> None:
     }
     with (
         patch(
-            "agent.run_config.get_config",
+            "openswe.run_config.get_config",
             return_value={"configurable": {"thread_id": "thread-1", "prepare_run_id": "run-1"}},
         ),
         patch(
-            "agent.agent_cost.record_agent_invocation_completion",
+            "openswe.agent_cost.record_agent_invocation_completion",
             new_callable=AsyncMock,
             return_value=True,
         ) as record,
         patch(
-            "agent.agent_cost.schedule_agent_cost_refresh",
+            "openswe.agent_cost.schedule_agent_cost_refresh",
             new_callable=AsyncMock,
             return_value=True,
         ) as schedule,
         patch(
-            "agent.agent_cost.mark_agent_invocation_cost_refresh_scheduled",
+            "openswe.agent_cost.mark_agent_invocation_cost_refresh_scheduled",
             new_callable=AsyncMock,
         ) as mark_scheduled,
     ):
@@ -71,22 +71,22 @@ async def test_records_whole_run_across_queued_human_messages() -> None:
 async def test_retries_cost_scheduling_after_completion_was_recorded() -> None:
     with (
         patch(
-            "agent.agent_cost.record_agent_invocation_completion",
+            "openswe.agent_cost.record_agent_invocation_completion",
             new_callable=AsyncMock,
             return_value=False,
         ),
         patch(
-            "agent.agent_cost.agent_invocation_needs_cost_refresh",
+            "openswe.agent_cost.agent_invocation_needs_cost_refresh",
             new_callable=AsyncMock,
             return_value=True,
         ),
         patch(
-            "agent.agent_cost.schedule_agent_cost_refresh",
+            "openswe.agent_cost.schedule_agent_cost_refresh",
             new_callable=AsyncMock,
             side_effect=[False, True],
         ) as schedule,
         patch(
-            "agent.agent_cost.mark_agent_invocation_cost_refresh_scheduled",
+            "openswe.agent_cost.mark_agent_invocation_cost_refresh_scheduled",
             new_callable=AsyncMock,
         ) as mark_scheduled,
     ):
@@ -106,10 +106,30 @@ async def test_tags_model_responses_with_run_id() -> None:
     response = ModelResponse(result=[_message(100, 10)])
     handler = AsyncMock(return_value=response)
     with patch(
-        "agent.run_config.get_config",
+        "openswe.run_config.get_config",
         return_value={"configurable": {"thread_id": "thread-1", "prepare_run_id": "run-1"}},
     ):
         result = await record_run_usage.awrap_model_call(MagicMock(), handler)
 
-    assert result.result[0].response_metadata["alephat_invocation_id"] == "run-1"
-    assert result.result[0].response_metadata["alephat_run_id"] == "run-1"
+    assert result.result[0].response_metadata["open_swe_invocation_id"] == "run-1"
+    assert result.result[0].response_metadata["open_swe_run_id"] == "run-1"
+
+
+@pytest.mark.asyncio
+async def test_analytics_failure_does_not_replace_model_error() -> None:
+    request = ModelRequest(model=MagicMock(), messages=[], state={"messages": []})
+    error = RuntimeError("Provider failed")
+    with (
+        patch(
+            "openswe.run_config.get_config",
+            return_value={"configurable": {"thread_id": "thread-1", "invocation_id": "run-1"}},
+        ),
+        patch(
+            "openswe.agent_cost.record_agent_invocation_completion",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("Database unavailable"),
+        ),
+    ):
+        with pytest.raises(RuntimeError) as raised:
+            await record_run_usage.awrap_model_call(request, AsyncMock(side_effect=error))
+    assert raised.value is error

@@ -1,4 +1,5 @@
 import { useEffect } from "react"
+import { useQuery } from "@tanstack/react-query"
 import {
   Outlet,
   createFileRoute,
@@ -7,87 +8,65 @@ import {
 } from "@tanstack/react-router"
 
 import { AgentsShell } from "@/features/agents/components/AgentsSidebar"
-import { Skeleton } from "@/components/ui/skeleton"
-import { AgentStreamProvider } from "@/features/agents/lib/stream/AgentStreamProvider"
+import { reviewChatQuery } from "@/features/agents/lib/queries"
+import { Skeleton } from "@langchain/macaw-components/Skeleton"
 import { RequireLogin } from "@/lib/auth-redirect"
 import { useSession } from "@/lib/session"
-import { isDesktopLocalModeEnabled } from "@/lib/desktop-local-mode"
 import { rememberAppLocation } from "@/lib/appLocation"
+import { pageTitle } from "@/lib/pageTitle"
 
 export const Route = createFileRoute("/agents")({
   component: AgentsLayout,
+  head: () => ({ meta: [{ title: pageTitle("Agents") }] }),
 })
 
-/**
- * The `.agents-ui` class themes the layout subtree, but popovers, tooltips and
- * menus portal to `<body>`. Marking the document root while these routes are
- * mounted is what keeps those in the same palette.
- */
-function useAgentsTheme() {
-  useEffect(() => {
-    document.documentElement.dataset["agentsTheme"] = "true"
-    return () => {
-      delete document.documentElement.dataset["agentsTheme"]
-    }
-  }, [])
-}
-
 function AgentsLayout() {
-  useAgentsTheme()
   const session = useSession()
-  const navigate = Route.useNavigate()
   const threadMatch = useMatch({
     from: "/agents/$threadId",
     shouldThrow: false,
   })
-  const localMatch = useMatch({
-    from: "/agents/local/$sessionId",
+  const reviewMatch = useMatch({
+    from: "/agents/reviews/$owner/$repo/$number",
     shouldThrow: false,
   })
   const activeThreadId = threadMatch?.params.threadId
-  const activeLocalSessionId = localMatch?.params.sessionId
+  // A review page's sidebar row is the user's review chat thread. The page
+  // loads it; the layout only reads it, so off a review page it asks for nothing.
+  const reviewChat = useQuery({
+    ...reviewChatQuery({
+      owner: reviewMatch?.params.owner ?? "",
+      repo: reviewMatch?.params.repo ?? "",
+      number: Number(reviewMatch?.params.number),
+    }),
+    enabled: false,
+  })
+  const activeReviewThreadId = reviewMatch
+    ? reviewChat.data?.thread_id
+    : undefined
   const location = useRouterState({
     select: (state) => state.location,
   })
-  const pathname = location.pathname
-  const localOnly = !session.data && isDesktopLocalModeEnabled()
-  const isLocalRoute =
-    pathname === "/agents" ||
-    pathname === "/agents/" ||
-    Boolean(activeLocalSessionId)
-
   useEffect(() => {
     rememberAppLocation(location.href)
   }, [location.href])
 
   if (session.isLoading) {
     return (
-      <main className="agents-ui flex h-svh items-center justify-center bg-background p-6">
+      <main className="agents-ui flex h-svh items-center justify-center bg-surface-level-1 p-space-5">
         <Skeleton className="h-40 w-full max-w-md" />
       </main>
     )
   }
 
-  if (!session.data && (!localOnly || !isLocalRoute)) return <RequireLogin />
+  if (!session.data) return <RequireLogin />
 
   return (
     <AgentsShell
-      user={session.data ?? null}
-      localOnly={localOnly}
-      activeThreadId={activeThreadId}
-      activeLocalSessionId={activeLocalSessionId}
+      user={session.data}
+      activeThreadId={activeThreadId ?? activeReviewThreadId}
     >
-      <AgentStreamProvider
-        threadId={activeLocalSessionId ?? activeThreadId ?? null}
-        transport={activeLocalSessionId ? "local" : "cloud"}
-        onThreadCreated={(id) => {
-          if (!activeThreadId) {
-            void navigate({ to: "/agents/$threadId", params: { threadId: id } })
-          }
-        }}
-      >
-        <Outlet />
-      </AgentStreamProvider>
+      <Outlet />
     </AgentsShell>
   )
 }

@@ -20,6 +20,54 @@ const CODE_CHANNEL_EVENTS = [
 ]
 
 describe("slackAppManifest", () => {
+  it.each([false, true])(
+    "includes Incidents channel onboarding and history events with Code Channels=%s",
+    (codeChannelsEnabled) => {
+      const manifest = slackAppManifest(codeChannelsEnabled)
+      expect(manifest.oauth_config.scopes.bot).toEqual(
+        expect.arrayContaining([
+          "channels:join",
+          "channels:read",
+          "channels:history",
+        ])
+      )
+      const events = manifest.settings.event_subscriptions.bot_events
+      expect(events).toEqual(
+        expect.arrayContaining([
+          "channel_created",
+          "channel_rename",
+          "channel_archive",
+          "message.channels",
+          "message.groups",
+          "app_mention",
+          "message.im",
+          "message.mpim",
+          "agent_session_stopped",
+        ])
+      )
+      expect(new Set(events).size).toBe(events.length)
+    }
+  )
+
+  it.each([false, true])(
+    "registers the ask slash command with Code Channels=%s",
+    (codeChannelsEnabled) => {
+      const manifest = slackAppManifest(codeChannelsEnabled, {
+        backendUrl: "https://openswe.example.com",
+      })
+
+      expect(manifest.features.slash_commands).toEqual([
+        expect.objectContaining({
+          command: "/oswe",
+          url: "https://openswe.example.com/webhooks/slack/commands",
+        }),
+      ])
+      expect(manifest.oauth_config.scopes.bot).toEqual(
+        expect.arrayContaining(["commands"])
+      )
+    }
+  )
+
   it("defaults to the legacy Slack integration", () => {
     const manifest = slackAppManifest()
 
@@ -27,8 +75,8 @@ describe("slackAppManifest", () => {
     expect(manifest.oauth_config.scopes.bot).not.toEqual(
       expect.arrayContaining(CODE_CHANNEL_SCOPES)
     )
-    expect(manifest.settings.event_subscriptions.bot_events).not.toEqual(
-      expect.arrayContaining(CODE_CHANNEL_EVENTS)
+    expect(manifest.settings.event_subscriptions.bot_events).not.toContain(
+      "code_channel_action"
     )
   })
 
@@ -53,22 +101,22 @@ describe("slackAppManifest", () => {
 
   it("fills in the running deployment's backend URL", () => {
     const manifest = slackAppManifest(true, {
-      backendUrl: "https://alephat.example.com/",
+      backendUrl: "https://openswe.example.com/",
     })
 
     expect(manifest.settings.event_subscriptions.request_url).toBe(
-      "https://alephat.example.com/webhooks/slack"
+      "https://openswe.example.com/webhooks/slack"
     )
     expect(manifest.settings.interactivity.request_url).toBe(
-      "https://alephat.example.com/webhooks/slack/interactivity"
+      "https://openswe.example.com/webhooks/slack/interactivity"
     )
     expect(manifest.features.code_channels).toEqual({
       enabled: true,
       slash_command_url:
-        "https://alephat.example.com/webhooks/slack/code-channel-commands",
+        "https://openswe.example.com/webhooks/slack/code-channel-commands",
     })
     expect(manifest.oauth_config.redirect_urls).toEqual([
-      "https://alephat.example.com/dashboard/api/slack/callback",
+      "https://openswe.example.com/dashboard/api/slack/callback",
     ])
   })
 

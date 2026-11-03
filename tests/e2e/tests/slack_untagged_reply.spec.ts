@@ -1,9 +1,5 @@
 import { test, expect, type APIRequestContext } from "@playwright/test";
 
-// Feature: in a Slack thread whose only participants are Alephat and one human,
-// a follow-up no longer needs to @-mention the bot — UNLESS it tags a different
-// user. Driven through the real webhook + real agent; only the LLM is faked.
-
 type SendResult = {
   thread_ts: string;
   thread_id: string;
@@ -50,7 +46,7 @@ async function stateText(
 }
 
 // Open a two-party thread: Alice @-mentions the bot, the agent implements and
-// replies, so the thread now holds exactly Alice + Alephat.
+// replies, so the thread now holds exactly Alice + Open SWE.
 async function openTwoPartyThread(
   request: APIRequestContext,
 ): Promise<SendResult> {
@@ -72,23 +68,21 @@ async function openTwoPartyThread(
 }
 
 test.describe("Slack untagged two-party replies", () => {
-  test("an untagged follow-up triggers a run once Alephat is in the thread", async ({
+  test("an untagged follow-up is accepted in a single-human thread", async ({
     request,
   }) => {
     const { thread_ts, thread_id } = await openTwoPartyThread(request);
 
-    // A plain message (no @-mention) in the two-party thread is accepted…
     const followUp = await send(request, {
       text: "actually, can you also add a docstring?",
       mention_bot: false,
       thread_ts,
     });
-    expect(followUp.webhook.status).toBe("accepted");
 
-    // …and the agent actually runs on it (its follow-up reply lands in state).
+    expect(followUp.webhook.status).toBe("accepted");
     await expect
-      .poll(async () => stateText(request, thread_id), { timeout: 60_000 })
-      .toContain("anything else you'd like changed");
+      .poll(() => stateText(request, thread_id), { timeout: 30_000 })
+      .toContain("actually, can you also add a docstring?");
   });
 
   test("an untagged message tagging another user is ignored", async ({
@@ -109,7 +103,7 @@ test.describe("Slack untagged two-party replies", () => {
     request,
   }) => {
     await request.post("/control/reset");
-    // No prior Alephat participation → the bot must be @-mentioned to engage.
+    // No prior Open SWE participation → the bot must be @-mentioned to engage.
     const fresh = await send(request, {
       text: "just chatting with the team, nothing for the bot",
       mention_bot: false,

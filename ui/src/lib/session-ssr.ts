@@ -18,7 +18,7 @@ export function isPublicPath(pathname: string): boolean {
  * before the first byte and a logged-in one never refetches `me` on mount.
  *
  * Client-side this is a no-op: the desktop app serves the prerendered shell from
- * `alephat://app` with no server at all, so the per-route `RequireLogin` gate
+ * `open-swe://app` with no server at all, so the per-route `RequireLogin` gate
  * stays responsible for that case.
  */
 export const resolveSessionOnServer = createIsomorphicFn()
@@ -28,7 +28,7 @@ export const resolveSessionOnServer = createIsomorphicFn()
     // redirect — that would leave the build without a shell to write.
     if (process.env.TSS_PRERENDERING === "true") return
 
-    // A cross-origin deployment's `alephat_session` belongs to the API's origin, so
+    // A cross-origin deployment's `osw_session` belongs to the API's origin, so
     // this request cannot carry it and `/me` would 401 for a signed-in user —
     // redirecting them to a login page that bounces them straight back. Auth
     // resolution stays client-side there.

@@ -1,10 +1,21 @@
+import { Button } from "@langchain/macaw-components/Button"
 import { memo, useLayoutEffect, useRef } from "react"
-import { Bot, File as FileIcon } from "lucide-react"
+import { FileIcon } from "@phosphor-icons/react/dist/ssr/File"
+import { HashIcon } from "@phosphor-icons/react/dist/ssr/Hash"
+import { UserIcon } from "@phosphor-icons/react/dist/ssr/User"
+import { RobotIcon } from "@phosphor-icons/react/dist/ssr/Robot"
 
 import type { ComposerTriggerKind } from "./composerTrigger"
 import { cn } from "@/lib/utils"
 
 export type ComposerCommandItem =
+  | {
+      id: string
+      type: "slack-user"
+      userId: string
+      label: string
+      description: string
+    }
   | {
       id: string
       type: "path"
@@ -26,6 +37,14 @@ export type ComposerCommandItem =
       label: string
       description: string
     }
+  | {
+      id: string
+      type: "slack-channel"
+      channelId: string
+      name: string
+      label: string
+      description: string
+    }
 
 interface ComposerCommandMenuProps {
   items: Array<ComposerCommandItem>
@@ -37,7 +56,7 @@ interface ComposerCommandMenuProps {
 }
 
 /**
- * The autocomplete popup for `@path`, `/command`, and `$skill`. Keyboard
+ * The autocomplete popup for `@path`, `/command`, `$skill`, and `#channel`. Keyboard
  * navigation lives in the composer (the editor keeps focus while this is open),
  * so this only reflects the active item and reports pointer intent back up.
  */
@@ -62,26 +81,31 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu({
 
   return (
     <div
-      className="dropdown-glass absolute bottom-full left-0 z-50 mb-2 w-full max-w-md overflow-hidden rounded-xl"
+      className="absolute bottom-full left-0 z-popover mb-space-2 w-full max-w-md overflow-hidden rounded-lg border border-subtle bg-elevated shadow-md"
       role="listbox"
       aria-label={
         triggerKind === "path"
-          ? "Files"
+          ? "People and files"
           : triggerKind === "skill-command"
             ? "Skills"
-            : "Commands"
+            : triggerKind === "slack-channel"
+              ? "Slack channels"
+              : "Commands"
       }
     >
       {items.length > 0 ? (
-        <div ref={listRef} className="max-h-64 overflow-y-auto py-1">
+        <div ref={listRef} className="max-h-64 overflow-y-auto py-space-1">
           {items.map((item) => (
-            <button
+            <Button
+              color="secondary"
+              variant="plain"
+              size="sm"
+              aria-label={`${item.label} ${item.description}`}
               aria-selected={activeItemId === item.id}
               className={cn(
-                "flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs/relaxed select-none",
-                activeItemId === item.id
-                  ? "bg-accent text-accent-foreground"
-                  : "text-foreground"
+                "h-auto justify-start whitespace-normal",
+                "w-full cursor-pointer gap-space-2 px-space-3 py-space-1 text-left text-xs/relaxed text-primary select-none",
+                activeItemId === item.id && "bg-elevated-hover"
               )}
               data-composer-item-id={item.id}
               key={item.id}
@@ -96,19 +120,35 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu({
               type="button"
             >
               {item.type === "path" ? (
-                <FileIcon className="size-3.5 shrink-0 text-muted-foreground/80" />
+                <FileIcon
+                  className="size-3.5 shrink-0 text-icon-tertiary"
+                  weight="regular"
+                />
+              ) : item.type === "slack-user" ? (
+                <UserIcon
+                  className="size-3.5 shrink-0 text-icon-tertiary"
+                  weight="regular"
+                />
+              ) : item.type === "slack-channel" ? (
+                <HashIcon
+                  className="size-3.5 shrink-0 text-icon-tertiary"
+                  weight="regular"
+                />
               ) : (
-                <Bot className="size-3.5 shrink-0 text-muted-foreground/80" />
+                <RobotIcon
+                  className="size-3.5 shrink-0 text-icon-tertiary"
+                  weight="regular"
+                />
               )}
               <span className="shrink-0 font-medium">{item.label}</span>
-              <span className="min-w-0 flex-1 truncate text-muted-foreground/70">
+              <span className="min-w-0 flex-1 truncate text-tertiary">
                 {item.description}
               </span>
-            </button>
+            </Button>
           ))}
         </div>
       ) : (
-        <p className="px-4 py-3 text-xs text-muted-foreground/70">
+        <p className="px-space-4 py-space-3 text-xs text-tertiary">
           {emptyStateText ??
             (triggerKind === "path"
               ? "No matching files."

@@ -1,3 +1,4 @@
+import { Suspense, lazy, useEffect, useState } from "react"
 import {
   HeadContent,
   Outlet,
@@ -15,11 +16,35 @@ import appCss from "../styles.css?url"
 import type { QueryClient } from "@tanstack/react-query"
 import { AppCommandProvider } from "@/lib/appCommands"
 import { resolveSessionOnServer } from "@/lib/session-ssr"
+import { TooltipProvider } from "@langchain/macaw-components/Tooltip"
+import { Text } from "@langchain/macaw-components/Text"
+import { Toaster } from "@/components/Toaster"
+import { AppNotifications } from "@/components/AppNotifications"
+import { VersionMismatchBanner } from "@/components/VersionMismatchBanner"
 import { ThemeSync } from "@/lib/ThemeSync"
+import { Favicon } from "@/components/Branding"
+import { AnalyticsIdentity } from "@/lib/AnalyticsIdentity"
+import { InvalidationStream } from "@/lib/invalidations/InvalidationStream"
 import { THEME_COLOR } from "@/lib/theme"
 import { apiWarmupScript } from "@/features/agents/lib/apiWarmup"
+import { isPerfHudEnabled } from "@/lib/perf/trace"
 
-const themeInitScript = `(function(){try{var t=localStorage.getItem("alephat-theme");var d=t==="dark"||((!t||t==="system")&&window.matchMedia("(prefers-color-scheme: dark)").matches);var r=document.documentElement;r.classList.toggle("dark",d);r.style.colorScheme=d?"dark":"light";}catch(e){}})();`
+const PerfHud = lazy(() => import("@/lib/perf/PerfHud"))
+
+/** Client-only: the flag lives in localStorage, so the server render never shows it. */
+function PerfHudMount() {
+  const [enabled, setEnabled] = useState(false)
+  // oxlint-disable-next-line react/set-state-in-effect
+  useEffect(() => setEnabled(isPerfHudEnabled()), [])
+  if (!enabled) return null
+  return (
+    <Suspense fallback={null}>
+      <PerfHud />
+    </Suspense>
+  )
+}
+
+const themeInitScript = `(function(){try{var t=localStorage.getItem("open-swe-theme");var d=t==="dark"||((!t||t==="system")&&window.matchMedia("(prefers-color-scheme: dark)").matches);var r=document.documentElement;r.classList.toggle("dark",d);r.style.colorScheme=d?"dark":"light";}catch(e){}})();`
 
 export const Route = createRootRouteWithContext<{
   queryClient: QueryClient
@@ -34,7 +59,7 @@ export const Route = createRootRouteWithContext<{
         content: "width=device-width, initial-scale=1, maximum-scale=1",
       },
       { name: "theme-color", content: THEME_COLOR.light },
-      { title: "Alephat" },
+      { title: "Open SWE" },
     ],
     links: [
       { rel: "stylesheet", href: appCss },
@@ -43,22 +68,17 @@ export const Route = createRootRouteWithContext<{
         href: `${import.meta.env.BASE_URL}manifest.webmanifest`,
       },
       {
-        rel: "icon",
-        type: "image/png",
-        href: `${import.meta.env.BASE_URL}favicon.png`,
-      },
-      {
         rel: "apple-touch-icon",
         href: `${import.meta.env.BASE_URL}apple-touch-icon.png`,
       },
     ],
   }),
   notFoundComponent: () => (
-    <main className="container mx-auto p-4 pt-16">
-      <h1 className="text-2xl font-medium">404</h1>
-      <p className="text-muted-foreground">
-        The requested page could not be found.
-      </p>
+    <main className="container mx-auto p-space-4 pt-space-9">
+      <Text as="h1" variant="h1" weight="medium" color="primary">
+        404
+      </Text>
+      <p className="text-secondary">The requested page could not be found.</p>
     </main>
   ),
   shellComponent: RootDocument,
@@ -86,22 +106,31 @@ function RootDocument({ children }: { children: React.ReactNode }) {
             <div aria-hidden data-desktop-drag-strip="" />
           )}
         <ThemeSync />
+        <Toaster position="bottom-right" closeButton />
         <QueryClientProvider client={queryClient}>
-          <AppCommandProvider>{children ?? <Outlet />}</AppCommandProvider>
-          {import.meta.env.VITE_DEVTOOLS !== "false" && (
-            <>
-              <TanStackDevtools
-                config={{ position: "bottom-right" }}
-                plugins={[
-                  {
-                    name: "Tanstack Router",
-                    render: <TanStackRouterDevtoolsPanel />,
-                  },
-                ]}
-              />
-              <ReactQueryDevtools initialIsOpen={false} />
-            </>
-          )}
+          <Favicon />
+          <TooltipProvider>
+            <AnalyticsIdentity />
+            <InvalidationStream />
+            <AppNotifications />
+            <VersionMismatchBanner />
+            <AppCommandProvider>{children ?? <Outlet />}</AppCommandProvider>
+            <PerfHudMount />
+            {import.meta.env.VITE_DEVTOOLS !== "false" && (
+              <>
+                <TanStackDevtools
+                  config={{ position: "bottom-right" }}
+                  plugins={[
+                    {
+                      name: "Tanstack Router",
+                      render: <TanStackRouterDevtoolsPanel />,
+                    },
+                  ]}
+                />
+                <ReactQueryDevtools initialIsOpen={false} />
+              </>
+            )}
+          </TooltipProvider>
         </QueryClientProvider>
         <Scripts />
       </body>

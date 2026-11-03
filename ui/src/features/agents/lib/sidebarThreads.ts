@@ -1,19 +1,17 @@
 import type {
-  DesktopLocalActivity,
-  DesktopLocalThreadSummary,
-  DesktopProject,
-} from "@/desktop"
-import type { AgentSource, AgentStatus, AgentThread } from "./types"
+  AgentSource,
+  AgentStatus,
+  AgentSubagentSummary,
+  AgentThread,
+  ReviewPageRef,
+} from "./types"
 
-export type SidebarThreadLocation = "cloud" | "local"
-
-interface SidebarThreadItemBase {
+export interface SidebarThreadItem {
   key: string
   id: string
-  location: SidebarThreadLocation
   title: string
-  projectKey: string | null
-  projectLabel: string | null
+  repoKey: string | null
+  repoLabel: string | null
   model: string
   source?: AgentSource
   threadCategory?: string
@@ -26,38 +24,47 @@ interface SidebarThreadItemBase {
   pr?: AgentThread["pr"]
   /** `owner/repo` + number of `pr`, when the thread carries a full PR record. */
   prRef?: { repoFullName: string; number: number }
-}
-
-export interface CloudSidebarThreadItem extends SidebarThreadItemBase {
-  location: "cloud"
+  reviewPage?: ReviewPageRef
+  /** Subagents the thread spawned, listed as sub-threads under its row. */
+  subagents?: Array<AgentSubagentSummary>
+  taskWorkers?: Array<AgentThread>
+  waitingForDelegatedWork?: boolean
   thread: AgentThread
 }
 
-export interface LocalSidebarThreadItem extends SidebarThreadItemBase {
-  location: "local"
-  thread: DesktopLocalThreadSummary
-}
-
-export type SidebarThreadItem = CloudSidebarThreadItem | LocalSidebarThreadItem
-
-export interface SidebarProjectOption {
+export interface SidebarRepoOption {
   key: string
   label: string
 }
 
-export interface SidebarProjectGroup extends SidebarProjectOption {
+export interface SidebarRepoGroup extends SidebarRepoOption {
   threads: Array<SidebarThreadItem>
+}
+
+/** A repo option annotated with the workspace slug that owns its repository. */
+export type SidebarWorkspacedRepoOption = SidebarRepoOption & {
+  workspace?: string
+}
+
+export const DEFAULT_SIDEBAR_WORKSPACE_SLUG = "default"
+
+export interface SidebarWorkspaceGroup<
+  TRepo extends SidebarRepoOption = SidebarRepoGroup,
+> {
+  slug: string
+  name: string
+  repos: Array<TRepo>
 }
 
 /**
  * Identity, not display name: `owner/repo` for cloud and the checkout path for
  * local. Keying on the short label instead would merge `acme/api` with
- * `other/api`, and two local projects both called `api`, into one folder that
+ * `other/api`, and two local repos both called `api`, into one folder that
  * cannot be told apart.
  */
-export function sidebarProjectKey(identity?: string | null): string | null {
+export function sidebarRepoKey(identity?: string | null): string | null {
   const normalized = identity?.trim().toLowerCase()
-  return normalized ? `project:${normalized}` : null
+  return normalized ? `repo:${normalized}` : null
 }
 
 function pullRequestRef(
@@ -72,153 +79,79 @@ function pullRequestRef(
   return { repoFullName: thread.repoFullName, number: thread.pr.number }
 }
 
-export function cloudSidebarThread(
-  thread: AgentThread
-): CloudSidebarThreadItem {
-  const projectLabel = thread.repo.trim() || null
+export function cloudSidebarThread(thread: AgentThread): SidebarThreadItem {
+  const repoLabel = thread.repo.trim() || null
   return {
     key: `cloud:${thread.id}`,
     id: thread.id,
-    location: "cloud",
     title: thread.title,
-    projectKey: sidebarProjectKey(thread.repoFullName.trim() || projectLabel),
-    projectLabel,
+    repoKey: sidebarRepoKey(thread.repoFullName.trim() || repoLabel),
+    repoLabel,
     model: thread.model,
     source: thread.source,
     threadCategory: thread.threadCategory,
     status: thread.status,
     viewed: thread.viewed,
     resolved: thread.resolved,
-    createdAt: thread.createdAt,
-    updatedAt: thread.updatedAt,
+    createdAt: Math.max(
+      thread.createdAt,
+      ...(thread.taskWorkers ?? []).map((worker) => worker.createdAt)
+    ),
+    updatedAt: Math.max(
+      thread.updatedAt,
+      ...(thread.taskWorkers ?? []).map((worker) => worker.updatedAt)
+    ),
     planStatus: thread.planStatus,
     pr: thread.pr,
     prRef: pullRequestRef(thread),
+    reviewPage: thread.reviewPage,
+    subagents: thread.subagents,
+    taskWorkers: thread.taskWorkers,
+    waitingForDelegatedWork: thread.waitingForDelegatedWork,
     thread,
   }
 }
 
-export function localSidebarThread(
-  thread: DesktopLocalThreadSummary,
-  project: DesktopProject | undefined,
-  activity: DesktopLocalActivity[string] | undefined
-): LocalSidebarThreadItem {
-  const projectLabel = project?.name.trim() || localProjectName(thread.cwd)
-  return {
-    key: `local:${thread.id}`,
-    id: thread.id,
-    location: "local",
-    title: thread.title,
-    projectKey: sidebarProjectKey(project?.cwd ?? thread.cwd),
-    projectLabel,
-    model: thread.modelId ?? "Default",
-    source: "dashboard",
-    threadCategory: "interactive",
-    status:
-      activity === "running"
-        ? "running"
-        : activity === "error"
-          ? "error"
-          : thread.viewed
-            ? "idle"
-            : "finished",
-    viewed: thread.viewed,
-    resolved: thread.archived === true,
-    createdAt: thread.createdAt,
-    updatedAt: thread.updatedAt,
-    thread,
-  }
-}
-
-export function sidebarProjectOptions(
-  threads: ReadonlyArray<SidebarThreadItem>,
-  localProjects: ReadonlyArray<DesktopProject>
-): Array<SidebarProjectOption> {
-  const projects = new Map<string, string>()
-  for (const thread of threads) {
-    if (thread.projectKey && thread.projectLabel) {
-      projects.set(thread.projectKey, thread.projectLabel)
-    }
-  }
-  for (const project of localProjects) {
-    const key = sidebarProjectKey(project.cwd)
-    if (key) projects.set(key, project.name)
-  }
-  return [...projects]
-    .map(([key, label]) => ({ key, label }))
-    .sort((left, right) => left.label.localeCompare(right.label))
-}
-
 /**
- * Label -> cloud project key, only where a label maps to exactly one cloud
- * project. Ambiguous labels are omitted rather than guessed at.
+ * Buckets already-built repo groups by the workspace that owns them, using
+ * each entry's `workspace` field from `repos` — falling back to
+ * {@link DEFAULT_SIDEBAR_WORKSPACE_SLUG} for a repo with no workspace
+ * (a repository is preferred by at most one workspace, and one no workspace
+ * prefers is annotated `default`, so this only fires for a repo the caller
+ * didn't annotate). A workspace absent from `workspaces`
+ * displays its slug as its own name.
+ *
+ * Generic over the repo-group shape so callers with richer, hydrated
+ * groups (live thread counts, active-thread hints) can bucket those directly
+ * instead of rebuilding them from raw threads.
  */
-export function cloudProjectKeysByLabel(
-  items: ReadonlyArray<SidebarThreadItem>
-): Map<string, string> {
-  const keysByLabel = new Map<string, Set<string>>()
-  for (const item of items) {
-    if (item.location !== "cloud" || !item.projectKey || !item.projectLabel) {
-      continue
-    }
-    const label = item.projectLabel.trim().toLowerCase()
-    const keys = keysByLabel.get(label) ?? new Set<string>()
-    keys.add(item.projectKey)
-    keysByLabel.set(label, keys)
-  }
-  return new Map(
-    [...keysByLabel]
-      .filter(([, keys]) => keys.size === 1)
-      .map(([label, keys]) => [label, [...keys][0] as string])
+export function groupRepoGroupsByWorkspace<TRepo extends SidebarRepoOption>(
+  groups: ReadonlyArray<TRepo>,
+  repos: ReadonlyArray<SidebarWorkspacedRepoOption>,
+  workspaces: ReadonlyArray<{ slug: string; name: string }>
+): Array<SidebarWorkspaceGroup<TRepo>> {
+  const workspaceByRepoKey = new Map(
+    repos.map((repo) => [
+      repo.key,
+      repo.workspace ?? DEFAULT_SIDEBAR_WORKSPACE_SLUG,
+    ])
   )
-}
-
-/**
- * Fold a local checkout into the cloud project of the same name, so a repo you
- * have both in the cloud and on disk renders as one folder. Only applied when
- * the name identifies exactly one cloud project.
- */
-export function applyProjectKeyAliases(
-  items: ReadonlyArray<SidebarThreadItem>,
-  aliases: ReadonlyMap<string, string>
-): Array<SidebarThreadItem> {
-  return items.map((item) => {
-    if (item.location !== "local" || !item.projectLabel) return item
-    const alias = aliases.get(item.projectLabel.trim().toLowerCase())
-    return alias ? { ...item, projectKey: alias } : item
-  })
-}
-
-/**
- * Split the sidebar into one bucket per project plus the leftovers shown under
- * "Recents". Projects keep their own most-recent-first order and are ranked by
- * their freshest thread, so the project you just worked in stays on top.
- */
-export function groupSidebarThreadsByProject(
-  threads: ReadonlyArray<SidebarThreadItem>,
-  projects: ReadonlyArray<SidebarProjectOption>,
-  mode: SidebarSort = "updated"
-): { projects: Array<SidebarProjectGroup>; recents: Array<SidebarThreadItem> } {
-  const buckets = new Map<string, SidebarProjectGroup>(
-    projects.map((project) => [project.key, { ...project, threads: [] }])
+  const names = new Map(
+    workspaces.map((workspace) => [workspace.slug, workspace.name])
   )
-  const recents: Array<SidebarThreadItem> = []
-  for (const thread of sortSidebarThreads(threads, mode)) {
-    const bucket = thread.projectKey
-      ? buckets.get(thread.projectKey)
-      : undefined
-    if (bucket) bucket.threads.push(thread)
-    else recents.push(thread)
+  const buckets = new Map<string, SidebarWorkspaceGroup<TRepo>>()
+  for (const group of groups) {
+    const slug =
+      workspaceByRepoKey.get(group.key) ?? DEFAULT_SIDEBAR_WORKSPACE_SLUG
+    const bucket = buckets.get(slug) ?? {
+      slug,
+      name: names.get(slug) ?? slug,
+      repos: [],
+    }
+    bucket.repos.push(group)
+    buckets.set(slug, bucket)
   }
-  return {
-    projects: [...buckets.values()]
-      .filter((group) => group.threads.length > 0)
-      .sort(
-        (left, right) =>
-          (right.threads[0]?.updatedAt ?? 0) - (left.threads[0]?.updatedAt ?? 0)
-      ),
-    recents,
-  }
+  return [...buckets.values()]
 }
 
 export type SidebarSort = "created" | "updated" | "manual"
@@ -249,7 +182,121 @@ export function sortSidebarThreads(
   return [...threads].sort(mode === "created" ? byCreation : byRecency)
 }
 
-function localProjectName(cwd: string): string | null {
-  const segments = cwd.split(/[\\/]/).filter(Boolean)
-  return segments.at(-1) ?? null
+export interface SidebarDayGroup {
+  key: string
+  label: string
+  threads: Array<SidebarThreadItem>
+}
+
+function dayLabel(day: Date, now: Date): string {
+  const today = new Date(now).setHours(0, 0, 0, 0)
+  const yesterday = new Date(today).setDate(new Date(today).getDate() - 1)
+  if (day.getTime() === today) return "Today"
+  if (day.getTime() === yesterday) return "Yesterday"
+  return day.toLocaleDateString([], {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: day.getFullYear() === now.getFullYear() ? undefined : "numeric",
+  })
+}
+
+/** Buckets threads by the local day they were last updated, newest first, each day ordered by creation. */
+export function groupSidebarThreadsByDay(
+  threads: ReadonlyArray<SidebarThreadItem>,
+  now: Date = new Date()
+): Array<SidebarDayGroup> {
+  const days = new Map<number, Array<SidebarThreadItem>>()
+  for (const thread of threads) {
+    const day = new Date(thread.updatedAt).setHours(0, 0, 0, 0)
+    days.set(day, [...(days.get(day) ?? []), thread])
+  }
+  return [...days.entries()]
+    .sort(([left], [right]) => right - left)
+    .map(([day, items]) => ({
+      key: String(day),
+      label: dayLabel(new Date(day), now),
+      threads: items.sort(byCreation),
+    }))
+}
+
+export function threadFamily(thread: AgentThread): Array<AgentThread> {
+  return [thread, ...(thread.taskWorkers ?? [])]
+}
+
+/**
+ * One sidebar row for a task family seen through snapshots of differing age:
+ * `row` (usually the listed one, which honors the sidebar's filters) and
+ * `details` of the coordinator or an open worker, which poll on their own
+ * schedules. Each member keeps its newest copy, and a worker the row has not
+ * caught up with yet joins it unless it is archived.
+ */
+export function mergeTaskFamily(
+  row: AgentThread,
+  details: ReadonlyArray<AgentThread>
+): AgentThread {
+  const members = new Map(
+    threadFamily(row).map((member) => [member.id, member])
+  )
+  for (const member of details.flatMap(threadFamily)) {
+    const known = members.get(member.id)
+    if (known ? member.updatedAt >= known.updatedAt : !member.resolved) {
+      members.set(member.id, member)
+    }
+  }
+  const [root = row, ...workers] = members.values()
+  return root.taskWorkers || workers.length
+    ? { ...root, taskWorkers: workers }
+    : root
+}
+
+export function withoutNestedWorkers(
+  threads: Array<AgentThread>
+): Array<AgentThread> {
+  const nestedIds = new Set(
+    threads
+      .flatMap((thread) => thread.taskWorkers ?? [])
+      .map((worker) => worker.id)
+  )
+  return threads.filter((thread) => !nestedIds.has(thread.id))
+}
+
+export function sidebarItemContains(
+  item: SidebarThreadItem,
+  key: string | undefined
+): boolean {
+  return (
+    item.key === key ||
+    (item.taskWorkers ?? []).some((worker) => `cloud:${worker.id}` === key)
+  )
+}
+
+export function sidebarRefreshInterval(
+  threads: ReadonlyArray<AgentThread> = []
+): number | false {
+  if (
+    threads.some((thread) =>
+      threadFamily(thread).some((member) => member.status === "running")
+    )
+  )
+    return 2000
+  return threads.some((thread) => thread.taskMembership?.role === "coordinator")
+    ? 30_000
+    : false
+}
+
+export function pinnedThreadShortcuts(
+  threads: Array<AgentThread>
+): Array<AgentThread> {
+  const pinnedIds = new Set(threads.map((thread) => thread.id))
+  return threads.map((thread) =>
+    thread.taskWorkers
+      ? {
+          ...thread,
+          taskWorkers: thread.taskWorkers.filter(
+            (worker) => !pinnedIds.has(worker.id)
+          ),
+        }
+      : thread
+  )
 }

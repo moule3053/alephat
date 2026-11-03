@@ -1,22 +1,24 @@
 import { describe, expect, it } from "vitest"
 
+import { toolKind, toolTitle } from "@/features/agents/lib/streamMessagesToUi"
+
 import {
   formatToolDisplay,
   formatToolDisplayParts,
 } from "./toolExecutionDisplay"
 
 describe("formatToolDisplay", () => {
-  const projectPath = "/workspace/alephat"
+  const repoPath = "/workspace/open-swe"
 
   it("renders only the read file name and retains its full path", () => {
-    const fullPath = "/workspace/alephat/ui/src/AGENTS.md"
+    const fullPath = "/workspace/open-swe/ui/src/AGENTS.md"
 
     expect(
       formatToolDisplay(
         `read_file ${fullPath}`,
         "read",
         { file_path: fullPath },
-        projectPath
+        repoPath
       )
     ).toBe("Read AGENTS.md")
     expect(
@@ -24,7 +26,7 @@ describe("formatToolDisplay", () => {
         `read_file ${fullPath}`,
         "read",
         { file_path: fullPath },
-        projectPath
+        repoPath
       )
     ).toEqual({
       heading: "Read",
@@ -36,34 +38,69 @@ describe("formatToolDisplay", () => {
   it("renders ls with only the target directory name", () => {
     expect(
       formatToolDisplay(
-        "ls /workspace/alephat/ui/src",
+        "ls /workspace/open-swe/ui/src",
         "read",
-        { path: "/workspace/alephat/ui/src" },
-        projectPath
+        { path: "/workspace/open-swe/ui/src" },
+        repoPath
       )
     ).toBe("List src")
   })
 
   it("renders search tools with their pattern", () => {
     expect(
-      formatToolDisplay(
-        "grep",
-        "search",
-        { pattern: "tool_calls" },
-        projectPath
-      )
+      formatToolDisplay("grep", "search", { pattern: "tool_calls" }, repoPath)
     ).toBe('Search "tool_calls"')
   })
 
-  it("sentence-cases raw tool names", () => {
-    expect(formatToolDisplay("enter_plan_mode", "other", {}, projectPath)).toBe(
-      "Enter plan mode"
+  it.each([
+    ["cd /workspace/open-swe && pnpm lint", "pnpm lint"],
+    ["cd '/workspace/my repo'; pnpm lint", "pnpm lint"],
+    ['cd "/workspace/my repo"\npnpm lint', "pnpm lint"],
+    ["cd -- /workspace/my\\ repo && cd ui && pnpm lint", "pnpm lint"],
+    ["cd /workspace && echo 'a && b'; cd ui", "echo 'a && b'; cd ui"],
+    ["cd /workspace", "cd /workspace"],
+    ["cd /workspace &&", "cd /workspace &&"],
+    ["cd /workspace || exit 1", "cd /workspace || exit 1"],
+    [
+      "cd $(prepare_workspace) && pnpm lint",
+      "cd $(prepare_workspace) && pnpm lint",
+    ],
+    ["echo cd /workspace && pnpm lint", "echo cd /workspace && pnpm lint"],
+  ])("formats shell display for %s", (command, expected) => {
+    const input = { command }
+    expect(formatToolDisplay("execute", "execute", input)).toBe(
+      `Shell ${expected}`
     )
-    expect(formatToolDisplay("save_plan", "other", {}, projectPath)).toBe(
+    expect(input.command).toBe(command)
+  })
+
+  it.each([
+    ["mcp_datadog_search_logs", { query: "errors" }, "Datadog: Search Logs"],
+    [
+      "mcp_google-drive_read_file",
+      { path: "/report" },
+      "Google Drive: Read File",
+    ],
+    ["mcp_linear_edit_issue", { command: "update" }, "Linear: Edit Issue"],
+  ])(
+    "keeps the MCP server and tool visible for %s",
+    (name, input, expected) => {
+      expect(
+        formatToolDisplayParts(toolTitle(name, input), toolKind(name), input)
+          .heading
+      ).toBe(expected)
+      expect(formatToolDisplayParts(name, toolKind(name), input).heading).toBe(
+        expected
+      )
+    }
+  )
+
+  it("sentence-cases raw tool names", () => {
+    expect(formatToolDisplay("save_plan", "other", {}, repoPath)).toBe(
       "Save plan"
     )
-    expect(
-      formatToolDisplay("slack_thread_reply", "other", {}, projectPath)
-    ).toBe("Slack thread reply")
+    expect(formatToolDisplay("slack_reply", "other", {}, repoPath)).toBe(
+      "Slack reply"
+    )
   })
 })

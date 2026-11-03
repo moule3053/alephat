@@ -10,7 +10,8 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { delimiter, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { _electron as electron } from "playwright";
 
 const repoRoot = resolve(__dirname, "..", "..", "..");
@@ -19,14 +20,15 @@ const e2eRoot = join(repoRoot, "tests", "e2e");
 const baseURL = `http://127.0.0.1:${process.env.E2E_PORT ?? "2024"}`;
 const e2eTmp = resolve(process.env.E2E_TMP ?? join(e2eRoot, ".e2e-tmp"));
 const fakeRemote = join(e2eTmp, "github", "fakeorg__demo.git");
+const uiArchive = join(repoRoot, "ui", ".output", "desktop", "ui.json.gz");
 const electronPath = createRequire(join(desktopRoot, "package.json"))(
   "electron",
 ) as string;
 
 function sessionCookie(setCookie: string): string {
-  const match = setCookie.match(/(?:^|,\s*)alephat_session=([^;]+)/);
+  const match = setCookie.match(/(?:^|,\s*)osw_session=([^;]+)/);
   if (!match)
-    throw new Error("Harness login did not return an alephat_session cookie");
+    throw new Error("Harness login did not return an osw_session cookie");
   return match[1];
 }
 
@@ -40,7 +42,7 @@ async function typeIntoComposer(
   await editor.press("Enter");
 }
 
-test("Desktop runs a local thread on the Alephat graph against the shared fakes", async ({
+test("Desktop runs a This Mac thread on the cloud agent through its bridge", async ({
   request,
 }, testInfo) => {
   mkdirSync(e2eTmp, { recursive: true });
@@ -63,9 +65,6 @@ test("Desktop runs a local thread on the Alephat graph against the shared fakes"
   });
   expect(login.ok()).toBeTruthy();
   const cookie = sessionCookie(login.headers()["set-cookie"] ?? "");
-  const pythonPath = [e2eRoot, process.env.PYTHONPATH]
-    .filter((value): value is string => Boolean(value))
-    .join(delimiter);
 
   const electronApp = await electron.launch({
     executablePath: electronPath,
@@ -81,19 +80,11 @@ test("Desktop runs a local thread on the Alephat graph against the shared fakes"
       HOME: home,
       XDG_CONFIG_HOME: join(stateRoot, "xdg-config"),
       APPDATA: join(stateRoot, "app-data"),
-      ALEPHAT_BACKEND_URL: baseURL,
-      // The local backend runs the real graph with the scripted fake model, so
-      // the provider keys only have to satisfy the composer's credential gate.
-      ALEPHAT_LOCAL_BACKEND_CONFIG: join(e2eRoot, "langgraph.desktop.json"),
-      ANTHROPIC_API_KEY: "e2e-fake-key",
-      OPENAI_API_KEY: "e2e-fake-key",
-      E2E_BASE: baseURL,
-      E2E_FAKE_GITHUB_API: `${baseURL}/fake-gh`,
-      E2E_REMOTE: fakeRemote,
-      E2E_TMP: e2eTmp,
+      OPEN_SWE_BACKEND_URL: baseURL,
+      OPEN_SWE_DESKTOP_UI_ARCHIVE: uiArchive,
+      // The bridge runs the agent's commands with this environment, so the
+      // fake model's script pushes with this git config rather than yours.
       GIT_CONFIG_GLOBAL: gitConfig,
-      PYTHONPATH: pythonPath,
-      UV_CACHE_DIR: join(e2eTmp, "uv-cache"),
     },
   });
 
@@ -126,26 +117,39 @@ test("Desktop runs a local thread on the Alephat graph against the shared fakes"
       },
       {
         url: `${baseURL}/`,
-        name: "alephat_session",
+        name: "osw_session",
         value: cookie,
         path: "/",
         httpOnly: true,
       },
     );
 
-    const profileResponse = page.waitForResponse(
-      (response) =>
-        new URL(response.url()).pathname === "/dashboard/api/profile",
+    await page.goto("open-swe://app/agents");
+    const taskThreadId = "74000000-0000-4000-8000-000000000099";
+    const bridgeId = await page.evaluate(async (threadId) => {
+      return window.openSweDesktop!.takeOverThread({ threadId, repo: "" });
+    }, taskThreadId);
+    expect(bridgeId).toBeTruthy();
+    const tasks = await page.evaluate(() =>
+      window.openSweDesktop!.listLocalThreads(),
     );
-    await page.goto("alephat://app/agents");
-    const profile = (await (await profileResponse).json()) as {
-      default_model?: string | null;
-    };
-    if (!profile.default_model) {
-      const maybeLater = page.getByRole("button", { name: "Maybe later" });
-      await expect(maybeLater).toBeVisible();
-      await maybeLater.click();
-    }
+    const task = tasks.find((thread) => thread.id === taskThreadId);
+    expect(task?.managedTaskFolder).toBe(true);
+    expect(task?.cwd).toContain(taskThreadId);
+    const work = page.getByRole("button", { name: "Home", exact: true });
+    const coding = page.getByRole("button", { name: "Code", exact: true });
+    await expect(work).toHaveAttribute("aria-pressed", "true");
+    await expect(page).toHaveTitle(/Open SWE/);
+    const workBounds = await work.boundingBox();
+    const codingBounds = await coding.boundingBox();
+    expect(workBounds).not.toBeNull();
+    expect(codingBounds).not.toBeNull();
+    expect(workBounds!.x).toBeLessThan(codingBounds!.x);
+    expect(Math.abs(workBounds!.width - codingBounds!.width)).toBeLessThan(1);
+    await coding.click();
+    await expect(coding).toHaveAttribute("aria-pressed", "true");
+    await page.reload();
+    await expect(coding).toHaveAttribute("aria-pressed", "true");
 
     await expect(
       page.getByRole("button", { name: /Cloud threads, \d+/ }),
@@ -178,7 +182,9 @@ test("Desktop runs a local thread on the Alephat graph against the shared fakes"
       "E2E_DESKTOP_LOCAL please add a greet() helper and open a PR",
     );
 
-    await expect(page).toHaveURL(/alephat:\/\/app\/agents\/local\//);
+    await expect(page).toHaveURL(
+      /open-swe:\/\/app\/agents\/[0-9a-f]{8}-[0-9a-f]{4}-/,
+    );
     await expect(page.getByText(/Done! I added/)).toBeVisible();
     await expect(
       sidebar.getByRole("link", {
@@ -215,6 +221,11 @@ test("Desktop runs a local thread on the Alephat graph against the shared fakes"
         },
       ]);
 
+    // The agent ran in the checkout on this machine, through the bridge.
+    await expect(
+      page.getByText("This Mac", { exact: true }).first(),
+    ).toBeVisible();
+
     const screenshot = testInfo.outputPath("desktop-local-agent.png");
     await page.screenshot({ path: screenshot, fullPage: true });
     await testInfo.attach("desktop-local-agent", {
@@ -232,5 +243,69 @@ test("Desktop runs a local thread on the Alephat graph against the shared fakes"
     await electronApp.close().catch(() => {});
     if (!process.env.E2E_KEEP_TMP)
       rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("Desktop links supersede startup loading", async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), "desktop-links-"));
+  const electronApp = await electron.launch({
+    executablePath: electronPath,
+    args: [
+      ...(process.platform === "linux" ? ["--no-sandbox"] : []),
+      desktopRoot,
+      "--backend-url=https://desktop.test",
+    ],
+    env: {
+      ...process.env,
+      HOME: stateRoot,
+      XDG_CONFIG_HOME: stateRoot,
+      APPDATA: stateRoot,
+      OPEN_SWE_DESKTOP_UI_ARCHIVE: uiArchive,
+    },
+  });
+  try {
+    const page = await electronApp.firstWindow();
+    await page.waitForURL("open-swe://app/**", { waitUntil: "load" });
+    await electronApp.evaluate(({ protocol }) => {
+      protocol.unhandle("open-swe");
+      protocol.handle("open-swe", () => new Response("Ready"));
+    });
+    await page.goto("data:text/html,Reload fixture");
+    await electronApp.evaluate(({ app, Menu }) => {
+      Menu.getApplicationMenu()
+        ?.items.find((item) => item.label === "View")
+        ?.submenu?.items.find((item) => item.label === "Reload")
+        ?.click();
+      app.emit(
+        "continue-activity",
+        { preventDefault() {} },
+        "NSUserActivityTypeBrowsingWeb",
+        {},
+        {
+          webpageURL:
+            "https://desktop.test/agents/reviews/a/b/1?tab=changes#file-1",
+        },
+      );
+    });
+    await expect(page.getByText("Ready", { exact: true })).toBeVisible();
+    await expect(page).toHaveURL(
+      "open-swe://app/agents/reviews/a/b/1?tab=changes#file-1",
+    );
+    await page.evaluate(() => window.openSweDesktop!.copyPageLink());
+    expect(
+      await electronApp.evaluate(({ clipboard }) => clipboard.readText()),
+    ).toBe("https://desktop.test/agents/reviews/a/b/1?tab=changes#file-1");
+    await page.goto("data:text/html,Non-app page");
+    await electronApp.evaluate(({ Menu }) => {
+      Menu.getApplicationMenu()
+        ?.items.find((item) => item.label === "View")
+        ?.submenu?.items.find((item) => item.label === "Reload")
+        ?.click();
+    });
+    await expect(page.getByText("Ready", { exact: true })).toBeVisible();
+    await expect(page).toHaveURL("open-swe://app/");
+  } finally {
+    await electronApp.close();
+    rmSync(stateRoot, { recursive: true, force: true });
   }
 });

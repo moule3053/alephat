@@ -1,60 +1,115 @@
+import { Link as MacawLink } from "@langchain/macaw-components/Link"
+import {
+  CaretDownIcon,
+  CaretRightIcon,
+} from "@langchain/macaw-components/icons"
+import { Text } from "@langchain/macaw-components/Text"
+import { Card } from "@langchain/macaw-components/Card"
 import { createFileRoute } from "@tanstack/react-router"
 import { useQuery } from "@tanstack/react-query"
+import { Fragment, useState } from "react"
+import { Avatar } from "@langchain/macaw-components/Avatar"
+import { Badge } from "@langchain/macaw-components/Badge"
+import { Banner } from "@langchain/macaw-components/Banner"
+import { Button } from "@langchain/macaw-components/Button"
+import { IconButton } from "@langchain/macaw-components/IconButton"
+import { Select } from "@langchain/macaw-components/Select"
+import { Skeleton } from "@langchain/macaw-components/Skeleton"
+import { Tooltip } from "@langchain/macaw-components/Tooltip"
+import zIndices from "@langchain/macaw-components/utils/zIndices"
+import { ArrowClockwiseIcon } from "@phosphor-icons/react/dist/ssr/ArrowClockwise"
+import { ArrowsDownUpIcon } from "@phosphor-icons/react/dist/ssr/ArrowsDownUp"
+import { CheckCircleIcon } from "@phosphor-icons/react/dist/ssr/CheckCircle"
+import { ClockCountdownIcon } from "@phosphor-icons/react/dist/ssr/ClockCountdown"
+import { SortAscendingIcon } from "@phosphor-icons/react/dist/ssr/SortAscending"
+import { SortDescendingIcon } from "@phosphor-icons/react/dist/ssr/SortDescending"
+import { WarningCircleIcon } from "@phosphor-icons/react/dist/ssr/WarningCircle"
 
 import type {
+  AnalyticsMetadata,
+  PRMergeRateCohort,
+  PRMergeRateEffort,
+  PRMergeRatePayload,
+  PRMergeRateResponse,
   ReviewerStatsPayload,
+  SortDirection,
   UsageLeaderboardPeriod,
   UsageLeaderboardRow,
+  UsageLeaderboardSort,
 } from "@/lib/api"
+import { TablePagination } from "@/components/TablePagination"
+import { CopyDiagnosticsButton } from "@/components/CopyDiagnosticsButton"
 import { AppShell, SettingsSection } from "@/components/AppShell"
-import { Avatar, AvatarFallback } from "@/components/ui/avatar"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
-import { Skeleton } from "@/components/ui/skeleton"
-import { api } from "@/lib/api"
+import { api, ApiError } from "@/lib/api"
+import { pageTitle } from "@/lib/pageTitle"
 import { RequireLogin } from "@/lib/auth-redirect"
+import { safeModelLabel } from "@/lib/modelLabel"
+import {
+  buildUsageDiagnostics,
+  metricAvailability,
+  type MetricAvailability,
+} from "@/lib/usage-diagnostics"
 import { useSession } from "@/lib/session"
+import { cn, INHERITED_LINK } from "@/lib/utils"
+
+const HELP_TRIGGER_CLASS =
+  "cursor-help rounded-sm underline decoration-dotted underline-offset-2 focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none"
 
 export const Route = createFileRoute("/usage")({
   validateSearch: (search: Record<string, unknown>) => ({
     period: typeof search.period === "string" ? search.period : undefined,
   }),
+  head: () => ({ meta: [{ title: pageTitle("Usage") }] }),
   component: UsagePage,
 })
 
+interface SortableColumn<Key extends string> {
+  key: Key
+  label: string
+  align: "left" | "right"
+  defaultDirection?: SortDirection
+  tooltip?: string
+}
+
+type UsageScope = "invocations" | "threads"
+type PROutcomesSort =
+  | "model"
+  | "prs_opened"
+  | "merged"
+  | "closed_without_merge"
+  | "open"
+  | "median_distance"
+  | "mean_distance"
+  | "merge_rate"
+  | "avg_delivery_seconds"
+  | "avg_merge_seconds"
 const PERIOD_LABELS: Record<UsageLeaderboardPeriod, string> = {
+  "24h": "Last 24h",
   "7d": "Last 7 days",
   "30d": "Last 30 days",
   all: "All time",
 }
+const PERIOD_ITEMS = (
+  Object.entries(PERIOD_LABELS) as Array<[UsageLeaderboardPeriod, string]>
+).map(([value, label]) => ({ value, label }))
 
 function UsagePage() {
   const session = useSession()
   const period =
-    (Route.useSearch().period as UsageLeaderboardPeriod | undefined) ?? "30d"
+    (Route.useSearch().period as UsageLeaderboardPeriod | undefined) ?? "7d"
   const navigate = Route.useNavigate()
-  const activePeriod: UsageLeaderboardPeriod = ["7d", "30d", "all"].includes(
-    period
-  )
+  const activePeriod: UsageLeaderboardPeriod = [
+    "24h",
+    "7d",
+    "30d",
+    "all",
+  ].includes(period)
     ? period
-    : "30d"
-
-  const leaderboard = useQuery({
-    queryKey: ["usageLeaderboard", activePeriod],
-    queryFn: () => api.usageLeaderboard(activePeriod, 10),
-    enabled: !!session.data,
-    staleTime: 60 * 1000,
-    refetchInterval: 60 * 1000,
-  })
+    : "7d"
 
   if (session.isLoading) {
     return (
-      <main className="p-6">
+      <main className="p-space-6">
         <Skeleton className="h-64 w-full" />
       </main>
     )
@@ -63,158 +118,1389 @@ function UsagePage() {
 
   return (
     <AppShell user={session.data} title="Usage" className="max-w-5xl">
+      <div
+        className="sticky top-0 -mx-space-4 border-b border-default bg-surface-level-1 px-space-4 py-space-3 sm:-mx-space-6 sm:px-space-6"
+        style={{ zIndex: zIndices.dashboardHeader }}
+      >
+        <UsageDateRange
+          period={activePeriod}
+          onPeriodChange={(value) =>
+            navigate({ to: "/usage", search: { period: value } })
+          }
+        />
+      </div>
+      <UsageAnalytics
+        period={activePeriod}
+        login={session.data.login}
+        isAdmin={session.data.is_admin}
+      />
+    </AppShell>
+  )
+}
+
+export function UsageDateRange({
+  period: activePeriod,
+  onPeriodChange,
+}: {
+  period: UsageLeaderboardPeriod
+  onPeriodChange: (period: UsageLeaderboardPeriod) => void
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-space-3">
+      <span className="text-sm font-medium text-primary">Date range</span>
+      <Select
+        aria-label="Date range"
+        options={PERIOD_ITEMS}
+        value={activePeriod}
+        onChange={(value) => value && onPeriodChange(value)}
+        triggerClassName="w-36"
+      />
+    </div>
+  )
+}
+
+export function UsageAnalytics({
+  period: activePeriod,
+  login,
+  isAdmin,
+}: {
+  period: UsageLeaderboardPeriod
+  login: string
+  isAdmin: boolean
+}) {
+  const [leaderboardPageSize, setLeaderboardPageSize] = useState(10)
+
+  return (
+    <UsageAnalyticsPeriod
+      key={activePeriod}
+      period={activePeriod}
+      login={login}
+      isAdmin={isAdmin}
+      pageSize={leaderboardPageSize}
+      onPageSizeChange={setLeaderboardPageSize}
+    />
+  )
+}
+
+function UsageAnalyticsPeriod({
+  period: activePeriod,
+  login,
+  isAdmin,
+  pageSize: leaderboardPageSize,
+  onPageSizeChange: setLeaderboardPageSize,
+}: {
+  period: UsageLeaderboardPeriod
+  login: string
+  isAdmin: boolean
+  pageSize: number
+  onPageSizeChange: (pageSize: number) => void
+}) {
+  const [leaderboardPage, setLeaderboardPage] = useState(1)
+  const [sort, setSort] = useState<UsageLeaderboardSort>("rank")
+  const [direction, setDirection] = useState<SortDirection>("asc")
+  const [usageScope, setUsageScope] = useState<UsageScope>("threads")
+  const [leaderboardCursors, setLeaderboardCursors] = useState<
+    (string | undefined)[]
+  >([undefined])
+  const leaderboard = useQuery({
+    queryKey: [
+      "usageLeaderboard",
+      activePeriod,
+      login,
+      isAdmin,
+      leaderboardPage,
+      leaderboardPageSize,
+      leaderboardCursors[leaderboardPage - 1],
+      sort,
+      direction,
+    ],
+    queryFn: () =>
+      api.usageLeaderboard(
+        activePeriod,
+        leaderboardPageSize,
+        leaderboardCursors[leaderboardPage - 1],
+        sort,
+        direction
+      ),
+    placeholderData: (previousData, previousQuery) =>
+      previousQuery?.queryKey[2] === login &&
+      previousQuery.queryKey[3] === isAdmin
+        ? previousData
+        : undefined,
+    staleTime: 60 * 1000,
+    refetchInterval: 60 * 1000,
+    retry: (count, error) =>
+      !(error instanceof ApiError && error.status >= 400) && count < 2,
+  })
+  // A refresh that fails keeps the last successful report visible, but the
+  // failure stays announced in the coverage details until one succeeds —
+  // manual or automatic (the query also refetches on interval/focus).
+  const [reportError, setReportError] = useState<ApiError | null>(null)
+  const report = usePRMergeRateReport(
+    activePeriod,
+    login,
+    isAdmin,
+    setReportError
+  )
+  const refreshing = leaderboard.isFetching || report.isFetching
+  const refreshNow = () => {
+    void leaderboard.refetch()
+    // refetch() resolves on failure too, so the error has to come off the result.
+    void report.refetch().then((result) => {
+      const error = result.error
+      setReportError(
+        error == null
+          ? null
+          : error instanceof ApiError
+            ? error
+            : new ApiError(0, "unknown")
+      )
+    })
+  }
+  const metadata = [
+    leaderboard.isError ? undefined : leaderboard.data,
+    report.isError ? undefined : report.data?.payload,
+  ].filter((data): data is NonNullable<typeof data> => data != null)
+
+  return (
+    <>
+      <PRMergeRateSection report={report} />
+
       <SettingsSection
-        title="Agent leaderboard"
-        description="Ranked by merged PRs, then agent lines of code, PRs opened, and invocations. A thread can contain multiple invocations."
+        title="Agent Leaderboard"
+        description="Ranked by merged PRs, then agent lines of code and PRs opened."
         action={
-          <Select
-            value={activePeriod}
-            onValueChange={(value) =>
-              navigate({
-                to: "/usage",
-                search: { period: value as UsageLeaderboardPeriod },
-              })
-            }
-          >
-            <SelectTrigger className="w-36">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {Object.entries(PERIOD_LABELS).map(([value, label]) => (
-                <SelectItem key={value} value={value}>
-                  {label}
-                </SelectItem>
+          <div className="flex items-center gap-space-2">
+            <div
+              className="flex rounded-md bg-surface-level-2 p-0.5"
+              role="group"
+              aria-label="Usage scope"
+            >
+              {(["invocations", "threads"] as const).map((scope) => (
+                <Button
+                  key={scope}
+                  type="button"
+                  size="xs"
+                  color="secondary"
+                  variant={usageScope === scope ? "outlined" : "plain"}
+                  aria-pressed={usageScope === scope}
+                  className="capitalize focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none"
+                  onClick={() => {
+                    setUsageScope(scope)
+                    if (sort === "invocations" || sort === "threads") {
+                      setSort(scope)
+                    } else if (
+                      sort === "avg_invocation_seconds" ||
+                      sort === "avg_thread_seconds"
+                    ) {
+                      setSort(
+                        scope === "threads"
+                          ? "avg_thread_seconds"
+                          : "avg_invocation_seconds"
+                      )
+                    }
+                    setLeaderboardPage(1)
+                    setLeaderboardCursors([undefined])
+                  }}
+                >
+                  {scope}
+                </Button>
               ))}
-            </SelectContent>
-          </Select>
+            </div>
+          </div>
         }
       >
         {leaderboard.isLoading ? (
-          <div className="space-y-2 p-4">
+          <div className="space-y-space-2 p-space-4">
             <Skeleton className="h-12 w-full" />
             <Skeleton className="h-12 w-full" />
             <Skeleton className="h-12 w-full" />
           </div>
         ) : leaderboard.isError ? (
-          <p className="p-4 text-xs text-destructive">
-            Failed to load usage data: {leaderboard.error.message}
-          </p>
-        ) : !leaderboard.data?.rows.length ? (
-          <div className="p-6 text-center text-xs text-muted-foreground">
-            No Alephat Agent usage has been recorded for{" "}
+          <div className="p-space-4" role="alert">
+            <Banner
+              intent="error"
+              title={
+                leaderboard.error instanceof ApiError &&
+                leaderboard.error.status === 503
+                  ? "Usage analytics is unavailable on this deployment."
+                  : "Could not load usage analytics. Try again."
+              }
+              action={
+                <Button
+                  size="xs"
+                  color="secondary"
+                  variant="outlined"
+                  onClick={() => void leaderboard.refetch()}
+                >
+                  Retry usage analytics
+                </Button>
+              }
+            />
+          </div>
+        ) : !leaderboard.data?.total_members ? (
+          <div className="p-space-5 text-center text-xs text-secondary">
+            No Open SWE Agent usage has been recorded for{" "}
             {PERIOD_LABELS[activePeriod].toLowerCase()} yet.
           </div>
         ) : (
           <UsageTable
+            scope={usageScope}
+            period={activePeriod}
+            currentUserRank={leaderboard.data.current_user_rank}
             rows={leaderboard.data.rows}
             totalMembers={leaderboard.data.total_members}
+            page={leaderboardPage}
+            pageSize={leaderboardPageSize}
+            sort={sort}
+            direction={direction}
+            isUpdating={leaderboard.isPlaceholderData}
+            onSort={(nextSort, nextDirection) => {
+              setDirection(
+                sort === nextSort
+                  ? direction === "asc"
+                    ? "desc"
+                    : "asc"
+                  : nextDirection
+              )
+              setSort(nextSort)
+              setLeaderboardPage(1)
+              setLeaderboardCursors([undefined])
+            }}
+            onPageChange={(page) => {
+              const nextCursor = leaderboard.data.next_cursor
+              if (page > leaderboardPage && nextCursor) {
+                setLeaderboardCursors((cursors) => {
+                  const updated = cursors.slice(0, leaderboardPage)
+                  updated[leaderboardPage] = nextCursor
+                  return updated
+                })
+              }
+              setLeaderboardPage(page)
+            }}
+            onPageSizeChange={(pageSize) => {
+              setLeaderboardPageSize(pageSize)
+              setLeaderboardPage(1)
+              setLeaderboardCursors([undefined])
+            }}
           />
         )}
       </SettingsSection>
 
       <SettingsSection
-        title="Reviewer stats"
-        description="Issues surfaced by Alephat Review and how often users addressed them."
+        title="Reviewer Stats"
+        description="Issues surfaced by Open SWE Review and how often users addressed them."
       >
         {leaderboard.isLoading ? (
-          <div className="grid gap-3 p-4 sm:grid-cols-2">
+          <div className="grid gap-space-3 p-space-4 sm:grid-cols-2">
             <Skeleton className="h-24 w-full" />
             <Skeleton className="h-24 w-full" />
             <Skeleton className="h-24 w-full" />
             <Skeleton className="h-24 w-full" />
           </div>
         ) : leaderboard.isError ? (
-          <p className="p-4 text-xs text-destructive">
-            Failed to load reviewer stats: {leaderboard.error.message}
+          <p className="p-space-4 text-xs text-error-secondary">
+            Reviewer stats are unavailable. Retry usage analytics above.
           </p>
         ) : leaderboard.data?.reviewer_stats ? (
           <ReviewerStats stats={leaderboard.data.reviewer_stats} />
         ) : (
-          <div className="p-6 text-center text-xs text-muted-foreground">
+          <div className="p-space-5 text-center text-xs text-secondary">
             No reviewer stats have been recorded for{" "}
             {PERIOD_LABELS[activePeriod].toLowerCase()} yet.
           </div>
         )}
       </SettingsSection>
-      {leaderboard.data?.generated_at_ms ? (
-        <p className="text-right text-xs text-muted-foreground">
-          Updated {formatTime(leaderboard.data.generated_at_ms)}
-        </p>
-      ) : null}
-    </AppShell>
+      <AnalyticsCoverage
+        reports={metadata}
+        reportPayload={report.data?.payload ?? null}
+        refreshing={refreshing}
+        onRefresh={refreshNow}
+        period={activePeriod}
+        reportFetchedAt={report.data?.fetchedAt ?? null}
+        reportServerAsOf={report.data?.payload.as_of ?? null}
+        reportRefreshError={report.isError && !report.data ? null : reportError}
+      />
+    </>
   )
 }
 
-function UsageTable({
-  rows,
-  totalMembers,
+function AnalyticsCoverage({
+  reports,
+  reportPayload,
+  refreshing,
+  onRefresh,
+  period,
+  reportFetchedAt,
+  reportServerAsOf,
+  reportRefreshError,
 }: {
-  rows: Array<UsageLeaderboardRow>
-  totalMembers: number
+  reports: AnalyticsMetadata[]
+  /** The retained PR report payload; survives a failed refresh even when `reports` excludes it. */
+  reportPayload: PRMergeRatePayload | null
+  refreshing: boolean
+  onRefresh: () => void
+  period: UsageLeaderboardPeriod
+  /** When this browser last received the PR report; separate from the server-side `as_of`. */
+  reportFetchedAt: string | null
+  /** The PR report's own server-side as_of; never another report's. */
+  reportServerAsOf: string | null
+  /** Failed manual refresh while the last good report stays on screen. */
+  reportRefreshError: ApiError | null
+}) {
+  if (!reports.length) return null
+  const latest = reports.reduce((a, b) => (a.as_of > b.as_of ? a : b))
+  const hasPendingEvents = reports.some((data) => data.has_pending_events)
+  const hasFailedEvents = reports.some((data) => data.has_failed_events)
+  const status: {
+    label: string
+    description?: string
+    icon: typeof WarningCircleIcon
+    tone: string
+  } = hasFailedEvents
+    ? {
+        label: "Analytics need attention",
+        description:
+          "Some events could not be processed. Reports may be incomplete.",
+        icon: WarningCircleIcon,
+        tone: "text-icon-error",
+      }
+    : hasPendingEvents
+      ? {
+          label: "Analytics are updating",
+          description: "New activity is still being processed.",
+          icon: ClockCountdownIcon,
+          tone: "text-icon-warning",
+        }
+      : {
+          label: "Analytics are up to date",
+          icon: CheckCircleIcon,
+          tone: "text-icon-success",
+        }
+  const StatusIcon = status.icon
+
+  return (
+    <div role="status" aria-label="Analytics coverage">
+      <details className="group rounded-lg border border-muted bg-surface-level-2 text-xs">
+        <summary className="flex cursor-pointer list-none items-center gap-space-3 rounded-lg px-space-4 py-space-3 focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none [&::-webkit-details-marker]:hidden">
+          <StatusIcon
+            aria-hidden="true"
+            size={16}
+            className={cn("shrink-0", status.tone)}
+            weight="fill"
+          />
+          <span className="min-w-0 flex-1">
+            <span className="block font-medium text-primary">
+              {status.label}
+            </span>
+            {status.description ? (
+              <span className="mt-0.5 block text-secondary">
+                {status.description}
+              </span>
+            ) : null}
+          </span>
+          <Button
+            type="button"
+            size="xs"
+            color="secondary"
+            variant="outlined"
+            className="shrink-0 focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none"
+            leftDecorator={ArrowClockwiseIcon}
+            disabled={refreshing}
+            onClick={(event) => {
+              event.preventDefault()
+              onRefresh()
+            }}
+          >
+            {refreshing ? "Refreshing…" : "Refresh now"}
+          </Button>
+          <span className="flex shrink-0 items-center gap-space-1 font-medium text-secondary group-open:text-primary">
+            Details
+            <CaretDownIcon
+              aria-hidden="true"
+              size={14}
+              weight="regular"
+              className="transition-transform group-open:rotate-180"
+            />
+          </span>
+        </summary>
+        <div className="space-y-space-1 border-t border-default px-space-4 py-space-3 text-secondary">
+          <p>
+            Period: {PERIOD_LABELS[period]} · PR report as of{" "}
+            {reportServerAsOf ? (
+              <time dateTime={reportServerAsOf}>
+                {new Date(reportServerAsOf).toLocaleString()}
+              </time>
+            ) : (
+              "Unavailable"
+            )}{" "}
+            (server); last fetched by this browser:{" "}
+            {reportFetchedAt
+              ? new Date(reportFetchedAt).toLocaleString()
+              : "Unavailable"}
+            .
+          </p>
+          {reportRefreshError ? (
+            <p className="text-error-secondary">
+              Last PR report refresh failed (
+              {reportRefreshError.status > 0
+                ? `HTTP ${reportRefreshError.status}`
+                : "network error"}
+              ). The report shown is from the last successful fetch above.
+            </p>
+          ) : null}
+          <p>
+            Reporting since{" "}
+            <time dateTime={latest.reporting_cutover_at}>
+              {new Date(latest.reporting_cutover_at).toLocaleString()}
+            </time>
+            .
+          </p>
+          <p>
+            {latest.last_processed_at
+              ? `Last event processed ${new Date(latest.last_processed_at).toLocaleString()}. `
+              : "No events have been processed yet. "}
+            {hasPendingEvents
+              ? "Some captured events are still waiting to be processed. "
+              : ""}
+            {hasFailedEvents
+              ? "Some events could not be processed. Reports may be incomplete. "
+              : ""}
+          </p>
+          <CopyDiagnosticsButton
+            getDiagnostics={() =>
+              buildUsageDiagnostics({
+                period,
+                reports,
+                reportServerAsOf,
+                reportFetchedAt,
+                reportRefreshError,
+                avgDeliverySeconds: avgDeliveryAvailability(reportPayload),
+              })
+            }
+          />
+        </div>
+      </details>
+    </div>
+  )
+}
+
+/** Delivery-timing availability of the retained PR report, even while a refresh fails. */
+function avgDeliveryAvailability(
+  payload: PRMergeRatePayload | null
+): MetricAvailability | null {
+  if (!payload || payload.status !== "ready" || !payload.cohorts.length) {
+    return null
+  }
+  const cohorts = payload.cohorts
+  const supported = cohorts.some((cohort) => "avg_delivery_seconds" in cohort)
+  const values = cohorts
+    .map((cohort) =>
+      "avg_delivery_seconds" in cohort ? cohort.avg_delivery_seconds : null
+    )
+    .filter((value): value is number => typeof value === "number")
+  return metricAvailability(supported, values[0] ?? null)
+}
+
+function usePRMergeRateReport(
+  period: UsageLeaderboardPeriod,
+  login: string,
+  isAdmin: boolean,
+  onRefreshErrorChange: (error: ApiError | null) => void
+) {
+  return useQuery({
+    queryKey: ["prMergeRateByModel", period, login, isAdmin],
+    queryFn: (): Promise<PRMergeRateResponse> => api.prMergeRateByModel(period),
+    staleTime: 60 * 1000,
+    refetchInterval: 60 * 1000,
+    retry: (count, error) =>
+      !(error instanceof ApiError && error.status >= 400) && count < 2,
+    // Manual refreshes are not the only successes: automatic interval/focus
+    // fetches must also clear a retained failure announcement.
+    meta: { onRefreshErrorChange },
+  })
+}
+
+function PRMergeRateSection({
+  report,
+}: {
+  report: ReturnType<typeof usePRMergeRateReport>
+}) {
+  const data = report.data?.payload
+  const failed = report.isError && !data
+  const emptyMessage =
+    data?.status === "not_started"
+      ? "No analytics records have been captured since the reporting cutover yet."
+      : data?.status === "suppressed"
+        ? "PR groups in this period are too small to show under the privacy threshold."
+        : "No PRs have been recorded for this period yet."
+
+  return (
+    <SettingsSection
+      title="PR Outcomes"
+      description="Outcomes for PRs opened during the selected period."
+    >
+      {report.isPending ? (
+        <div
+          className="space-y-space-2 p-space-4"
+          role="status"
+          aria-label="Loading PR outcomes"
+        >
+          <Skeleton className="h-16 w-full" />
+          <Skeleton className="h-16 w-full" />
+        </div>
+      ) : failed ? (
+        <div className="p-space-4" role="alert">
+          <Banner
+            intent="error"
+            title={
+              report.error instanceof ApiError && report.error.status === 503
+                ? "PR analytics is unavailable on this deployment."
+                : "Could not load PR outcomes. Try again."
+            }
+            action={
+              <Button
+                size="xs"
+                color="secondary"
+                variant="outlined"
+                onClick={() => void report.refetch()}
+              >
+                Retry
+              </Button>
+            }
+          />
+        </div>
+      ) : data?.status === "ready" ? (
+        <PRMergeRateTable
+          key={data.period}
+          cohorts={data.cohorts}
+          maturityDays={data.maturity_days}
+        />
+      ) : (
+        <p
+          className="p-space-5 text-center text-xs text-secondary"
+          role="status"
+        >
+          {emptyMessage}
+        </p>
+      )}
+      {data?.unavailable_thread_ids.length ? (
+        <details className="border-t border-default px-space-4 py-space-3 text-xs text-secondary">
+          <summary className="cursor-pointer rounded-sm focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none">
+            Unavailable model attribution ({data.unavailable_thread_ids.length})
+          </summary>
+          <p className="mt-space-3">
+            These PRs are excluded from model outcomes. Copy a thread ID to
+            triage its opening-run attribution.
+          </p>
+          <ul className="mt-space-2 space-y-space-1">
+            {data.unavailable_thread_ids.map((threadId) => (
+              <li key={threadId} className="flex items-center gap-space-2">
+                <code className="select-all">{threadId}</code>
+                <Button
+                  size="xs"
+                  color="secondary"
+                  variant="underlined"
+                  onClick={() => void navigator.clipboard.writeText(threadId)}
+                >
+                  Copy
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+      {data ? (
+        <details className="border-t border-default px-space-4 py-space-3 text-xs text-secondary">
+          <summary className="cursor-pointer rounded-sm focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none">
+            How these numbers work
+          </summary>
+          <div className="mt-space-3 space-y-space-3">
+            <p>
+              <strong>Open</strong> includes PRs that haven’t been merged or
+              closed. Each count’s tooltip shows the age breakdown: open for
+              less than {data.maturity_days} days, or open for{" "}
+              {data.maturity_days} days or longer.
+            </p>
+            <p>
+              <strong>Median distance</strong> is the median normalized line
+              edit distance between each merged PR’s opening diff and final
+              diff. It is calculated only for merged PRs with complete text
+              patches; higher means more post-open editing.{" "}
+              <strong>Mean distance</strong> is the arithmetic mean of those
+              same per-PR percentages; unusually rewritten PRs affect it more.
+              Neither metric weights PRs by size. The measured/merged count
+              shows how many merged PRs had complete patches.
+            </p>
+            <p>
+              <strong>Merge rate</strong> includes only PRs old enough to have a
+              meaningful outcome. It counts merged, closed without merge, and
+              still-open PRs that are at least {data.maturity_days} days old.
+              Newer open PRs are excluded so they do not lower the rate before
+              they have had enough time to merge.
+            </p>
+            <p>
+              <strong>Time to merge</strong> is the arithmetic mean of time from
+              PR opened to merged across merged PRs opened in the selected
+              period. Unmerged PRs are excluded, and it shows — when a group has
+              no merges.
+            </p>
+            <p>
+              <strong>Time to PR</strong> is the arithmetic mean of time from
+              opening-run start to PR creation across all PRs opened in the
+              selected period. PRs without a valid opening-run start time are
+              excluded, and it shows — when a group has none.
+            </p>
+            <ul className="list-disc space-y-space-1 pl-space-4">
+              <li>
+                Merge rate = merged ÷ (merged + closed without merge + open at
+                least {data.maturity_days} days).
+              </li>
+            </ul>
+            <p>
+              PRs are grouped by the model configured for the run that opened
+              them. Other models may contribute through routing, fallback,
+              subagents, or later runs, so these rates do not measure one
+              model's independent success.
+            </p>
+            {data.suppression_threshold > 1 ? (
+              <p>
+                Groups with fewer than {data.suppression_threshold} PRs are
+                hidden for privacy.
+              </p>
+            ) : null}
+          </div>
+        </details>
+      ) : null}
+    </SettingsSection>
+  )
+}
+
+function AvgTimeToMerge({
+  cohort,
+}: {
+  cohort: PRMergeRateCohort | PRMergeRateEffort
 }) {
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[1040px] text-xs">
-        <thead className="border-b border-border text-xs text-muted-foreground">
-          <tr>
-            <th className="w-14 px-4 py-3 text-left font-normal">Rank</th>
-            <th className="px-2 py-3 text-left font-normal">User</th>
-            <th className="px-2 py-3 text-left font-normal">Favorite Model</th>
-            <th className="px-2 py-3 text-right font-normal">Invocations</th>
-            <th className="px-2 py-3 text-right font-normal">Tokens</th>
-            <th className="px-2 py-3 text-right font-normal">Cost</th>
-            <th className="px-2 py-3 text-right font-normal">
-              Avg Invocation Duration
-            </th>
-            <th className="px-2 py-3 text-right font-normal">PRs Opened</th>
-            <th className="px-2 py-3 text-right font-normal">Merged PRs</th>
-            <th className="px-4 py-3 text-right font-normal">Agent LOC</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-border">
-          {rows.map((row) => (
-            <tr
-              key={`${row.rank}-${row.user.github_login ?? row.user.email ?? row.user.name}`}
+    <span>
+      {cohort.avg_merge_seconds == null
+        ? "—"
+        : formatAvgDuration(cohort.avg_merge_seconds)}
+    </span>
+  )
+}
+
+function AvgTimeToPR({
+  cohort,
+}: {
+  cohort: PRMergeRateCohort | PRMergeRateEffort
+}) {
+  if (!("avg_delivery_seconds" in cohort)) {
+    // A backend that predates the metric has no key for it at all.
+    return (
+      <span
+        className={HELP_TRIGGER_CLASS}
+        title="Metric unavailable from this backend"
+        aria-label="Time to PR: metric unavailable from this backend"
+        tabIndex={0}
+      >
+        —
+      </span>
+    )
+  }
+  if (cohort.avg_delivery_seconds == null) {
+    return <span title="No PRs with valid timing in this group">—</span>
+  }
+  return <span>{formatAvgDuration(cohort.avg_delivery_seconds)}</span>
+}
+
+type OutcomeGroup = Pick<
+  PRMergeRateCohort,
+  | "cohort_size"
+  | "merged"
+  | "closed_without_merge"
+  | "mature_pending"
+  | "waiting"
+>
+type Outcome = "merged" | "closed_without_merge" | "open"
+
+function outcomePercent(group: OutcomeGroup, outcome: Outcome): number {
+  if (!group.cohort_size) return 0
+  const counts = [
+    group.merged,
+    group.closed_without_merge,
+    group.mature_pending + group.waiting,
+  ]
+  const raw = counts.map((count) => (count * 100) / group.cohort_size)
+  const rounded = raw.map(Math.floor)
+  const remainder = 100 - rounded.reduce((sum, value) => sum + value, 0)
+  const order = [0, 1, 2].sort(
+    (a, b) => raw[b]! - rounded[b]! - (raw[a]! - rounded[a]!) || a - b
+  )
+  for (let index = 0; index < remainder; index++) rounded[order[index]!]!++
+  return rounded[{ merged: 0, closed_without_merge: 1, open: 2 }[outcome]]!
+}
+
+function OutcomeCell({
+  group,
+  outcome,
+  maturityDays,
+}: {
+  group: OutcomeGroup
+  outcome: Outcome
+  maturityDays: number
+}) {
+  const [open, setOpen] = useState(false)
+  const count =
+    outcome === "open" ? group.mature_pending + group.waiting : group[outcome]
+  const value = (
+    <>
+      {count}{" "}
+      <span className="text-secondary">
+        ({outcomePercent(group, outcome)}%)
+      </span>
+    </>
+  )
+  if (outcome !== "open" || !count) return value
+  return (
+    <Tooltip
+      open={open}
+      onOpenChange={setOpen}
+      title={
+        <div className="text-xs">
+          <div>
+            {group.waiting} open for less than {maturityDays} days
+          </div>
+          <div>
+            {group.mature_pending} open for {maturityDays} days or longer
+          </div>
+        </div>
+      }
+    >
+      <Button
+        color="secondary"
+        variant="plain"
+        size="sm"
+        aria-label={`${count} (${outcomePercent(group, outcome)}%)`}
+        type="button"
+        // A click pins the breakdown open instead of toggling it shut.
+        onClick={(event) => {
+          event.preventDefault()
+          setOpen(true)
+        }}
+        className={cn(
+          "focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none",
+          "h-auto border-0 px-0",
+          HELP_TRIGGER_CLASS
+        )}
+      >
+        {value}
+      </Button>
+    </Tooltip>
+  )
+}
+
+function prOutcomeSortValue(cohort: PRMergeRateCohort, sort: PROutcomesSort) {
+  switch (sort) {
+    case "model":
+      return safeModelLabel(cohort.model_id ?? "") || "Unavailable"
+    case "prs_opened":
+      return cohort.cohort_size
+    case "merged":
+      return cohort.merged
+    case "closed_without_merge":
+      return cohort.closed_without_merge
+    case "open":
+      return cohort.waiting + cohort.mature_pending
+    case "median_distance":
+      return cohort.median_distance_basis_points ?? null
+    case "mean_distance":
+      return cohort.mean_distance_basis_points ?? null
+    case "merge_rate":
+      return cohort.mature_cohort_merge_share
+    case "avg_delivery_seconds":
+      return cohort.avg_delivery_seconds ?? null
+    case "avg_merge_seconds":
+      return cohort.avg_merge_seconds ?? null
+  }
+}
+
+function prOutcomeColumns(
+  maturityDays: number
+): Array<SortableColumn<PROutcomesSort>> {
+  return [
+    {
+      key: "model",
+      label: "Opening model",
+      align: "left",
+      defaultDirection: "asc",
+    },
+    { key: "prs_opened", label: "PRs opened (base)", align: "right" },
+    { key: "merged", label: "Merged", align: "right" },
+    {
+      key: "merge_rate",
+      label: "Mature merge rate",
+      align: "right",
+      tooltip: `Includes merged and closed PRs, plus PRs open for at least ${maturityDays} days. Newer open PRs are excluded.`,
+    },
+    {
+      key: "closed_without_merge",
+      label: "Closed without merge",
+      align: "right",
+    },
+    { key: "open", label: "Open", align: "right" },
+    {
+      key: "median_distance",
+      label: "Median distance",
+      align: "right",
+      tooltip:
+        "Median post-open line edit distance across measurable merged PRs.",
+    },
+    {
+      key: "mean_distance",
+      label: "Mean distance",
+      align: "right",
+      tooltip:
+        "Mean post-open line edit distance across measurable merged PRs. Unusually rewritten PRs affect it more than the median; PRs are not weighted by size.",
+    },
+    {
+      key: "avg_delivery_seconds",
+      label: "Time to PR",
+      align: "right",
+      tooltip:
+        "Average time from opening-run start to PR creation, regardless of outcome. PRs with missing or invalid timing are excluded.",
+    },
+    {
+      key: "avg_merge_seconds",
+      label: "Time to merge",
+      align: "right",
+      tooltip:
+        "Average time from PR opened to merged. Unmerged PRs are excluded.",
+    },
+  ]
+}
+
+function PROutcomeCells({
+  group,
+  maturityDays,
+}: {
+  group: PRMergeRateCohort | PRMergeRateEffort
+  maturityDays: number
+}) {
+  const rate = group.mature_cohort_merge_share
+  return (
+    <>
+      <td className="px-space-2 py-space-3 text-right whitespace-nowrap tabular-nums">
+        {group.cohort_size} <span className="text-secondary">(100%)</span>
+      </td>
+      {(["merged", "closed_without_merge", "open"] as const).map((outcome) => (
+        <Fragment key={outcome}>
+          <td className="px-space-2 py-space-3 text-right whitespace-nowrap tabular-nums">
+            <OutcomeCell
+              group={group}
+              outcome={outcome}
+              maturityDays={maturityDays}
+            />
+          </td>
+          {outcome === "merged" && (
+            <td className="px-space-2 py-space-3 text-right whitespace-nowrap tabular-nums">
+              <span className="font-semibold">
+                {rate == null ? "—" : formatPercent(rate)}
+              </span>
+              {rate != null && (
+                <div className="text-xs text-secondary">
+                  {group.merged}/{group.mature_denominator} eligible
+                </div>
+              )}
+              {rate != null && group.mature_denominator < 5 && (
+                <div className="text-xs text-warning-secondary">
+                  Small sample
+                </div>
+              )}
+            </td>
+          )}
+        </Fragment>
+      ))}
+      {(["median_distance", "mean_distance"] as const).map((metric) => {
+        const value =
+          metric === "median_distance"
+            ? group.median_distance_basis_points
+            : "mean_distance_basis_points" in group
+              ? group.mean_distance_basis_points
+              : undefined
+        const supported =
+          metric === "median_distance" || "mean_distance_basis_points" in group
+        return (
+          <td
+            key={metric}
+            className="px-space-2 py-space-3 text-right whitespace-nowrap tabular-nums"
+          >
+            <Tooltip
+              title={
+                supported
+                  ? `${group.distance_sample_size ?? 0}/${group.merged} merged PRs measured`
+                  : "Mean distance unavailable for this group"
+              }
             >
-              <td className="px-4 py-3 text-muted-foreground">{row.rank}</td>
-              <td className="px-2 py-3">
-                <UserCell row={row} />
-              </td>
-              <td className="max-w-48 truncate px-2 py-3 text-muted-foreground">
-                {row.favorite_model}
-              </td>
-              <td className="px-2 py-3 text-right tabular-nums">
-                {formatNumber(row.invocations)}
-              </td>
-              <td className="px-2 py-3 text-right tabular-nums">
-                {formatNumber(row.total_tokens)}
-              </td>
-              <td className="px-2 py-3 text-right tabular-nums">
-                {formatCurrency(row.total_cost_usd)}
-              </td>
-              <td className="px-2 py-3 text-right tabular-nums">
-                {formatDuration(row.avg_invocation_seconds)}
-              </td>
-              <td className="px-2 py-3 text-right tabular-nums">
-                {formatNumber(row.prs_opened)}
-              </td>
-              <td className="px-2 py-3 text-right tabular-nums">
-                {formatNumber(row.merged_prs)}
-              </td>
-              <td
-                className="px-4 py-3 text-right tabular-nums"
-                title={`${formatNumber(row.additions)} additions, ${formatNumber(row.deletions)} deletions`}
+              <Button
+                color="secondary"
+                variant="plain"
+                size="sm"
+                aria-label={
+                  value == null ? "—" : `${(value / 100).toFixed(1)}%`
+                }
+                type="button"
+                className={cn(
+                  "focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none",
+                  "h-auto border-0 px-0",
+                  HELP_TRIGGER_CLASS
+                )}
               >
-                {formatNumber(row.agent_loc)}
-              </td>
+                {value == null ? "—" : `${(value / 100).toFixed(1)}%`}
+              </Button>
+            </Tooltip>
+            {supported && group.distance_sample_size !== undefined && (
+              <div className="text-xs text-secondary">
+                {group.distance_sample_size}/{group.merged} measured
+              </div>
+            )}
+            {supported &&
+              (group.distance_sample_size ?? 0) > 0 &&
+              (group.distance_sample_size ?? 0) < 5 && (
+                <div className="text-xs text-warning-secondary">
+                  Small sample
+                </div>
+              )}
+          </td>
+        )
+      })}
+      <td className="px-space-2 py-space-3 text-right whitespace-nowrap tabular-nums">
+        <AvgTimeToPR cohort={group} />
+      </td>
+      <td className="px-space-2 py-space-3 text-right whitespace-nowrap tabular-nums">
+        <AvgTimeToMerge cohort={group} />
+      </td>
+    </>
+  )
+}
+
+function PRMergeRateTable({
+  cohorts,
+  maturityDays,
+}: {
+  cohorts: PRMergeRateCohort[]
+  maturityDays: number
+}) {
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(10)
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  const [sort, setSort] = useState<PROutcomesSort>("prs_opened")
+  const [direction, setDirection] = useState<SortDirection>("desc")
+  const sortedCohorts = [...cohorts].sort((a, b) => {
+    const aValue = prOutcomeSortValue(a, sort)
+    const bValue = prOutcomeSortValue(b, sort)
+    if (aValue == null) return bValue == null ? 0 : 1
+    if (bValue == null) return -1
+    const comparison =
+      typeof aValue === "string" && typeof bValue === "string"
+        ? aValue.localeCompare(bValue, undefined, { sensitivity: "base" })
+        : Number(aValue) - Number(bValue)
+    return (
+      (direction === "asc" ? comparison : -comparison) ||
+      (safeModelLabel(a.model_id ?? "") || "Unavailable").localeCompare(
+        safeModelLabel(b.model_id ?? "") || "Unavailable"
+      )
+    )
+  })
+  const pageCount = Math.max(1, Math.ceil(sortedCohorts.length / pageSize))
+  const currentPage = Math.min(page, pageCount)
+  const rows = sortedCohorts.slice(
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize
+  )
+
+  return (
+    <div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[1100px] text-xs">
+          <caption className="px-space-4 py-space-3 text-left text-secondary">
+            Outcome shares use PRs opened in each row as their base. Expand a
+            model to see its reasoning efforts.
+          </caption>
+          <thead className="border-b border-default text-secondary">
+            <tr>
+              {prOutcomeColumns(maturityDays).map((column) => (
+                <SortableHeader
+                  key={column.key}
+                  column={column}
+                  sortKey={sort}
+                  sortDirection={direction}
+                  onSort={(nextSort, defaultDirection) => {
+                    setDirection(
+                      nextSort === sort
+                        ? direction === "asc"
+                          ? "desc"
+                          : "asc"
+                        : defaultDirection
+                    )
+                    setSort(nextSort)
+                    setPage(1)
+                  }}
+                  className={
+                    column.key === "model"
+                      ? "sticky left-0 z-table-sticky-cell bg-surface-level-2 pl-space-4 text-left"
+                      : "text-right"
+                  }
+                />
+              ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
-      <div className="border-t border-border px-4 py-3 text-xs text-muted-foreground">
-        Top {Math.min(10, totalMembers)} of {formatNumber(totalMembers)} member
-        {totalMembers === 1 ? "" : "s"}
+          </thead>
+          <tbody className="divide-y divide-subtle [&>tr]:bg-surface-level-2">
+            {rows.map((cohort) => {
+              const key = `${cohort.model_id}-${cohort.model_attribution_quality}`
+              const modelLabel =
+                safeModelLabel(cohort.model_id ?? "") || "Unavailable"
+              const hasMultipleEfforts = cohort.efforts.length > 1
+              const isExpanded = hasMultipleEfforts && expanded.has(key)
+              return (
+                <Fragment key={key}>
+                  <tr>
+                    <th
+                      scope="row"
+                      className="sticky left-0 z-table-sticky-cell bg-inherit px-space-4 py-space-3 text-left font-normal"
+                    >
+                      <div className="flex items-center gap-space-2">
+                        {hasMultipleEfforts ? (
+                          <IconButton
+                            size="xxs"
+                            color="secondary"
+                            variant="plain"
+                            className="-ml-space-1 shrink-0"
+                            icon={isExpanded ? CaretDownIcon : CaretRightIcon}
+                            label={`${isExpanded ? "Collapse" : "Expand"} ${modelLabel} reasoning efforts`}
+                            aria-expanded={isExpanded}
+                            onClick={() =>
+                              setExpanded((current) => {
+                                const next = new Set(current)
+                                if (next.has(key)) next.delete(key)
+                                else next.add(key)
+                                return next
+                              })
+                            }
+                          />
+                        ) : (
+                          <span
+                            aria-hidden="true"
+                            className="-ml-space-1 size-5.5 shrink-0"
+                          />
+                        )}
+                        <div>
+                          <div className="font-medium">{modelLabel}</div>
+                          <div className="text-secondary">
+                            {hasMultipleEfforts
+                              ? "All efforts"
+                              : formatEffort(cohort.efforts[0]?.effort)}{" "}
+                            · {cohort.model_attribution_quality} attribution
+                          </div>
+                        </div>
+                      </div>
+                    </th>
+                    <PROutcomeCells
+                      group={cohort}
+                      maturityDays={maturityDays}
+                    />
+                  </tr>
+                  {isExpanded &&
+                    cohort.efforts.map((effort) => (
+                      <tr key={`${key}-${effort.effort ?? "unknown"}`}>
+                        <th
+                          scope="row"
+                          className="sticky left-0 z-table-sticky-cell bg-inherit py-space-3 pr-space-2 pl-space-7 text-left font-medium"
+                        >
+                          {formatEffort(effort.effort)}
+                        </th>
+                        <PROutcomeCells
+                          group={effort}
+                          maturityDays={maturityDays}
+                        />
+                      </tr>
+                    ))}
+                </Fragment>
+              )
+            })}
+          </tbody>
+        </table>
       </div>
+      <TablePagination
+        page={currentPage}
+        pageSize={pageSize}
+        total={cohorts.length}
+        onPageChange={setPage}
+        onPageSizeChange={(value) => {
+          setPageSize(value)
+          setPage(1)
+        }}
+      />
+    </div>
+  )
+}
+
+function usageColumns(
+  scope: UsageScope,
+  period: UsageLeaderboardPeriod
+): Array<SortableColumn<UsageLeaderboardSort>> {
+  return [
+    { key: "rank", label: "Rank", align: "left", defaultDirection: "asc" },
+    { key: "user", label: "User", align: "left", defaultDirection: "asc" },
+    {
+      key: "favorite_model",
+      label: "Favorite Model",
+      align: "left",
+      defaultDirection: "asc",
+    },
+    {
+      key: scope === "threads" ? "threads" : "invocations",
+      label: scope === "threads" ? "Threads" : "Invocations",
+      align: "right",
+    },
+    {
+      key: "avg_invocations_per_thread",
+      label: "Avg Invocations / Thread",
+      align: "right",
+    },
+    { key: "total_tokens", label: "Tokens", align: "right" },
+    { key: "total_cost_usd", label: "Cost", align: "right" },
+    {
+      key:
+        scope === "threads" ? "avg_thread_seconds" : "avg_invocation_seconds",
+      label:
+        scope === "threads" ? "Avg Thread Duration" : "Avg Invocation Duration",
+      align: "right",
+    },
+    { key: "prs_opened", label: "PRs Opened", align: "right" },
+    { key: "merged_prs", label: "Merged PRs", align: "right" },
+    {
+      key: "merged_prs_per_thread",
+      label: "Merged PRs / Thread",
+      align: "right",
+      tooltip: `Merged PRs ÷ distinct threads ${
+        period === "all"
+          ? "all time"
+          : `in the ${PERIOD_LABELS[period].toLowerCase()}`
+      } — an aggregate ratio, not a per-thread outcome. One thread can open several PRs and many threads open none, so 1.00 does not mean every thread merged a PR.`,
+    },
+    { key: "agent_loc", label: "Agent LOC", align: "right" },
+    { key: "prs_reviewed", label: "PRs reviewed", align: "right" },
+  ]
+}
+
+function SortableHeader<Key extends string>({
+  column,
+  sortKey,
+  sortDirection,
+  onSort,
+  className,
+}: {
+  column: SortableColumn<Key>
+  sortKey: Key
+  sortDirection: SortDirection
+  onSort: (key: Key, direction: SortDirection) => void
+  className: string
+}) {
+  const isActive = sortKey === column.key
+  const Icon = isActive
+    ? sortDirection === "asc"
+      ? SortAscendingIcon
+      : SortDescendingIcon
+    : ArrowsDownUpIcon
+  const ariaSort = isActive
+    ? sortDirection === "asc"
+      ? "ascending"
+      : "descending"
+    : undefined
+
+  const button = (
+    <Button
+      color="secondary"
+      variant="plain"
+      size="sm"
+      aria-label={column.label}
+      type="button"
+      onClick={() => onSort(column.key, column.defaultDirection ?? "desc")}
+      className={cn(
+        "focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none",
+        "h-auto whitespace-normal",
+        "w-full gap-space-1 px-space-2 py-space-3 hover:bg-surface-level-2-hover",
+        column.align === "right" ? "justify-end" : "justify-start",
+        isActive && "text-primary",
+        column.tooltip &&
+          "cursor-help underline decoration-dotted underline-offset-2"
+      )}
+    >
+      {column.label}
+      <Icon
+        size={12}
+        weight="regular"
+        className={cn("shrink-0", !isActive && "text-icon-tertiary")}
+        aria-hidden
+      />
+    </Button>
+  )
+
+  return (
+    <th
+      scope="col"
+      aria-sort={ariaSort}
+      className={`${className} p-0 font-normal`}
+    >
+      {column.tooltip ? (
+        <Tooltip title={column.tooltip} tooltipClassName="max-w-xs">
+          {button}
+        </Tooltip>
+      ) : (
+        button
+      )}
+    </th>
+  )
+}
+
+function formatEffort(effort: string | null | undefined) {
+  return effort
+    ? effort.charAt(0).toUpperCase() + effort.slice(1)
+    : "Unknown / legacy"
+}
+
+function UsageTable({
+  scope,
+  period,
+  currentUserRank,
+  rows,
+  totalMembers,
+  page,
+  pageSize,
+  sort,
+  direction,
+  isUpdating,
+  onSort,
+  onPageChange,
+  onPageSizeChange,
+}: {
+  scope: UsageScope
+  period: UsageLeaderboardPeriod
+  currentUserRank: number | null
+  rows: Array<UsageLeaderboardRow>
+  totalMembers: number
+  page: number
+  pageSize: number
+  sort: UsageLeaderboardSort
+  direction: SortDirection
+  isUpdating: boolean
+  onSort: (key: UsageLeaderboardSort, direction: SortDirection) => void
+  onPageChange: (page: number) => void
+  onPageSizeChange: (pageSize: number) => void
+}) {
+  return (
+    <div>
+      <div className="overflow-x-auto">
+        <table aria-busy={isUpdating} className="w-full min-w-[1040px] text-xs">
+          {isUpdating ? (
+            <caption className="sr-only">Updating leaderboard</caption>
+          ) : null}
+          <thead className="border-b border-default text-xs text-secondary">
+            <tr>
+              {usageColumns(scope, period).map((column, index, columns) => (
+                <SortableHeader
+                  key={column.key}
+                  column={column}
+                  sortKey={sort}
+                  sortDirection={direction}
+                  onSort={onSort}
+                  className={`${index === 0 ? "w-14 pr-0 pl-space-4" : index === columns.length - 1 ? "pr-space-4 pl-0" : "px-0"} ${column.key === "user" ? "sticky left-0 z-table-sticky-cell bg-surface-level-2" : ""} ${column.align === "right" ? "text-right" : "text-left"}`}
+                />
+              ))}
+            </tr>
+          </thead>
+          <tbody
+            className={cn("divide-y divide-subtle", isUpdating && "opacity-50")}
+          >
+            {rows.map((row) => (
+              <tr
+                key={`${row.rank}-${row.user.github_login ?? row.user.email ?? row.user.name}`}
+                className="bg-surface-level-2"
+              >
+                <td className="px-space-4 py-space-3 text-secondary">
+                  {row.rank}
+                </td>
+                <td className="sticky left-0 z-table-sticky-cell bg-inherit px-space-2 py-space-3">
+                  <UserCell
+                    row={row}
+                    isCurrentUser={row.rank === currentUserRank}
+                  />
+                </td>
+                <td className="max-w-48 px-space-2 py-space-3 text-secondary">
+                  <div className="truncate">
+                    {safeModelLabel(row.favorite_model) || "Unavailable"}
+                  </div>
+                  <div className="capitalize">
+                    {row.favorite_model_effort === undefined
+                      ? null
+                      : (row.favorite_model_effort ?? "Unknown")}
+                  </div>
+                </td>
+                <td className="px-space-2 py-space-3 text-right tabular-nums">
+                  {formatNumber(
+                    scope === "threads" ? (row.threads ?? 0) : row.invocations
+                  )}
+                </td>
+                <td className="px-space-2 py-space-3 text-right tabular-nums">
+                  {row.threads
+                    ? (row.invocations / row.threads).toFixed(1)
+                    : "—"}
+                </td>
+                <td className="px-space-2 py-space-3 text-right tabular-nums">
+                  {formatNumber(row.total_tokens)}
+                </td>
+                <td className="px-space-2 py-space-3 text-right tabular-nums">
+                  <UsageCost row={row} />
+                </td>
+                <td className="px-space-2 py-space-3 text-right tabular-nums">
+                  {formatDuration(
+                    scope === "threads"
+                      ? (row.avg_thread_seconds ?? 0)
+                      : row.avg_invocation_seconds
+                  )}
+                </td>
+                <td className="px-space-2 py-space-3 text-right tabular-nums">
+                  {formatNumber(row.prs_opened)}
+                </td>
+                <td className="px-space-2 py-space-3 text-right tabular-nums">
+                  {formatNumber(row.merged_prs)}
+                </td>
+                <td className="px-space-2 py-space-3 text-right tabular-nums">
+                  {(row.merged_prs_per_thread ?? 0).toFixed(2)}
+                </td>
+                <td
+                  className="px-space-2 py-space-3 text-right tabular-nums"
+                  title={`${formatNumber(row.additions)} additions, ${formatNumber(row.deletions)} deletions`}
+                >
+                  {formatNumber(row.agent_loc)}
+                </td>
+                <td className="px-space-2 py-space-3 text-right tabular-nums">
+                  {formatNumber(row.prs_reviewed ?? 0)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <TablePagination
+        page={page}
+        pageSize={pageSize}
+        total={totalMembers}
+        disabled={isUpdating}
+        onPageChange={onPageChange}
+        onPageSizeChange={onPageSizeChange}
+      />
     </div>
   )
 }
@@ -227,22 +1513,22 @@ function ReviewerStats({ stats }: { stats: ReviewerStatsPayload }) {
       helper: `${formatNumber(stats.prs_with_findings)} with findings`,
     },
     {
-      label: "Issues surfaced",
+      label: "Issues Surfaced",
       value: stats.surfaced_findings,
       helper: `${formatNumber(stats.findings_recorded)} recorded`,
     },
     {
-      label: "Addressed & resolved",
+      label: "Addressed & Resolved",
       value: stats.addressed_findings,
       helper: `${formatPercent(stats.resolution_rate)} of surfaced`,
     },
     {
-      label: "Resolved after update",
+      label: "Resolved After Update",
       value: stats.resolved_after_update,
       helper: "Resolved on a later PR head",
     },
     {
-      label: "Awaiting follow-up",
+      label: "Awaiting Follow-Up",
       value: stats.unresolved_surfaced_findings,
       helper: "Surfaced but not resolved/dismissed",
     },
@@ -254,23 +1540,23 @@ function ReviewerStats({ stats }: { stats: ReviewerStatsPayload }) {
   ]
 
   return (
-    <div className="space-y-4 p-4">
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+    <div className="space-y-space-4 p-space-4">
+      <div className="grid gap-space-3 sm:grid-cols-2 lg:grid-cols-3">
         {cards.map((card) => (
-          <div key={card.label} className="rounded-md border border-border p-3">
-            <div className="text-xs text-muted-foreground">{card.label}</div>
-            <div className="mt-1 text-lg font-medium tabular-nums">
+          <Card key={card.label} className="bg-surface-level-3 p-space-3">
+            <div className="text-xs text-secondary">{card.label}</div>
+            <div className="mt-space-1 text-lg font-medium tabular-nums">
               {formatNumber(card.value)}
             </div>
-            <div className="mt-1 text-xs text-muted-foreground">
+            <div className="mt-space-1 text-xs text-secondary">
               {card.helper}
             </div>
-          </div>
+          </Card>
         ))}
       </div>
-      <div className="grid gap-4 border-t border-border pt-4 sm:grid-cols-2">
-        <CounterList title="Top categories" rows={stats.top_categories} />
-        <CounterList title="Severity mix" rows={severityRows(stats)} />
+      <div className="grid gap-space-4 border-t border-default pt-space-4 sm:grid-cols-2">
+        <CounterList title="Top Categories" rows={stats.top_categories} />
+        <CounterList title="Severity Mix" rows={severityRows(stats)} />
       </div>
     </div>
   )
@@ -296,65 +1582,156 @@ function CounterList({
 }) {
   return (
     <div>
-      <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
+      <Text as="h3" variant="sm" weight="medium" color="secondary">
+        {title}
+      </Text>
       {rows.length ? (
-        <ul className="mt-2 space-y-2 text-xs">
+        <ul className="mt-space-2 space-y-space-2 text-xs">
           {rows.map((row) => (
             <li
               key={row.name}
-              className="flex items-center justify-between gap-3"
+              className="flex items-center justify-between gap-space-3"
             >
-              <span className="truncate text-foreground">{row.name}</span>
-              <span className="text-muted-foreground tabular-nums">
+              <span className="truncate text-primary">{row.name}</span>
+              <span className="text-secondary tabular-nums">
                 {formatNumber(row.count)}
               </span>
             </li>
           ))}
         </ul>
       ) : (
-        <p className="mt-2 text-xs text-muted-foreground">No data yet.</p>
+        <Text as="p" variant="sm" color="secondary" className="mt-space-2">
+          No data yet
+        </Text>
       )}
     </div>
   )
 }
 
-function UserCell({ row }: { row: UsageLeaderboardRow }) {
-  const initials = initialsFor(row.user.name)
+function UserCell({
+  row,
+  isCurrentUser,
+}: {
+  row: Pick<UsageLeaderboardRow, "user">
+  isCurrentUser: boolean
+}) {
+  const detail = row.user.github_login
+  const profileUrl = githubProfileUrl(row.user.github_login)
+  const name = profileUrl ? (
+    <MacawLink
+      variant="xs"
+      href={profileUrl}
+      target="_blank"
+      rel="noreferrer"
+      className={cn(
+        INHERITED_LINK,
+        "min-w-0 truncate font-medium text-primary underline-offset-2 hover:underline focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none [&>span]:truncate"
+      )}
+    >
+      {row.user.name}
+    </MacawLink>
+  ) : (
+    <span className="truncate font-medium text-primary">{row.user.name}</span>
+  )
+  const avatar = (
+    <Avatar
+      size="sm"
+      shape="circle"
+      label={row.user.name}
+      imageUrl={row.user.avatar_url ?? undefined}
+    />
+  )
   return (
-    <div className="flex min-w-0 items-center gap-2.5">
-      <Avatar>
-        <AvatarFallback>{initials}</AvatarFallback>
-      </Avatar>
+    <div className="flex min-w-0 items-center gap-space-3">
+      {profileUrl ? (
+        <a
+          href={profileUrl}
+          target="_blank"
+          rel="noreferrer"
+          aria-hidden="true"
+          tabIndex={-1}
+        >
+          {avatar}
+        </a>
+      ) : (
+        avatar
+      )}
       <div className="flex min-w-0 flex-col">
-        <span className="truncate font-medium text-foreground">
-          {row.user.name}
-        </span>
-        <span className="truncate text-xs text-muted-foreground">
-          {row.user.email ?? row.user.github_login ?? "unknown"}
-        </span>
+        <div className="flex min-w-0 items-center gap-space-2">
+          {name}
+          {isCurrentUser ? (
+            <Badge color="secondary" size="xxs" aria-label="You">
+              You
+            </Badge>
+          ) : null}
+        </div>
+        {detail && detail !== row.user.name ? (
+          <span className="truncate text-xs text-secondary">{detail}</span>
+        ) : null}
       </div>
     </div>
   )
 }
 
-function initialsFor(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean)
-  if (!parts.length) return "?"
-  const first = parts[0] ?? "?"
-  const second = parts[1]
-  if (!second) return first.slice(0, 2).toUpperCase()
-  return `${first[0] ?? ""}${second[0] ?? ""}`.toUpperCase()
-}
-
-function formatTime(value: number): string {
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(value)
+function githubProfileUrl(login: string | null): string | null {
+  if (!login) return null
+  return `https://github.com/${encodeURIComponent(login)}`
 }
 
 function formatNumber(value: number): string {
   return new Intl.NumberFormat().format(value)
+}
+
+function UsageCost({ row }: { row: UsageLeaderboardRow }) {
+  if (row.invocations === 0) return <span>—</span>
+
+  const missing = row.invocations_without_cost
+  const partial = row.invocations_with_partial_cost
+  const coverageKnown = missing != null && partial != null
+  if (coverageKnown && missing === 0 && partial === 0) {
+    return <span>{formatCurrency(row.total_cost_usd)}</span>
+  }
+
+  const unavailable = coverageKnown
+    ? missing >= row.invocations
+    : row.total_cost_usd === 0
+  const label = unavailable ? "Unavailable" : "Incomplete"
+  const explanation = coverageKnown
+    ? [
+        unavailable ? "No costs have been recorded." : "Recorded cost so far.",
+        missing > 0
+          ? `Costs are missing for ${missing} of ${row.invocations} invocations (${formatPercent(missing / row.invocations)}).`
+          : "",
+        partial > 0
+          ? `Costs are partial for ${partial} of ${row.invocations} invocations.`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" ")
+    : "Cost coverage is unavailable for these invocations."
+
+  return (
+    <div className="flex flex-col items-end gap-0.5">
+      <span>{unavailable ? "—" : formatCurrency(row.total_cost_usd)}</span>
+      <Tooltip title={explanation} tooltipClassName="max-w-xs">
+        <Button
+          color="secondary"
+          variant="plain"
+          size="xs"
+          type="button"
+          aria-label={`Cost ${label.toLowerCase()}`}
+          className={cn(
+            "focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none",
+            "h-auto border-0 px-0",
+            HELP_TRIGGER_CLASS,
+            "text-secondary"
+          )}
+        >
+          {label}
+        </Button>
+      </Tooltip>
+    </div>
+  )
 }
 
 function formatCurrency(value: number): string {
@@ -369,6 +1746,12 @@ function formatCurrency(value: number): string {
 function formatDuration(value: number): string {
   if (value < 60) return `${Math.round(value)}s`
   return `${Math.round(value / 60)}m`
+}
+
+function formatAvgDuration(seconds: number): string {
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h`
+  return `${Math.round(seconds / 86400)}d`
 }
 
 function formatPercent(value: number): string {

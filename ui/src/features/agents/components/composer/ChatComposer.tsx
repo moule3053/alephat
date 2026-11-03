@@ -1,18 +1,39 @@
+import { useQuery } from "@tanstack/react-query"
+import { PlusIcon, XIcon } from "@langchain/macaw-components/icons"
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { ImagePlus, Map as MapIcon, Plus, X } from "lucide-react"
+import { Banner } from "@langchain/macaw-components/Banner"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@langchain/macaw-components/DropdownMenu"
+import { IconButton } from "@langchain/macaw-components/IconButton"
+import { Button } from "@langchain/macaw-components/Button"
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@langchain/macaw-components/Popover"
+import { SlidersHorizontalIcon } from "@phosphor-icons/react/dist/ssr/SlidersHorizontal"
+import { useAgentWorkspace } from "@/features/agents/lib/agentWorkspace"
+import { ImageSquareIcon } from "@phosphor-icons/react/dist/ssr/ImageSquare"
 
 import { ComposerCommandMenu } from "./ComposerCommandMenu"
-import { ComposerControl, ComposerControlIcon } from "./ComposerControl"
+import { ComposerReplyCards } from "./ComposerReplyCards"
+import type { PendingReply } from "./ComposerReplyCards"
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions"
 import {
   ComposerPromptEditor,
   mentionReplacementText,
 } from "./ComposerPromptEditor"
-import { ContextWindowMeter } from "./ContextWindowMeter"
-import { EnvironmentSelector } from "./EnvironmentSelector"
+import {
+  ContextWindowMeter,
+  type ContextWindowMeterProps,
+} from "./ContextWindowMeter"
+import { WorkspaceSelector } from "./WorkspaceSelector"
 import {
   LocalBranchSelector,
-  LocalProjectSelector,
+  LocalRepoSelector,
   LocalWorkspaceSelector,
   RunTargetSelector,
 } from "./RunTargetSelector"
@@ -29,19 +50,33 @@ import type {
 } from "./ComposerPromptEditor"
 import type { ComposerSlashCommand, ComposerTrigger } from "./composerTrigger"
 import type { RunTarget } from "./RunTargetSelector"
+import { DropdownMenuItem } from "@/components/MenuItem"
 import type {
   DesktopProject,
   DesktopProjectRef,
   DesktopWorkspaceMode,
 } from "@/desktop"
-import type { EnvironmentOption, ModelOption, Skill } from "@/lib/api"
+import type {
+  FollowUpBehavior,
+  ModelOption,
+  Skill,
+  WorkspaceOption,
+} from "@/lib/api"
 import type { ImageChunk } from "@/features/agents/lib/types"
+import type { PassageReply } from "@/features/agents/utils/passageReply"
 import type { ModelSelection } from "@/features/agents/lib/provider/useModelOptions"
 import { ModelPicker } from "@/features/agents/components/ModelPicker"
 import { RepoSelector } from "@/features/settings/components/RepoSelector"
-import { Menu, MenuItem, MenuPopup, MenuTrigger } from "@/components/ui/menu"
-import { Tooltip, TooltipPopup, TooltipTrigger } from "@/components/ui/tooltip"
+import { api } from "@/lib/api"
+import type { SlackChannelOption, SlackUserOption } from "@/lib/api"
 import { useRegisterAppCommands } from "@/lib/appCommands"
+import {
+  rankSlackChannels,
+  rememberSlackChannels,
+  slackChannelReference,
+  useRecentSlackChannels,
+  useSlackChannelDirectory,
+} from "@/lib/slack-channels"
 import { cn } from "@/lib/utils"
 
 export type { ActiveRun }
@@ -69,23 +104,71 @@ const SLASH_COMMANDS: Array<SlashCommandSpec> = [
     description: "Offload conversation context",
   },
   {
-    command: "plan",
-    label: "/plan",
-    description: "Research read-only and propose a plan first",
-  },
-  {
-    command: "default",
-    label: "/default",
-    description: "Leave plan mode and edit directly",
-  },
-  {
     command: "model",
     label: "/model",
     description: "Pick a model and reasoning effort",
   },
 ]
 
+/** How a submission should be treated: as the configured default, or the opposite. */
+export interface SubmitOptions {
+  /** Set by ⌘↵ / Ctrl+Enter: do the opposite of the configured follow-up behavior. */
+  alternate: boolean
+}
+
+/** What the person sends: their text, and what rides along with it. */
+export interface ComposerSubmission {
+  text: string
+  images: Array<ImageChunk>
+  replies: Array<PassageReply>
+}
+
+/** Text and attachments handed back to the composer, e.g. a cancelled queued message. */
+export interface RestoredDraft {
+  /** Changes on every restore so the same content can come back twice. */
+  key: number
+  text: string
+  images: Array<ImageChunk>
+  replies?: Array<PassageReply>
+  /** Replace the previous suggested prompt if it is still exactly as suggested, instead of stacking on it. */
+  replacesSuggestion?: boolean
+}
+
+class ComposerDrafts {
+  private drafts = new Map<
+    string,
+    {
+      text: string
+      images: Array<ImageChunk>
+      replies: Array<PendingReply>
+    }
+  >()
+
+  read(key?: string) {
+    return key ? this.drafts.get(key) : undefined
+  }
+
+  write(
+    key: string | undefined,
+    text: string,
+    images: Array<ImageChunk>,
+    replies: Array<PendingReply>
+  ) {
+    if (!key) return
+    this.drafts.delete(key)
+    if (!text && !images.length && !replies.length) return
+    this.drafts.set(key, { text, images, replies })
+    if (this.drafts.size > 50) {
+      const oldest = this.drafts.keys().next().value
+      if (oldest) this.drafts.delete(oldest)
+    }
+  }
+}
+
+const composerDrafts = new ComposerDrafts()
+
 export interface ChatComposerProps {
+  draftKey?: string
   placeholder?: string
   autoFocus?: boolean
   compact?: boolean
@@ -95,7 +178,19 @@ export interface ChatComposerProps {
   /** Enables the stop button for the thread's live run. */
   activeRun?: ActiveRun
   onStop?: () => void | Promise<void>
-  onSubmit?: (value: string, images: Array<ImageChunk>) => void | Promise<void>
+  /** False when this viewer may not stop the live run. */
+  stoppable?: boolean
+  onSubmit?: (
+    submission: ComposerSubmission,
+    options?: SubmitOptions
+  ) => void | Promise<void>
+  /** What a message sent while a run is live does; drives copy only. */
+  followUpBehavior?: FollowUpBehavior
+  /** Content to put back in front of whatever is being typed. */
+  restoreDraft?: RestoredDraft | null
+  droppedFiles?: { key: number; files: Array<File> } | null
+  /** A reply to a passage the user selected; it rides ahead of their next message. */
+  addedReply?: { key: number; reply: PassageReply } | null
   models?: Array<ModelOption>
   selection?: ModelSelection | null
   onSelectionChange?: (next: ModelSelection | null) => void
@@ -106,32 +201,31 @@ export interface ChatComposerProps {
   /** Desktop-only execution target. Omit this prop to keep the control out of the web UI. */
   runTarget?: RunTarget
   onRunTargetChange?: (next: RunTarget) => void
-  localProjects?: Array<DesktopProject>
-  selectedLocalProjectPath?: string | null
-  selectedLocalProjectBranch?: string | null
-  localProjectBranches?: Array<DesktopProjectRef>
+  /** The thread is still moving to the run target, checkout and all. */
+  runTargetPending?: boolean
+  localRepos?: Array<DesktopProject>
+  selectedLocalRepoPath?: string | null
+  selectedLocalRepoBranch?: string | null
+  localRepoBranches?: Array<DesktopProjectRef>
   localWorkspaceMode?: DesktopWorkspaceMode
   localWorktreeLabel?: string
   onLocalWorkspaceModeChange?: (next: DesktopWorkspaceMode) => void
-  onSelectLocalProject?: (cwd: string) => void
-  onAddLocalProject?: () => void
-  onRemoveLocalProject?: (cwd: string) => void
-  onRefreshLocalProjectBranch?: () => void
-  onSelectLocalProjectBranch?: (branch: string) => void
-  /** When provided, a Plan mode toggle is shown. Plan mode researches read-only and proposes a plan before editing. */
-  planMode?: boolean
-  onPlanModeChange?: (next: boolean) => void
-  /** Environments a new thread can boot from. The picker appears only when there are several. */
-  environments?: Array<EnvironmentOption>
-  selectedEnvironment?: string | null
-  onEnvironmentChange?: (slug: string | null) => void
+  onSelectLocalRepo?: (cwd: string) => void
+  onUseTaskFolder?: () => void
+  onAddLocalRepo?: () => void
+  onRemoveLocalRepo?: (cwd: string) => void
+  onRefreshLocalRepoBranch?: () => void
+  onSelectLocalRepoBranch?: (branch: string) => void
+  /** Workspaces a new thread can boot from. The picker appears only when there are several. */
+  workspaceOptions?: Array<WorkspaceOption>
+  selectedWorkspace?: string | null
+  onWorkspaceChange?: (slug: string | null) => void
   /** Paths offered by `@` autocomplete — in a thread, the files the agent has touched. */
   mentionPaths?: Array<string>
   skills?: Array<Skill>
-  contextUsage?: {
-    usedTokens?: number | null
-    contextWindow?: number | null
-  }
+  contextUsage?: ContextWindowMeterProps
+  /** Route/model the Auto router picked for the current run. */
+  routed?: { route?: string; modelId?: string | null } | null
 }
 
 function fileToImageChunk(file: File): Promise<ImageChunk | null> {
@@ -160,9 +254,30 @@ export function buildCommandItems(
   mentionPaths: Array<string>,
   skills: Array<Skill>,
   includeModelCommand = true,
-  includeOffloadCommand = false
+  includeOffloadCommand = false,
+  slackChannels: Array<SlackChannelOption> = [],
+  recentSlackChannels: ReadonlyArray<string> = [],
+  slackUsers: Array<SlackUserOption> = []
 ): Array<ComposerCommandItem> {
   const query = trigger.query.toLowerCase()
+
+  if (trigger.kind === "slack-channel") {
+    return rankSlackChannels(slackChannels, query, recentSlackChannels)
+      .slice(0, MAX_MENTION_SUGGESTIONS)
+      .map((channel) => ({
+        id: `channel:${channel.id}`,
+        type: "slack-channel" as const,
+        channelId: channel.id,
+        name: channel.name,
+        label: `#${channel.name}`,
+        description: [
+          recentSlackChannels.includes(channel.id) ? "recently used" : null,
+          channel.is_member ? null : "bot not in channel",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      }))
+  }
 
   if (trigger.kind === "slash-command" || trigger.kind === "skill-command") {
     const skillItems = skills
@@ -195,26 +310,42 @@ export function buildCommandItems(
     ]
   }
 
-  return mentionPaths
+  const paths: Array<ComposerCommandItem> = mentionPaths
     .filter((path) => !query || path.toLowerCase().includes(query))
-    .slice(0, MAX_MENTION_SUGGESTIONS)
     .map((path) => ({
       id: `path:${path}`,
-      type: "path" as const,
+      type: "path",
       path,
       label: path.slice(path.lastIndexOf("/") + 1),
       description: path,
     }))
+  const people: Array<ComposerCommandItem> = slackUsers
+    .filter((user) =>
+      [user.name, user.display_name, user.real_name].some((name) =>
+        name.toLowerCase().includes(query)
+      )
+    )
+    .slice(
+      0,
+      paths.length > 0 ? MAX_MENTION_SUGGESTIONS / 2 : MAX_MENTION_SUGGESTIONS
+    )
+    .map((user) => ({
+      id: `user:${user.id}`,
+      type: "slack-user",
+      userId: user.id,
+      label: `@${user.display_name || user.name}`,
+      description:
+        user.real_name && user.real_name !== user.display_name
+          ? `${user.real_name} · @${user.name}`
+          : `@${user.name}`,
+    }))
+  return [...people, ...paths].slice(0, MAX_MENTION_SUGGESTIONS)
 }
 
-/**
- * The prompt composer: a Lexical editor with `@file` chips, `/command`
- * autocomplete, and `$skill` autocomplete, plus the control row (model, plan
- * mode, attachments, context)
- * and the send/stop button.
- */
+/** Prompt editor with autocomplete, model selection, attachments, and send/stop controls. */
 export const ChatComposer = memo(function ChatComposer({
-  placeholder = "Ask Alephat to build, fix bugs, explore",
+  draftKey,
+  placeholder = "Ask Open SWE to build, fix bugs, explore",
   autoFocus = false,
   compact = false,
   disabled = false,
@@ -222,7 +353,12 @@ export const ChatComposer = memo(function ChatComposer({
   canOffload = false,
   activeRun,
   onStop,
+  stoppable,
   onSubmit,
+  followUpBehavior = "steer",
+  restoreDraft = null,
+  droppedFiles = null,
+  addedReply = null,
   models = [],
   selection = null,
   onSelectionChange,
@@ -231,30 +367,52 @@ export const ChatComposer = memo(function ChatComposer({
   onRepoChange,
   runTarget,
   onRunTargetChange,
-  localProjects = [],
-  selectedLocalProjectPath = null,
-  selectedLocalProjectBranch = null,
-  localProjectBranches = [],
+  runTargetPending,
+  localRepos = [],
+  selectedLocalRepoPath = null,
+  selectedLocalRepoBranch = null,
+  localRepoBranches = [],
   localWorkspaceMode = "local",
   localWorktreeLabel,
   onLocalWorkspaceModeChange,
-  onSelectLocalProject,
-  onAddLocalProject,
-  onRemoveLocalProject,
-  onRefreshLocalProjectBranch,
-  onSelectLocalProjectBranch,
-  planMode = false,
-  onPlanModeChange,
-  environments = [],
-  selectedEnvironment = null,
-  onEnvironmentChange,
+  onSelectLocalRepo,
+  onUseTaskFolder,
+  onAddLocalRepo,
+  onRemoveLocalRepo,
+  onRefreshLocalRepoBranch,
+  onSelectLocalRepoBranch,
+  workspaceOptions = [],
+  selectedWorkspace = null,
+  onWorkspaceChange,
   mentionPaths = [],
   skills = [],
   contextUsage,
+  routed,
 }: ChatComposerProps) {
-  const [value, setValue] = useState("")
-  const [cursor, setCursor] = useState(0)
-  const [pendingImages, setPendingImages] = useState<Array<ImageChunk>>([])
+  const agentWorkspace = useAgentWorkspace()
+  const [contextOpen, setContextOpen] = useState(false)
+  const [value, setValue] = useState(
+    () => composerDrafts.read(draftKey)?.text ?? ""
+  )
+  const [cursor, setCursor] = useState(value.length)
+  const [pendingImages, setPendingImages] = useState<Array<ImageChunk>>(
+    () => composerDrafts.read(draftKey)?.images ?? []
+  )
+  const [pendingReplies, setPendingReplies] = useState<Array<PendingReply>>(
+    () => composerDrafts.read(draftKey)?.replies ?? []
+  )
+  useEffect(() => {
+    composerDrafts.write(draftKey, value, pendingImages, pendingReplies)
+  }, [draftKey, value, pendingImages, pendingReplies])
+  const [appliedReply, setAppliedReply] = useState<typeof addedReply>(null)
+  if (addedReply !== appliedReply) {
+    setAppliedReply(addedReply)
+    if (addedReply)
+      setPendingReplies((prev) => [
+        ...prev,
+        { id: `added:${addedReply.key}`, reply: addedReply.reply },
+      ])
+  }
   const [dragKind, setDragKind] = useState<"files" | "path" | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [activeItemId, setActiveItemId] = useState<string | null>(null)
@@ -312,6 +470,10 @@ export const ChatComposer = memo(function ChatComposer({
     if (autoFocus) editorRef.current?.focus()
   }, [autoFocus])
 
+  useEffect(() => {
+    if (addedReply) editorRef.current?.focusAtEnd()
+  }, [addedReply])
+
   // Synchronous double-submit guard: blocks a same-tick second send (Enter +
   // click, or two rapid Enters) before React re-renders. Scoped to the send
   // request only — never the run lifecycle.
@@ -322,6 +484,16 @@ export const ChatComposer = memo(function ChatComposer({
     [cursor, value]
   )
   const triggerKey = trigger ? `${trigger.kind}:${trigger.rangeStart}` : null
+  const slackChannels = useSlackChannelDirectory(
+    trigger?.kind === "slack-channel"
+  ).data?.channels
+  const slackUsers = useQuery({
+    queryKey: ["slackUsers"],
+    queryFn: api.listSlackUsers,
+    enabled: trigger?.kind === "path",
+    staleTime: 300_000,
+  })
+  const recentSlackChannels = useRecentSlackChannels()
   const skillNames = useMemo(
     () => new Set(skills.map((skill) => skill.name)),
     [skills]
@@ -334,14 +506,26 @@ export const ChatComposer = memo(function ChatComposer({
             mentionPaths,
             skills,
             models.length > 0,
-            canOffload
+            canOffload,
+            slackChannels,
+            recentSlackChannels,
+            slackUsers.data?.users
           )
         : [],
-    [mentionPaths, models.length, skills, trigger, canOffload]
+    [
+      mentionPaths,
+      models.length,
+      skills,
+      trigger,
+      canOffload,
+      slackChannels,
+      recentSlackChannels,
+      slackUsers.data,
+    ]
   )
   const menuOpen =
     trigger !== null &&
-    commandItems.length > 0 &&
+    (commandItems.length > 0 || trigger.kind === "path") &&
     dismissedTriggerKey !== triggerKey
   const activeItem =
     commandItems.find((item) => item.id === activeItemId) ??
@@ -353,11 +537,12 @@ export const ChatComposer = memo(function ChatComposer({
     return models.some((m) => m.id === selection.modelId && m.supports_images)
   }, [models, pendingImages.length, selection])
 
+  const composerEmpty =
+    value.trim().length === 0 &&
+    pendingImages.length === 0 &&
+    pendingReplies.length === 0
   const canSubmit =
-    !disabled &&
-    !isSubmitting &&
-    selectedModelSupportsImages &&
-    (value.trim().length > 0 || pendingImages.length > 0)
+    !disabled && !isSubmitting && selectedModelSupportsImages && !composerEmpty
 
   const applyPrompt = useCallback((nextValue: string, nextCursor: number) => {
     setValue(nextValue)
@@ -366,38 +551,87 @@ export const ChatComposer = memo(function ChatComposer({
     setActiveItemId(null)
   }, [])
 
-  const handleSubmit = useCallback(async () => {
-    if (submittingRef.current || disabled) return
-    // The editor is the source of truth for what is on screen; a keystroke that
-    // has not yet round-tripped through state would otherwise be dropped.
-    const snapshot = editorRef.current?.readSnapshot()
-    const trimmed = (snapshot?.value ?? value).trim()
-    if (trimmed.length === 0 && pendingImages.length === 0) return
-
-    if (trimmed === "/offload" && (!canOffload || pendingImages.length)) {
-      setComposerError(
-        pendingImages.length
-          ? "Offloading does not accept attachments."
-          : "Offloading requires an idle, existing conversation."
-      )
-      return
+  const restoredKeyRef = useRef<number | null>(null)
+  const lastSuggestionRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!restoreDraft || restoredKeyRef.current === restoreDraft.key) return
+    restoredKeyRef.current = restoreDraft.key
+    const current = editorRef.current?.readSnapshot()?.value ?? value
+    const untouched =
+      restoreDraft.replacesSuggestion &&
+      current.trim() === (lastSuggestionRef.current ?? "").trim()
+    if (restoreDraft.replacesSuggestion)
+      lastSuggestionRef.current = restoreDraft.text
+    const next = [restoreDraft.text, untouched ? "" : current]
+      .filter((part) => part.trim().length > 0)
+      .join("\n\n")
+    applyPrompt(next, next.length)
+    if (restoreDraft.images.length > 0) {
+      // oxlint-disable-next-line react/set-state-in-effect
+      setPendingImages((prev) => [...restoreDraft.images, ...prev])
     }
-
-    const images = pendingImages
-    submittingRef.current = true
-    setIsSubmitting(true)
-    applyPrompt("", 0)
-    setPendingImages([])
-    setComposerError(null)
-    try {
-      await onSubmit?.(trimmed, images)
-    } catch {
-      // Caller surfaces send errors (e.g. via react-query mutation state).
-    } finally {
-      submittingRef.current = false
-      setIsSubmitting(false)
+    const restoredReplies = restoreDraft.replies ?? []
+    if (restoredReplies.length > 0) {
+      setPendingReplies((prev) => [
+        ...restoredReplies.map((reply, index) => ({
+          id: `restored:${restoreDraft.key}:${index}`,
+          reply,
+        })),
+        ...prev,
+      ])
     }
-  }, [applyPrompt, disabled, onSubmit, pendingImages, value, canOffload])
+    editorRef.current?.focusAtEnd()
+  }, [applyPrompt, restoreDraft, value])
+
+  const handleSubmit = useCallback(
+    async (options?: SubmitOptions) => {
+      if (submittingRef.current || disabled) return
+      // The editor is the source of truth for what is on screen; a keystroke that
+      // has not yet round-tripped through state would otherwise be dropped.
+      const snapshot = editorRef.current?.readSnapshot()
+      const trimmed = (snapshot?.value ?? value).trim()
+      const attached = pendingImages.length + pendingReplies.length
+      if (trimmed.length === 0 && attached === 0) return
+
+      if (trimmed === "/offload" && (!canOffload || attached)) {
+        setComposerError(
+          attached
+            ? "Offloading does not accept attachments."
+            : "Offloading requires an idle, existing conversation."
+        )
+        return
+      }
+
+      const submission = {
+        text: trimmed,
+        images: pendingImages,
+        replies: pendingReplies.map((pending) => pending.reply),
+      }
+      submittingRef.current = true
+      setIsSubmitting(true)
+      applyPrompt("", 0)
+      setPendingImages([])
+      setPendingReplies([])
+      setComposerError(null)
+      try {
+        await onSubmit?.(submission, options)
+      } catch {
+        // Caller surfaces send errors (e.g. via react-query mutation state).
+      } finally {
+        submittingRef.current = false
+        setIsSubmitting(false)
+      }
+    },
+    [
+      applyPrompt,
+      disabled,
+      onSubmit,
+      pendingImages,
+      pendingReplies,
+      value,
+      canOffload,
+    ]
+  )
 
   const selectCommandItem = useCallback(
     (item: ComposerCommandItem) => {
@@ -414,14 +648,25 @@ export const ChatComposer = memo(function ChatComposer({
         return
       }
 
-      if (item.type === "path" || item.type === "skill") {
+      if (
+        item.type === "path" ||
+        item.type === "skill" ||
+        item.type === "slack-user" ||
+        item.type === "slack-channel"
+      ) {
+        if (item.type === "slack-channel")
+          rememberSlackChannels([item.channelId])
         const next = replaceTextRange(
           value,
           trigger.rangeStart,
           trigger.rangeEnd,
           item.type === "path"
             ? mentionReplacementText(item.path)
-            : `/${item.name} `
+            : item.type === "slack-channel"
+              ? `${slackChannelReference(item.channelId, item.name)} `
+              : item.type === "slack-user"
+                ? `<@${item.userId}> `
+                : `/${item.name} `
         )
         applyPrompt(next.text, next.cursor)
         return
@@ -436,15 +681,17 @@ export const ChatComposer = memo(function ChatComposer({
         ""
       )
       applyPrompt(next.text, next.cursor)
-      if (item.command === "plan") onPlanModeChange?.(true)
-      if (item.command === "default") onPlanModeChange?.(false)
       if (item.command === "model") setModelPickerOpen(true)
     },
-    [applyPrompt, onPlanModeChange, trigger, value]
+    [applyPrompt, trigger, value]
   )
 
   const handleCommandKeyDown = useCallback(
     (key: ComposerCommandKey, event: KeyboardEvent): boolean => {
+      if (menuOpen && key === "Escape") {
+        setDismissedTriggerKey(triggerKey)
+        return true
+      }
       if (menuOpen && activeItem) {
         switch (key) {
           case "ArrowDown":
@@ -464,18 +711,13 @@ export const ChatComposer = memo(function ChatComposer({
           case "Tab":
             selectCommandItem(activeItem)
             return true
-          case "Escape":
-            setDismissedTriggerKey(triggerKey)
-            return true
         }
       }
 
-      if (key === "Tab" && event.shiftKey && onPlanModeChange) {
-        onPlanModeChange(!planMode)
-        return true
-      }
       if (key === "Enter" && !event.shiftKey) {
-        if (canSubmit) void handleSubmit()
+        if (canSubmit) {
+          void handleSubmit({ alternate: event.metaKey || event.ctrlKey })
+        }
         // Swallow it either way: a bare Enter must never insert a newline in a
         // composer whose Enter means "send".
         return true
@@ -488,8 +730,6 @@ export const ChatComposer = memo(function ChatComposer({
       commandItems,
       handleSubmit,
       menuOpen,
-      onPlanModeChange,
-      planMode,
       selectCommandItem,
       triggerKey,
     ]
@@ -507,6 +747,11 @@ export const ChatComposer = memo(function ChatComposer({
       [...prev, ...validImages].slice(0, MAX_IMAGE_COUNT)
     )
   }, [])
+
+  useEffect(() => {
+    if (droppedFiles)
+      void Promise.resolve().then(() => addFiles(droppedFiles.files))
+  }, [addFiles, droppedFiles])
 
   const handleFileChange = useCallback(
     (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -603,93 +848,121 @@ export const ChatComposer = memo(function ChatComposer({
     [addFiles]
   )
 
+  const executionTarget = runTarget && (
+    <RunTargetSelector
+      onChange={onRunTargetChange}
+      pending={runTargetPending}
+      value={runTarget}
+    />
+  )
+  const hasContextControls = Boolean(
+    onRepoChange ||
+    onWorkspaceChange ||
+    (runTarget === "local" && (onSelectLocalRepo || onSelectLocalRepoBranch))
+  )
+  const contextLabel =
+    runTarget === "local"
+      ? (localRepos.find((repo) => repo.cwd === selectedLocalRepoPath)?.name ??
+        selectedLocalRepoPath?.split("/").filter(Boolean).at(-1) ??
+        (agentWorkspace ? "Use a folder" : "Choose a folder"))
+      : (selectedRepo?.split("/").at(-1) ?? "Task context")
+  const targetControls = (onRepoChange || runTarget || onWorkspaceChange) && (
+    <>
+      {runTarget !== "local" && onWorkspaceChange && (
+        <WorkspaceSelector
+          workspaces={workspaceOptions}
+          selectedSlug={selectedWorkspace}
+          onChange={onWorkspaceChange}
+          side="top"
+        />
+      )}
+      {runTarget !== "local" && onRepoChange && (
+        <RepoSelector
+          emptySelectionLabel="Don't work in a repository"
+          noMatchesLabel="No matching repositories"
+          onRepoChange={onRepoChange}
+          placeholder="Select repository"
+          repos={repos}
+          searchPlaceholder="Search repositories…"
+          selectedRepo={selectedRepo}
+          side="top"
+        />
+      )}
+      {runTarget === "local" &&
+        onSelectLocalRepo &&
+        onAddLocalRepo &&
+        onRemoveLocalRepo && (
+          <LocalRepoSelector
+            onAddRepo={onAddLocalRepo}
+            onRemoveRepo={onRemoveLocalRepo}
+            onSelectRepo={onSelectLocalRepo}
+            repos={localRepos}
+            selectedRepoPath={selectedLocalRepoPath}
+            side="top"
+            placeholder={agentWorkspace ? "Automatic task folder" : undefined}
+            onUseTaskFolder={onUseTaskFolder}
+          />
+        )}
+      {runTarget === "local" &&
+        (!agentWorkspace || localRepoBranches.length > 0) &&
+        onRefreshLocalRepoBranch &&
+        onSelectLocalRepoBranch && (
+          <LocalBranchSelector
+            refs={localRepoBranches}
+            disabled={!selectedLocalRepoPath}
+            onRefresh={onRefreshLocalRepoBranch}
+            onSelectBranch={onSelectLocalRepoBranch}
+            selectedBranch={selectedLocalRepoBranch}
+          />
+        )}
+      {runTarget === "local" &&
+        (!agentWorkspace || localRepoBranches.length > 0) &&
+        onSelectLocalRepoBranch && (
+          <LocalWorkspaceSelector
+            onChange={onLocalWorkspaceModeChange}
+            value={localWorkspaceMode}
+            worktreeLabel={localWorktreeLabel}
+          />
+        )}
+    </>
+  )
+
   return (
     <div
       className={cn(
-        "relative w-full font-sans text-[13px]",
+        "relative w-full font-sans text-xs",
         compact ? "max-w-none" : "max-w-2xl"
       )}
     >
       {composerError && (
-        <div className="mb-2 px-1 text-xs text-destructive" role="alert">
+        <div
+          className="mb-space-2 px-space-1 text-xs text-error-secondary"
+          role="alert"
+        >
           {composerError}
         </div>
       )}
 
       {!selectedModelSupportsImages && (
-        <div className="dropdown-glass mb-2 rounded-xl border border-warning/30 px-3 py-2 text-xs text-muted-foreground">
-          The selected model does not accept image input. Remove the image
-          {pendingImages.length > 1 ? "s" : ""} or switch to a vision-enabled
-          model to send.
-        </div>
-      )}
-
-      {(onRepoChange ||
-        onRunTargetChange ||
-        onEnvironmentChange ||
-        onSelectLocalProjectBranch) && (
-        <div className="relative mx-5 -mb-3 flex min-w-0 flex-wrap items-center gap-x-5 gap-y-2 rounded-t-2xl bg-accent px-4 pt-3 pb-5 text-xs dark:bg-muted">
-          {runTarget !== "local" && onRepoChange && (
-            <RepoSelector
-              emptySelectionLabel="Don't work in a project"
-              noMatchesLabel="No matching projects"
-              onRepoChange={onRepoChange}
-              placeholder="Select project"
-              repos={repos}
-              searchPlaceholder="Search projects…"
-              selectedRepo={selectedRepo}
-              side="top"
-            />
-          )}
-          {runTarget === "local" &&
-            onSelectLocalProject &&
-            onAddLocalProject &&
-            onRemoveLocalProject && (
-              <LocalProjectSelector
-                onAddProject={onAddLocalProject}
-                onRemoveProject={onRemoveLocalProject}
-                onSelectProject={onSelectLocalProject}
-                projects={localProjects}
-                selectedProjectPath={selectedLocalProjectPath}
-                side="top"
-              />
-            )}
-          {runTarget && onRunTargetChange && (
-            <RunTargetSelector onChange={onRunTargetChange} value={runTarget} />
-          )}
-          {runTarget !== "local" && onEnvironmentChange && (
-            <EnvironmentSelector
-              environments={environments}
-              selectedSlug={selectedEnvironment}
-              onChange={onEnvironmentChange}
-            />
-          )}
-          {runTarget === "local" &&
-            onRefreshLocalProjectBranch &&
-            onSelectLocalProjectBranch && (
-              <LocalBranchSelector
-                refs={localProjectBranches}
-                disabled={!selectedLocalProjectPath}
-                onRefresh={onRefreshLocalProjectBranch}
-                onSelectBranch={onSelectLocalProjectBranch}
-                selectedBranch={selectedLocalProjectBranch}
-              />
-            )}
-          {runTarget === "local" && onSelectLocalProjectBranch && (
-            <LocalWorkspaceSelector
-              onChange={onLocalWorkspaceModeChange}
-              value={localWorkspaceMode}
-              worktreeLabel={localWorktreeLabel}
-            />
-          )}
-        </div>
+        <Banner className="mb-space-2" intent="warning">
+          {`The selected model does not accept image input. Remove the image${
+            pendingImages.length > 1 ? "s" : ""
+          } or switch to a vision-enabled model to send.`}
+        </Banner>
       )}
 
       <div
+        data-chat-composer
         className={cn(
-          "relative z-10 flex flex-col rounded-2xl border-[0.75px] border-foreground/[0.06] bg-card px-3 py-2.5 shadow-[0_1px_2px_rgba(0,0,0,0.045)] transition-colors dark:bg-[#222] dark:shadow-none",
+          "relative z-floating-bar flex flex-col rounded-xl border bg-elevated px-space-3 py-space-2 shadow-md transition-[border-color,box-shadow] duration-slow hover:shadow-lg",
           compact ? "min-h-[88px]" : "min-h-[106px]",
-          dragKind && "border border-primary"
+          agentWorkspace &&
+            "rounded-2xl px-space-4 py-space-3 shadow-sm focus-within:border-strong hover:shadow-sm",
+          dragKind
+            ? "border-brand"
+            : agentWorkspace
+              ? "border-subtle"
+              : "border-default"
         )}
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
@@ -702,13 +975,22 @@ export const ChatComposer = memo(function ChatComposer({
             items={commandItems}
             onHighlight={setActiveItemId}
             onSelect={selectCommandItem}
+            emptyStateText={
+              trigger.kind === "path"
+                ? slackUsers.isPending
+                  ? "Loading people…"
+                  : slackUsers.isError
+                    ? "Could not load Slack people. Type @ again to retry."
+                    : "No matching people or files."
+                : undefined
+            }
             triggerKind={trigger.kind}
           />
         )}
 
         {dragKind && (
-          <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-2xl bg-card/80 backdrop-blur-sm">
-            <span className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-foreground">
+          <div className="pointer-events-none absolute inset-0 z-drag-overlay flex items-center justify-center rounded-xl bg-elevated/80 backdrop-blur-sm">
+            <span className="rounded-md bg-brand-subtle px-space-3 py-space-1 text-xs font-medium text-brand-primary">
               {dragKind === "path"
                 ? "Drop to mention this file"
                 : "Drop images here"}
@@ -725,8 +1007,17 @@ export const ChatComposer = memo(function ChatComposer({
           type="file"
         />
 
+        <ComposerReplyCards
+          replies={pendingReplies}
+          onRemove={(id) =>
+            setPendingReplies((prev) =>
+              prev.filter((pending) => pending.id !== id)
+            )
+          }
+        />
+
         {pendingImages.length > 0 && (
-          <div className="mb-2 flex flex-wrap gap-2">
+          <div className="mb-space-2 flex flex-wrap gap-space-2">
             {pendingImages.map((image, index) => (
               <div
                 className="group relative"
@@ -734,21 +1025,23 @@ export const ChatComposer = memo(function ChatComposer({
               >
                 <img
                   alt={image.fileName || "Pending image"}
-                  className="size-16 rounded-lg border border-border object-cover"
+                  className="size-16 rounded-lg border border-default object-cover"
                   src={`data:${image.mimeType};base64,${image.base64}`}
                 />
-                <button
-                  aria-label="Remove image"
-                  className="absolute -top-1.5 -right-1.5 flex size-5 items-center justify-center rounded-full border border-border bg-card text-muted-foreground opacity-0 shadow-sm transition-opacity group-hover:opacity-100 hover:text-foreground"
+                <IconButton
+                  className="absolute -top-1.5 -right-1.5 opacity-0 group-focus-within:opacity-100 group-hover:opacity-100"
+                  color="secondary"
+                  icon={XIcon}
+                  label="Remove image"
                   onClick={() =>
                     setPendingImages((prev) =>
                       prev.filter((_, i) => i !== index)
                     )
                   }
-                  type="button"
-                >
-                  <X className="size-3" />
-                </button>
+                  round
+                  size="xs"
+                  variant="outlined"
+                />
               </div>
             ))}
           </div>
@@ -765,42 +1058,50 @@ export const ChatComposer = memo(function ChatComposer({
           }}
           onCommandKeyDown={handleCommandKeyDown}
           onPaste={handlePaste}
-          placeholder={busy ? "Send a message to queue next..." : placeholder}
+          placeholder={
+            busy && !disabled
+              ? followUpBehavior === "steer"
+                ? "Send a message to steer the run..."
+                : "Send a message to queue next..."
+              : placeholder
+          }
           skillNames={skillNames}
           value={value}
         />
 
-        <div className="mt-auto grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-end gap-1 pt-2 text-xs text-muted-foreground">
-          <Menu onOpenChange={setExtrasMenuOpen}>
-            <MenuTrigger
-              render={
-                <ComposerControl
-                  aria-label="More composer options"
-                  className="size-7 px-0"
-                  type="button"
-                />
-              }
+        <div className="mt-auto grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-end gap-space-1 pt-space-2 text-xs text-secondary">
+          <DropdownMenu onOpenChange={setExtrasMenuOpen}>
+            <DropdownMenuTrigger asChild>
+              <IconButton
+                className="size-7 text-tertiary hover:text-primary"
+                color="secondary"
+                icon={PlusIcon}
+                label="More composer options"
+                variant="plain"
+              />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="start"
+              className="w-44"
+              side="top"
+              sideOffset={7}
             >
-              <Plus className="size-4" />
-            </MenuTrigger>
-            <MenuPopup align="start" className="w-44" side="top" sideOffset={7}>
-              <MenuItem
+              <DropdownMenuItem
+                className="text-xs"
                 disabled={disabled || pendingImages.length >= MAX_IMAGE_COUNT}
-                onClick={() => fileInputRef.current?.click()}
+                onSelect={() => fileInputRef.current?.click()}
+                size="sm"
               >
-                <ImagePlus />
+                <ImageSquareIcon
+                  className="size-3.5 shrink-0 text-icon-secondary"
+                  weight="regular"
+                />
                 Attach images
-              </MenuItem>
-              {onPlanModeChange && (
-                <MenuItem onClick={() => onPlanModeChange(!planMode)}>
-                  <MapIcon />
-                  {planMode ? "Disable plan mode" : "Enable plan mode"}
-                </MenuItem>
-              )}
-            </MenuPopup>
-          </Menu>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
 
-          <div className="flex min-w-0 flex-wrap items-center gap-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-space-1">
             {models.length > 0 && (
               <ModelPicker
                 models={models}
@@ -808,49 +1109,86 @@ export const ChatComposer = memo(function ChatComposer({
                 onSelectionChange={onSelectionChange}
                 open={modelPickerOpen}
                 requireImageSupport={pendingImages.length > 0}
+                routed={routed}
                 selection={selection}
-                triggerClassName="h-7 max-w-full rounded-md px-2 text-xs/relaxed text-muted-foreground/70 hover:bg-muted hover:text-foreground/80"
+                triggerClassName="h-7 max-w-full rounded-md px-space-2 text-xs/relaxed text-tertiary hover:bg-surface-level-2 hover:text-primary"
               />
-            )}
-
-            {planMode && onPlanModeChange && (
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <ComposerControl
-                      aria-label="Exit plan mode"
-                      aria-pressed
-                      className="bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary"
-                      onClick={() => onPlanModeChange(false)}
-                      type="button"
-                    />
-                  }
-                >
-                  <ComposerControlIcon icon={MapIcon} />
-                  <span>Plan</span>
-                </TooltipTrigger>
-                <TooltipPopup side="top">Exit plan mode</TooltipPopup>
-              </Tooltip>
             )}
           </div>
 
-          <div className="flex items-center gap-1">
-            <ContextWindowMeter
-              contextWindow={contextUsage?.contextWindow}
-              usedTokens={contextUsage?.usedTokens}
-            />
+          <div className="flex items-center gap-space-1">
+            <ContextWindowMeter {...contextUsage} />
           </div>
 
           <ComposerPrimaryActions
             activeRun={activeRun}
             canSubmit={canSubmit}
             onSubmit={() => void handleSubmit()}
+            runningLabel={
+              followUpBehavior === "steer" ? "Steer agent" : "Queue message"
+            }
             onStop={onStop}
-            stopOnEscape={!menuOpen && !modelPickerOpen && !extrasMenuOpen}
+            stoppable={stoppable}
+            stopOnEscape={
+              !menuOpen && !modelPickerOpen && !extrasMenuOpen && !contextOpen
+            }
             submitting={isSubmitting}
           />
         </div>
       </div>
+
+      {targetControls && (
+        <div
+          className={cn(
+            "mt-space-2 flex min-w-0 flex-wrap items-center gap-x-space-5 gap-y-space-2 px-space-3 text-xs",
+            agentWorkspace && "gap-x-space-3 px-space-1"
+          )}
+        >
+          {executionTarget}
+          {agentWorkspace
+            ? hasContextControls && (
+                <Popover open={contextOpen} onOpenChange={setContextOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      color="secondary"
+                      variant="plain"
+                      size="sm"
+                      aria-label={`Task context: ${contextLabel}`}
+                      className="max-w-full gap-space-2 rounded-full text-xs text-secondary"
+                    >
+                      <SlidersHorizontalIcon
+                        size={14}
+                        weight="regular"
+                        className="shrink-0"
+                      />
+                      <span className="truncate">{contextLabel}</span>
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    aria-label="Task context"
+                    side="top"
+                    align="start"
+                    className="w-80 max-w-[calc(100vw-2rem)] rounded-xl p-space-4"
+                  >
+                    <div className="flex flex-col gap-space-3">
+                      <div className="flex flex-col gap-space-1">
+                        <h2 className="text-sm font-medium">Task context</h2>
+                        <p className="text-xs leading-relaxed text-secondary">
+                          {runTarget === "local"
+                            ? "Each chat gets its own task folder. Use an existing folder when you need one."
+                            : "Add a repository or workspace when your task needs one."}
+                        </p>
+                      </div>
+                      <div className="flex flex-col items-start gap-space-3 text-xs">
+                        {targetControls}
+                      </div>
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              )
+            : targetControls}
+        </div>
+      )}
     </div>
   )
 })

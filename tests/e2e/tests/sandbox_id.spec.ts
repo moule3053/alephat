@@ -38,6 +38,18 @@ async function createThreadWithSandbox(page: Page): Promise<string> {
 const copyItem = (page: Page) =>
   page.getByRole("menuitem", { name: "Copy sandbox ID" });
 
+async function getSandboxId(page: Page, threadId: string): Promise<string> {
+  const response = await page.request.get(
+    `/dashboard/api/threads/${threadId}?mark_viewed=false`,
+  );
+  expect(response.ok()).toBeTruthy();
+  const thread: { sandboxId?: string | null } = await response.json();
+  if (typeof thread.sandboxId !== "string" || !thread.sandboxId) {
+    throw new Error(`Thread ${threadId} has no sandbox ID`);
+  }
+  return thread.sandboxId;
+}
+
 test.describe("thread sandbox id (real dashboard UI)", () => {
   test("desktop: context menu copies the real sandbox id", async ({
     page,
@@ -56,10 +68,12 @@ test.describe("thread sandbox id (real dashboard UI)", () => {
     await row.click({ button: "right" });
 
     await expect(copyItem(page)).toBeEnabled();
+    const sandboxId = await getSandboxId(page, threadId);
     await copyItem(page).click();
 
-    const clip = await page.evaluate(() => navigator.clipboard.readText());
-    expect(clip.length).toBeGreaterThan(0);
+    await expect
+      .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+      .toBe(sandboxId);
   });
 
   test("iPad: long press copies the sandbox id without navigating", async ({
@@ -89,36 +103,26 @@ test.describe("thread sandbox id (real dashboard UI)", () => {
     const rowA = page.locator(`a[href$="/agents/${threadA}"]`).first();
     await expect(rowA).toBeVisible();
 
-    await rowA.evaluate((element) => {
-      const touch = new Touch({
-        identifier: 0,
-        target: element,
-        clientX: 20,
-        clientY: 20,
-        radiusX: 1,
-        radiusY: 1,
-        rotationAngle: 0,
-        force: 1,
-      });
-      element.dispatchEvent(
-        new TouchEvent("touchstart", {
-          bubbles: true,
-          cancelable: true,
-          touches: [touch],
-          targetTouches: [touch],
-          changedTouches: [touch],
-        }),
-      );
-    });
+    // A touch press held past the long-press delay opens the row's context
+    // menu; iPadOS reports it as a touch-type pointer event.
+    const touchPointer = {
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: 20,
+      clientY: 20,
+    };
+    await rowA.dispatchEvent("pointerdown", touchPointer);
     await expect(copyItem(page)).toBeVisible();
-    await rowA.dispatchEvent("touchend", { changedTouches: [] });
+    await rowA.dispatchEvent("pointerup", touchPointer);
     await rowA.dispatchEvent("click");
 
     await expect(copyItem(page)).toBeEnabled();
+    const sandboxId = await getSandboxId(page, threadA);
     await copyItem(page).tap();
 
-    const clip = await page.evaluate(() => navigator.clipboard.readText());
-    expect(clip.length).toBeGreaterThan(0);
+    await expect
+      .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+      .toBe(sandboxId);
 
     await expect(page).toHaveURL(new RegExp(`/agents/${threadB}$`));
 

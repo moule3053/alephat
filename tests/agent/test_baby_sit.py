@@ -1,112 +1,28 @@
 import asyncio
-from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
+from uuid import uuid7
 
+import httpx
 import httpx2
 import pytest
-from langgraph_sdk.errors import ConflictError
 
-from agent import baby_sit, scheduler
-from agent import store as agent_store
-from agent.slack.client import GitHubPrRef
-from agent.source_context import SourceContext
-
-
-class _Store:
-    def __init__(self, values: dict[str, dict[str, Any]] | None = None) -> None:
-        self.values = values if values is not None else {}
-
-    async def get_item(self, _namespace, key: str):
-        value = self.values.get(key)
-        return {"value": value} if value is not None else None
-
-    async def put_item(self, _namespace, key: str, value: dict[str, Any]) -> None:
-        self.values[key] = dict(value)
-
-    async def delete_item(self, _namespace, key: str) -> None:
-        self.values.pop(key, None)
-
-    async def search_items(self, _namespace, *, filter, limit: int, offset: int):
-        matches = [
-            {"value": value}
-            for value in self.values.values()
-            if all(value.get(key) == expected for key, expected in filter.items())
-        ]
-        return {"items": matches[offset : offset + limit]}
+from openswe import baby_sit
+from openswe.github import app as github_app
+from openswe.github.ci import RequiredCheck
+from openswe.github.http import GitHubError, RepoClient
+from openswe.github.pull_request_status import PullRequestClient
+from openswe.human_review.requests import HumanReviewRequest
+from openswe.slack.client import GitHubPrRef
+from openswe.source_context import SourceContext
+from openswe.tasks.store import Task
+from tests.support.github_sdk import mock_github_sdk
 
 
-class _Crons:
-    def __init__(self) -> None:
-        self.created: list[dict[str, Any]] = []
-        self.deleted: list[str] = []
-        self.searches: list[dict[str, Any]] = []
-
-    async def create(self, assistant_id: str, **kwargs: Any):
-        self.created.append({"assistant_id": assistant_id, **kwargs})
-        return {"cron_id": f"cron-{len(self.created)}"}
-
-    async def search(self, **kwargs: Any):
-        self.searches.append(kwargs)
-        return []
-
-    async def delete(self, cron_id: str) -> None:
-        self.deleted.append(cron_id)
-
-
-class _Threads:
-    def __init__(self, active: set[str]) -> None:
-        self.active = active
-        self.deleted: list[str] = []
-        self.create_lock = asyncio.Lock()
-
-    async def create(self, *, thread_id: str, if_exists: str, ttl: int) -> None:
-        assert if_exists == "raise"
-        assert ttl == baby_sit.WATCH_LOCK_TTL_MINUTES
-        async with self.create_lock:
-            if thread_id in self.active:
-                response = httpx2.Response(409, request=httpx2.Request("POST", "http://test"))
-                raise ConflictError("already exists", response=response, body=None)
-            self.active.add(thread_id)
-
-    async def delete(self, thread_id: str) -> None:
-        self.active.discard(thread_id)
-        self.deleted.append(thread_id)
-
-
-class _Client:
-    def __init__(
-        self,
-        values: dict[str, dict[str, Any]] | None = None,
-        active_threads: set[str] | None = None,
-    ) -> None:
-        self.store = _Store(values)
-        self.crons = _Crons()
-        self.threads = _Threads(active_threads if active_threads is not None else set())
-
-
-def _use_client(monkeypatch: pytest.MonkeyPatch, client: _Client) -> None:
-    monkeypatch.setattr(baby_sit, "get_client", lambda: client)
-    monkeypatch.setattr(agent_store, "store_client", lambda: client)
-
-
-@pytest.fixture
-def watch_client(monkeypatch: pytest.MonkeyPatch) -> _Client:
-    client = _Client()
-    _use_client(monkeypatch, client)
-    return client
-
-
-@pytest.fixture
-def shared_watch_clients() -> tuple[_Client, _Client]:
-    values: dict[str, dict[str, Any]] = {}
-    active_threads: set[str] = set()
-    return _Client(values, active_threads), _Client(values, active_threads)
-
-
-async def _start_watch(client: _Client) -> baby_sit.BabySitWatch:
+async def _start_watch() -> baby_sit.BabySitWatch:
     return await baby_sit.start_watch(
         pr_ref=GitHubPrRef("Acme", "Repo", 7, "https://github.com/Acme/Repo/pull/7"),
+        title="Fix the build",
         head_sha="head-1",
         head_ref="feature",
         installation_id=42,
@@ -122,58 +38,119 @@ async def _start_watch(client: _Client) -> baby_sit.BabySitWatch:
     )
 
 
-async def test_watch_lifecycle_creates_and_deletes_ten_minute_cron(
-    watch_client: _Client,
+@pytest.mark.parametrize(
+    ("read_method", "status_code", "body", "retryable"),
+    [
+        ("token", 404, "Not Found", False),
+        ("token", 403, "Installation suspended", False),
+        ("token", 503, "Service unavailable", True),
+        ("token", 403, "API rate limit exceeded", True),
+        ("token", None, "Connection failed", True),
+        ("pull", 403, "API rate limit exceeded for installation", True),
+        ("pull", 503, "Service unavailable", True),
+        ("pull", None, "Connection failed", True),
+        ("check_runs", 503, "Service unavailable", True),
+        ("commit_statuses", 403, "secondary rate limit", True),
+        ("pull", 404, "Not Found", False),
+        ("pull", 401, "Bad credentials", False),
+        ("pull", 403, "Resource not accessible", False),
+    ],
+)
+async def test_github_read_failures_only_end_watches_when_persistent(
+    registry_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+    read_method: str,
+    status_code: int | None,
+    body: str,
+    retryable: bool,
 ) -> None:
-    watch = await _start_watch(watch_client)
-
-    assert watch.key == "acme/repo#7"
-    assert watch_client.threads.deleted == []
-    assert watch_client.crons.searches == [
-        {"metadata": {"kind": "baby_sit_watch", "watch_key": "acme/repo#7"}, "limit": 10}
-    ]
-    assert watch_client.crons.created[0]["assistant_id"] == "scheduler"
-    assert watch_client.crons.created[0]["schedule"] == "*/10 * * * *"
-    assert watch_client.crons.created[0]["input"] == {
-        "task": "baby_sit",
-        "watch_key": "acme/repo#7",
-    }
-
-    assert await baby_sit.stop_watch(watch.key) is True
-    assert watch_client.crons.deleted == ["cron-1"]
-    assert watch_client.store.values == {}
-
-
-async def test_fallback_uses_watch_installation_token(
-    watch_client: _Client, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    await _start_watch(watch_client)
+    watch = await _start_watch()
     token = AsyncMock(return_value="t")
-    monkeypatch.setattr(baby_sit, "get_github_app_installation_token", token)
-    monkeypatch.setattr(
-        baby_sit,
-        "fetch_pr",
-        AsyncMock(return_value={"state": "open", "head": {"sha": "head-1"}}),
+    if read_method != "token":
+        monkeypatch.setattr(github_app, "get_github_app_installation_token", token)
+    reads = {
+        "pull": AsyncMock(return_value={"state": "open", "head": {"sha": "head-1"}}),
+        "check_runs": AsyncMock(return_value=[{"name": "tests", "status": "in_progress"}]),
+        "commit_statuses": AsyncMock(return_value=[]),
+    }
+    monkeypatch.setattr(PullRequestClient, "pull", reads["pull"])
+    monkeypatch.setattr(RepoClient, "check_runs", reads["check_runs"])
+    monkeypatch.setattr(RepoClient, "commit_statuses", reads["commit_statuses"])
+    failure = (
+        GitHubError(
+            httpx2.Response(
+                status_code,
+                text=body,
+                request=httpx2.Request("GET", "https://api.github.com/test"),
+            )
+        )
+        if status_code is not None
+        else httpx2.ConnectError(body)
     )
-    monkeypatch.setattr(
-        baby_sit,
-        "list_check_runs",
-        AsyncMock(return_value=[{"id": 1, "status": "in_progress"}]),
-    )
-    monkeypatch.setattr(baby_sit, "list_commit_statuses", AsyncMock(return_value=[]))
+    read = reads.get(read_method, token)
+    token_failed = True
+    if read_method == "token":
+        monkeypatch.setattr(github_app, "GITHUB_APP_ID", "1")
+        monkeypatch.setattr(github_app, "GITHUB_APP_PRIVATE_KEY", "test-key")
+        monkeypatch.setattr(github_app, "_TOKEN_CACHE", {})
 
-    assert await baby_sit.evaluate_watch("acme/repo#7") == "pending"
-    token.assert_awaited_once_with(installation_id=42)
+        def handle(request: httpx.Request) -> httpx.Response:
+            if token_failed:
+                if status_code is None:
+                    raise httpx.ConnectError(body, request=request)
+                return httpx.Response(status_code, json={"message": body})
+            return httpx.Response(201, json={"token": "t", "expires_at": "2099-01-01T00:00:00Z"})
+
+        mock_github_sdk(monkeypatch, handle)
+    else:
+        read.side_effect = failure
+    notify = AsyncMock(return_value=True)
+    monkeypatch.setattr(baby_sit, "_notify_watch", notify)
+    dispatch = AsyncMock()
+    monkeypatch.setattr(baby_sit, "dispatch_agent_run", dispatch)
+
+    for attempt in range(1, 4):
+        result = await baby_sit.evaluate_watch(watch.key)
+        stored = await baby_sit.WATCHES.get(watch.key)
+        if retryable or attempt < 3:
+            assert result == "error"
+            assert stored is not None and stored.active
+            assert stored.evaluation_errors == (0 if retryable else attempt)
+        else:
+            assert result == "stopped"
+            assert stored is None
+
+    if retryable:
+        notify.assert_not_awaited()
+        dispatch.assert_not_awaited()
+        read.side_effect = None
+        token_failed = False
+        assert await baby_sit.evaluate_watch(watch.key) == "pending"
+        stored = await baby_sit.WATCHES.get(watch.key)
+        assert stored is not None and stored.active
+    else:
+        # A Slack-started watch hands its terminal notice to the owning agent thread.
+        assert dispatch.await_args is not None
+        message = dispatch.await_args.args[1]
+        assert (
+            "GitHub App token unavailable"
+            if read_method == "token"
+            else "not found"
+            if status_code == 404
+            else "denied access"
+        ) in message
 
 
 async def test_failure_dispatch_is_deduplicated_until_retry_is_recorded(
-    watch_client: _Client, monkeypatch: pytest.MonkeyPatch
+    registry_db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    await _start_watch(watch_client)
-    monkeypatch.setattr(baby_sit, "get_github_app_installation_token", AsyncMock(return_value="t"))
+    await _start_watch()
     monkeypatch.setattr(
-        baby_sit,
-        "fetch_pr",
+        github_app, "get_github_app_installation_token", AsyncMock(return_value="t")
+    )
+    monkeypatch.setattr(
+        PullRequestClient,
+        "pull",
         AsyncMock(return_value={"state": "open", "head": {"sha": "head-1"}}),
     )
     checks = [
@@ -187,8 +164,8 @@ async def test_failure_dispatch_is_deduplicated_until_retry_is_recorded(
         }
     ]
     list_checks = AsyncMock(return_value=checks)
-    monkeypatch.setattr(baby_sit, "list_check_runs", list_checks)
-    monkeypatch.setattr(baby_sit, "list_commit_statuses", AsyncMock(return_value=[]))
+    monkeypatch.setattr(RepoClient, "check_runs", list_checks)
+    monkeypatch.setattr(RepoClient, "commit_statuses", AsyncMock(return_value=[]))
     dispatch = AsyncMock(return_value={"run_id": "run-1"})
     monkeypatch.setattr(baby_sit, "dispatch_agent_run", dispatch)
 
@@ -212,27 +189,27 @@ async def test_failure_dispatch_is_deduplicated_until_retry_is_recorded(
 
 
 async def test_concurrent_failure_evaluations_dispatch_once(
-    shared_watch_clients: tuple[_Client, _Client], monkeypatch: pytest.MonkeyPatch
+    registry_db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    first_client, second_client = shared_watch_clients
-    _use_client(monkeypatch, first_client)
-    await _start_watch(first_client)
-    monkeypatch.setattr(baby_sit, "get_github_app_installation_token", AsyncMock(return_value="t"))
+    await _start_watch()
     monkeypatch.setattr(
-        baby_sit,
-        "fetch_pr",
+        github_app, "get_github_app_installation_token", AsyncMock(return_value="t")
+    )
+    monkeypatch.setattr(
+        PullRequestClient,
+        "pull",
         AsyncMock(return_value={"state": "open", "head": {"sha": "head-1"}}),
     )
     monkeypatch.setattr(
-        baby_sit,
-        "list_check_runs",
+        RepoClient,
+        "check_runs",
         AsyncMock(
             return_value=[
                 {"id": 11, "name": "tests", "status": "completed", "conclusion": "failure"}
             ]
         ),
     )
-    monkeypatch.setattr(baby_sit, "list_commit_statuses", AsyncMock(return_value=[]))
+    monkeypatch.setattr(RepoClient, "commit_statuses", AsyncMock(return_value=[]))
     dispatch_started = asyncio.Event()
     release_dispatch = asyncio.Event()
 
@@ -246,95 +223,207 @@ async def test_concurrent_failure_evaluations_dispatch_once(
 
     first = asyncio.create_task(baby_sit.evaluate_watch("acme/repo#7"))
     await dispatch_started.wait()
-    _use_client(monkeypatch, second_client)
     assert await baby_sit.evaluate_watch("acme/repo#7") == "busy"
     release_dispatch.set()
 
     assert await first == "dispatched"
     dispatch.assert_awaited_once()
-    _use_client(monkeypatch, first_client)
     assert await baby_sit.evaluate_watch("acme/repo#7") == "duplicate"
 
 
-async def test_success_waits_for_stable_check_set_before_notifying(
-    watch_client: _Client, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("card_state", ["none", "ready", "draft", "other_thread"])
+async def test_green_webhook_keeps_watching_without_waking_for_draft_card(
+    registry_db: None, monkeypatch: pytest.MonkeyPatch, card_state: str
 ) -> None:
-    await _start_watch(watch_client)
-    monkeypatch.setattr(baby_sit, "get_github_app_installation_token", AsyncMock(return_value="t"))
+    await _start_watch()
+    approval = (
+        HumanReviewRequest(
+            pull_request_id=uuid7(),
+            head_sha="head-1",
+            kind="expedited",
+            thread_id="other-thread" if card_state == "other_thread" else "thread-1",
+            awaiting_ready=card_state in {"draft", "other_thread"},
+        )
+        if card_state != "none"
+        else None
+    )
+    monkeypatch.setattr(HumanReviewRequest, "active_for", AsyncMock(return_value=approval))
     monkeypatch.setattr(
-        baby_sit,
-        "fetch_pr",
-        AsyncMock(return_value={"state": "open", "head": {"sha": "head-1"}}),
+        github_app, "get_github_app_installation_token", AsyncMock(return_value="t")
     )
     monkeypatch.setattr(
-        baby_sit,
-        "list_check_runs",
+        PullRequestClient,
+        "pull",
+        AsyncMock(
+            return_value={"state": "open", "head": {"sha": "head-1"}, "base": {"ref": "main"}}
+        ),
+    )
+    required = AsyncMock(return_value={RequiredCheck("tests"), RequiredCheck("e2e")})
+    monkeypatch.setattr(RequiredCheck, "for_branch", required)
+    monkeypatch.setattr(
+        RepoClient,
+        "check_runs",
         AsyncMock(
             return_value=[
                 {"id": 1, "name": "tests", "status": "completed", "conclusion": "success"}
             ]
         ),
     )
-    monkeypatch.setattr(baby_sit, "list_commit_statuses", AsyncMock(return_value=[]))
+    monkeypatch.setattr(RepoClient, "commit_statuses", AsyncMock(return_value=[]))
     notify = AsyncMock(return_value=True)
     monkeypatch.setattr(baby_sit, "post_slack_thread_reply", notify)
+    dispatch = AsyncMock(return_value={"run_id": "run-1"})
+    monkeypatch.setattr(baby_sit, "dispatch_agent_run", dispatch)
+    payload = {
+        "installation": {"id": 99},
+        "repository": {"owner": {"login": "acme"}, "name": "repo"},
+        "check_run": {"status": "completed", "conclusion": "success", "head_sha": "head-1"},
+    }
 
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    monkeypatch.setattr(baby_sit, "_now", lambda: now)
-    assert await baby_sit.evaluate_watch("acme/repo#7") == "settling"
+    assert await baby_sit.evaluate_watch("acme/repo#7") == "pending"
+    dispatch.assert_not_awaited()
+
+    required.return_value = {RequiredCheck("tests")}
+    assert await baby_sit.handle_ci_webhook(payload, "check_run") == {
+        "matched": 1,
+        "dispatched": 0,
+    }
+    if card_state == "draft":
+        dispatch.assert_not_awaited()
+    else:
+        dispatch.assert_awaited_once()
+        assert dispatch.await_args is not None
+        expected = "merge_expedited_pr" if card_state == "ready" else "checks are green"
+        assert expected in dispatch.await_args.args[1]
     notify.assert_not_awaited()
+    assert len(await baby_sit.WATCHES.list_active()) == 1
+    dispatch.reset_mock()
+    assert await baby_sit.evaluate_watch("acme/repo#7") == "watching"
+    dispatch.assert_not_awaited()
+
+    if card_state == "draft":
+        assert approval is not None
+        approval.awaiting_ready = False
+        assert await baby_sit.evaluate_watch("acme/repo#7") == "watching"
+        dispatch.assert_awaited_once()
+        dispatch.reset_mock()
 
     monkeypatch.setattr(
-        baby_sit,
-        "_now",
-        lambda: now + timedelta(minutes=baby_sit.CHECK_SET_SETTLE_MINUTES),
-    )
-    assert await baby_sit.evaluate_watch("acme/repo#7") == "stopped"
-    notify.assert_awaited_once()
-    assert notify.await_args is not None
-    assert notify.await_args.args[:2] == ("C1", "1.2")
-    assert watch_client.store.values == {}
-
-
-async def test_github_notification_uses_source_repository(
-    watch_client: _Client, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    watch = await _start_watch(watch_client)
-    watch.source_context = SourceContext.parse(
-        {
-            "github_issue": {
-                "number": 12,
-                "url": "https://github.com/acme/default/issues/12",
+        PullRequestClient,
+        "pull",
+        AsyncMock(
+            return_value={
+                "state": "open",
+                "head": {"sha": "head-2", "ref": "feature"},
+                "base": {"ref": "main"},
             }
-        }
+        ),
     )
-    watch.run_config = {
-        "source_repo": {"owner": "acme", "name": "default"},
-        "source_installation_id": 84,
+    monkeypatch.setattr(
+        RepoClient,
+        "check_runs",
+        AsyncMock(
+            return_value=[
+                {"id": 2, "name": "tests", "status": "completed", "conclusion": "failure"}
+            ]
+        ),
+    )
+    payload["check_run"]["head_sha"] = "head-2"
+    payload["check_run"]["conclusion"] = "failure"
+    payload["check_run"]["check_suite"] = {"head_branch": "feature"}
+    assert await baby_sit.handle_ci_webhook(payload, "check_run") == {
+        "matched": 1,
+        "dispatched": 1,
     }
-    token = AsyncMock(return_value="t")
-    post = AsyncMock(return_value=True)
-    monkeypatch.setattr(baby_sit, "get_github_app_installation_token", token)
-    monkeypatch.setattr(baby_sit, "post_github_comment", post)
+    dispatch.assert_awaited_once()
+    assert dispatch.await_args is not None
+    assert "head-2" in dispatch.await_args.args[1]
+    dispatch.reset_mock()
+    monkeypatch.setattr(
+        RepoClient,
+        "check_runs",
+        AsyncMock(
+            return_value=[
+                {"id": 3, "name": "tests", "status": "completed", "conclusion": "success"}
+            ]
+        ),
+    )
+    assert await baby_sit.evaluate_watch("acme/repo#7") == "watching"
+    dispatch.assert_awaited_once()
+    dispatch.reset_mock()
+    assert await baby_sit.evaluate_watch("acme/repo#7") == "watching"
+    dispatch.assert_not_awaited()
 
-    assert await baby_sit._notify_watch(watch, "done") is True
-    token.assert_awaited_once_with(installation_id=84)
-    post.assert_awaited_once_with({"owner": "acme", "name": "default"}, 12, "done", token="t")
+    monkeypatch.setattr(PullRequestClient, "pull", AsyncMock(return_value={"state": "closed"}))
+    assert await baby_sit.evaluate_watch("acme/repo#7") == "stopped"
+    assert await baby_sit.WATCHES.get("acme/repo#7") is None
+
+
+@pytest.mark.parametrize("recovers", [False, True])
+async def test_ready_wakeup_failures_are_bounded_and_reset_on_recovery(
+    registry_db: None, monkeypatch: pytest.MonkeyPatch, recovers: bool
+) -> None:
+    await _start_watch()
+    dispatch = AsyncMock(side_effect=RuntimeError("Agent service unavailable"))
+    monkeypatch.setattr(baby_sit, "dispatch_agent_run", dispatch)
+    notify = AsyncMock()
+    monkeypatch.setattr(baby_sit, "post_slack_thread_reply", notify)
+
+    for expected in range(1, baby_sit.MAX_EVALUATION_ERRORS):
+        watch = await baby_sit.WATCHES.get("acme/repo#7")
+        assert watch is not None
+        assert await baby_sit._finish_ready(watch) == "error"
+        saved = await baby_sit.WATCHES.get(watch.key)
+        assert saved is not None
+        assert saved.ready_dispatch_errors == expected
+        assert saved.ready_head_sha == ""
+
+    dispatch.side_effect = None
+    watch = await baby_sit.WATCHES.get("acme/repo#7")
+    assert watch is not None
+    if recovers:
+        assert await baby_sit._finish_ready(watch) == "watching"
+        saved = await baby_sit.WATCHES.get(watch.key)
+        assert saved is not None
+        assert saved.ready_dispatch_errors == 0
+        assert saved.ready_head_sha == "head-1"
+    else:
+        dispatch.side_effect = [RuntimeError("Agent service unavailable"), {"run_id": "notice"}]
+        assert await baby_sit._finish_ready(watch) == "stopped"
+        assert await baby_sit.WATCHES.get(watch.key) is None
+        assert dispatch.await_args is not None
+        message = dispatch.await_args.args[1]
+        assert "/baby-sit --terminal" in message
+        assert "could not resume its agent after 3 attempts" in message
+        assert "restart the CI watch" in message
+    notify.assert_not_awaited()
 
 
 async def test_terminal_notification_falls_back_to_originating_agent_thread(
-    watch_client: _Client, monkeypatch: pytest.MonkeyPatch
+    registry_db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    watch = await _start_watch(watch_client)
+    watch = await _start_watch()
     watch.source_context = SourceContext()
     watch.run_config = {"thread_id": "thread-1", "source": "dashboard"}
     await baby_sit.WATCHES.save(watch)
-    monkeypatch.setattr(baby_sit, "get_github_app_installation_token", AsyncMock(return_value="t"))
     monkeypatch.setattr(
-        baby_sit,
-        "fetch_pr",
-        AsyncMock(return_value={"state": "closed", "head": {"sha": "head-1"}}),
+        github_app, "get_github_app_installation_token", AsyncMock(return_value="t")
     )
+    monkeypatch.setattr(
+        PullRequestClient,
+        "pull",
+        AsyncMock(return_value={"state": "open", "head": {"sha": "head-1"}}),
+    )
+    monkeypatch.setattr(
+        RepoClient,
+        "check_runs",
+        AsyncMock(
+            return_value=[
+                {"id": 1, "name": "tests", "status": "completed", "conclusion": "cancelled"}
+            ]
+        ),
+    )
+    monkeypatch.setattr(RepoClient, "commit_statuses", AsyncMock(return_value=[]))
     dispatch = AsyncMock(return_value={"run_id": "run-1"})
     monkeypatch.setattr(baby_sit, "dispatch_agent_run", dispatch)
 
@@ -346,9 +435,9 @@ async def test_terminal_notification_falls_back_to_originating_agent_thread(
 
 
 async def test_record_retry_caps_attempts_and_deduplicates_flake_alert(
-    watch_client: _Client, monkeypatch: pytest.MonkeyPatch
+    registry_db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    await _start_watch(watch_client)
+    await _start_watch()
     notify = AsyncMock(return_value=True)
     monkeypatch.setattr(baby_sit, "post_slack_thread_reply", notify)
 
@@ -376,9 +465,9 @@ async def test_record_retry_caps_attempts_and_deduplicates_flake_alert(
 
 
 async def test_new_head_resets_retry_budget(
-    watch_client: _Client, monkeypatch: pytest.MonkeyPatch
+    registry_db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    await _start_watch(watch_client)
+    await _start_watch()
     monkeypatch.setattr(baby_sit, "post_slack_thread_reply", AsyncMock(return_value=True))
     for _ in range(3):
         await baby_sit.record_retry(
@@ -388,18 +477,20 @@ async def test_new_head_resets_retry_budget(
             check_name="tests",
             evidence="runner timeout",
         )
-    monkeypatch.setattr(baby_sit, "get_github_app_installation_token", AsyncMock(return_value="t"))
     monkeypatch.setattr(
-        baby_sit,
-        "fetch_pr",
+        github_app, "get_github_app_installation_token", AsyncMock(return_value="t")
+    )
+    monkeypatch.setattr(
+        PullRequestClient,
+        "pull",
         AsyncMock(return_value={"state": "open", "head": {"sha": "head-2"}}),
     )
     monkeypatch.setattr(
-        baby_sit,
-        "list_check_runs",
+        RepoClient,
+        "check_runs",
         AsyncMock(return_value=[{"id": 2, "name": "tests", "status": "in_progress"}]),
     )
-    monkeypatch.setattr(baby_sit, "list_commit_statuses", AsyncMock(return_value=[]))
+    monkeypatch.setattr(RepoClient, "commit_statuses", AsyncMock(return_value=[]))
 
     assert await baby_sit.evaluate_watch("acme/repo#7") == "pending"
     watch = await baby_sit.WATCHES.get("acme/repo#7")
@@ -408,48 +499,29 @@ async def test_new_head_resets_retry_budget(
     assert watch.retry_count == 0
 
 
-async def test_failed_webhook_matches_active_head_and_deduplicates_delivery(
-    watch_client: _Client, monkeypatch: pytest.MonkeyPatch
+async def test_only_the_watching_task_can_take_over_or_record_retries(
+    registry_db: None,
 ) -> None:
-    await _start_watch(watch_client)
-    evaluate = AsyncMock(return_value="dispatched")
-    monkeypatch.setattr(baby_sit, "_evaluate_watch", evaluate)
-    token = AsyncMock(return_value="t")
-    monkeypatch.setattr(baby_sit, "get_github_app_installation_token", token)
-    payload = {
-        "installation": {"id": 99},
-        "repository": {"owner": {"login": "Acme"}, "name": "Repo"},
-        "check_run": {"status": "completed", "conclusion": "failure", "head_sha": "head-1"},
-    }
+    watch = await _start_watch()
+    assert watch.thread_id == "thread-1"
+    task = await Task.for_thread("thread-1", title="", workspace="default")
+    assert watch.task_id == task.id
 
-    first = await baby_sit.handle_ci_webhook(payload, "check_run", delivery_id="delivery-1")
-    second = await baby_sit.handle_ci_webhook(payload, "check_run", delivery_id="delivery-1")
-    payload["check_run"] = {
-        "status": "completed",
-        "conclusion": "failure",
-        "head_sha": "head-2",
-        "check_suite": {"head_branch": "feature"},
-    }
-    new_head = await baby_sit.handle_ci_webhook(payload, "check_run", delivery_id="delivery-2")
-
-    assert first == {"matched": 1, "dispatched": 1}
-    assert second == {"matched": 1, "dispatched": 0}
-    assert new_head == {"matched": 1, "dispatched": 1}
-    assert evaluate.await_count == 2
-    token.assert_awaited_with(installation_id=99)
-    watch = await baby_sit.WATCHES.get("acme/repo#7")
-    assert watch is not None
-    assert watch.installation_id == 99
-
-
-async def test_scheduler_routes_baby_sit_task(monkeypatch: pytest.MonkeyPatch) -> None:
-    evaluate = AsyncMock(return_value="pending")
-    monkeypatch.setattr(scheduler, "evaluate_watch", evaluate)
-
-    result = await scheduler._launch(
-        scheduler.SchedulerState(task="baby_sit", watch_key="acme/repo#7"),
-        {"configurable": {}},
-    )
-
-    assert result == {"result": {"status": "pending"}}
-    evaluate.assert_awaited_once_with("acme/repo#7")
+    with pytest.raises(ValueError, match="another task"):
+        await baby_sit.start_watch(
+            pr_ref=GitHubPrRef("Acme", "Repo", 7, "https://github.com/Acme/Repo/pull/7"),
+            title="Fix the build",
+            head_sha="head-1",
+            head_ref="feature",
+            installation_id=42,
+            thread_id="thread-2",
+            run_config={"thread_id": "thread-2"},
+            source_context=SourceContext(),
+        )
+    assert await baby_sit.record_retry(
+        "acme/repo#7",
+        thread_id="thread-2",
+        head_sha="head-1",
+        check_name="tests",
+        evidence="runner timeout",
+    ) == {"success": False, "error": "This watch belongs to another task"}

@@ -1,169 +1,180 @@
-"""Tests for agent.utils.repo and Linear webhook repo override behavior."""
+"""Tests for openswe.utils.repo and the repository a Linear session works in."""
 
-import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent.slack.client import extract_channel_description_text
-from agent.utils.repo import extract_repo_from_text
+from openswe.dashboard.workspace_settings import WorkspaceSettings
+from openswe.linear.session import NO_REPOSITORY, LinearSessionTurn
+from openswe.users import User, UserIdentity
+from openswe.utils.repo import extract_repo_from_text
+from openswe.webhooks.common import ThreadRecord
+
+_NEW_THREAD = ThreadRecord(exists=False, metadata={})
+_ZHEN = User(identities=[UserIdentity(provider="github", external_id="1", login="zhen")])
+
+
+@contextmanager
+def _defaults(
+    personal: dict[str, str] | None = None, fallback: dict[str, str] | None = None
+) -> Iterator[None]:
+    """The author's defaults: ``personal`` only for the ``personal`` workspace they resolve to."""
+
+    async def default_repo(
+        _user: User, workspace: str | None = None, *, fallback_global: bool = True
+    ) -> dict[str, str] | None:
+        if workspace == "personal":
+            return personal
+        return fallback if fallback_global else None
+
+    with (
+        patch.object(User, "default_repo", default_repo),
+        patch(
+            "openswe.linear.session.resolve_workspace",
+            AsyncMock(return_value=SimpleNamespace(slug="personal")),
+        ),
+    ):
+        yield
 
 
 class TestExtractRepoFromText:
-    def test_repo_colon_with_org(self) -> None:
-        result = extract_repo_from_text("please use repo:my-org/my-repo")
-        assert result == {"owner": "my-org", "name": "my-repo"}
-
-    def test_repo_space_with_org(self) -> None:
-        result = extract_repo_from_text("please use repo langchain-ai/langchainjs")
-        assert result == {"owner": "langchain-ai", "name": "langchainjs"}
-
-    def test_repo_colon_name_only_uses_default_owner(self) -> None:
-        result = extract_repo_from_text(
-            "fix bug in repo:langchainplus", default_owner="langchain-ai"
-        )
-        assert result == {"owner": "langchain-ai", "name": "langchainplus"}
-
-    def test_repo_space_name_only_uses_default_owner(self) -> None:
-        result = extract_repo_from_text("fix bug in repo alephat", default_owner="langchain-ai")
-        assert result == {"owner": "langchain-ai", "name": "alephat"}
-
-    def test_repo_name_only_custom_default_owner(self) -> None:
-        result = extract_repo_from_text("repo:my-repo", default_owner="custom-org")
-        assert result == {"owner": "custom-org", "name": "my-repo"}
-
-    def test_github_url(self) -> None:
-        result = extract_repo_from_text(
-            "check https://github.com/langchain-ai/langgraph-api please"
-        )
-        assert result == {"owner": "langchain-ai", "name": "langgraph-api"}
-
     def test_explicit_repo_beats_github_url(self) -> None:
         result = extract_repo_from_text(
             "see https://github.com/langchain-ai/langgraph-api but use repo:my-org/my-repo"
         )
         assert result == {"owner": "my-org", "name": "my-repo"}
 
-    def test_no_repo_returns_none(self) -> None:
-        result = extract_repo_from_text("please fix the bug")
-        assert result is None
 
-    def test_empty_string_returns_none(self) -> None:
-        result = extract_repo_from_text("")
-        assert result is None
+class TestLinearSessionRepository:
+    """A Linear session turn works in the repository it names, else the session's, else a default."""
 
-    def test_trailing_slash_stripped(self) -> None:
-        result = extract_repo_from_text("repo:my-org/my-repo/")
-        assert result == {"owner": "my-org", "name": "my-repo"}
+    @pytest.fixture(autouse=True)
+    def _no_defaults(self) -> Iterator[None]:
+        with _defaults():
+            yield
 
-
-class TestExtractChannelDescriptionText:
-    def test_combines_topic_and_purpose(self) -> None:
-        channel = {
-            "topic": {"value": "repo:my-org/my-repo"},
-            "purpose": {"value": "Team channel"},
-        }
-        assert extract_channel_description_text(channel) == "repo:my-org/my-repo\nTeam channel"
-
-    def test_handles_missing_sections(self) -> None:
-        assert extract_channel_description_text({"topic": {"value": "hi"}}) == "hi"
-
-    def test_empty_for_none(self) -> None:
-        assert extract_channel_description_text(None) == ""
-
-    def test_empty_for_blank_values(self) -> None:
-        channel = {"topic": {"value": "  "}, "purpose": {"value": ""}}
-        assert extract_channel_description_text(channel) == ""
-
-    def test_repo_token_extractable_from_description(self) -> None:
-        channel = {"topic": {"value": "Use repo:langchain-ai/alephat here"}, "purpose": {}}
-        description = extract_channel_description_text(channel)
-        assert extract_repo_from_text(description) == {
-            "owner": "langchain-ai",
-            "name": "alephat",
-        }
-
-
-class TestLinearWebhookRepoOverride:
-    """Test that the Linear webhook handler checks comment body for repo config first."""
-
-    @pytest.fixture()
-    def _base_payload(self) -> dict:
-        return {
-            "type": "Comment",
-            "action": "create",
-            "data": {
-                "id": "comment-123",
-                "body": "@alephat please fix this repo:custom-org/custom-repo",
-                "issue": {
-                    "id": "issue-456",
-                    "title": "Test issue",
+    @staticmethod
+    def _turn(body: str, description: str | None = None) -> LinearSessionTurn:
+        creator = {"id": "user-1", "name": "Test User", "email": "zhen@example.com"}
+        turn = LinearSessionTurn.parse(
+            "AgentSessionEvent.created",
+            {
+                "type": "AgentSessionEvent",
+                "action": "created",
+                "organizationId": "org-1",
+                "webhookTimestamp": 1_700_000_000_000,
+                "agentSession": {
+                    "id": "session-1",
+                    "issue": {
+                        "id": "issue-456",
+                        "identifier": "ENG-1",
+                        "title": "Test issue",
+                        "description": description,
+                    },
+                    "comment": {"id": "comment-123", "body": body},
+                    "creator": creator,
                 },
-                "user": {"id": "user-1", "name": "Test User", "email": "test@test.com"},
             },
-        }
+        )
+        assert isinstance(turn, LinearSessionTurn)
+        return turn
 
     @pytest.mark.asyncio
-    async def test_comment_repo_overrides_team_mapping(self, _base_payload: dict) -> None:
-        from agent.linear.routes import linear_webhook
-
-        with (
-            patch("agent.webhooks.common.verify_linear_signature", return_value=True),
-            patch("agent.webhooks.common.is_repo_allowed", return_value=True),
-            patch("agent.webhooks.common.BackgroundTasks"),
-        ):
-            mock_request = AsyncMock()
-            mock_request.body.return_value = json.dumps(_base_payload).encode()
-            mock_request.headers = {"Linear-Signature": "valid"}
-
-            bg_tasks = AsyncMock()
-            result = await linear_webhook(mock_request, bg_tasks)
-
-            assert result["status"] == "accepted"
-            assert "custom-org/custom-repo" in result["message"]
-
-            call_args = bg_tasks.add_task.call_args
-            repo_config = call_args[0][2]
-            assert repo_config == {"owner": "custom-org", "name": "custom-repo"}
+    async def test_the_comment_names_the_repository(self) -> None:
+        with patch("openswe.webhooks.common.is_repo_allowed", return_value=True):
+            chosen = await self._turn("please fix this repo:custom-org/custom-repo").repository(
+                _NEW_THREAD, _ZHEN
+            )
+        assert chosen == ({"owner": "custom-org", "name": "custom-repo"}, None)
 
     @pytest.mark.asyncio
-    async def test_falls_back_to_default_repo_with_standard_comment_payload(self) -> None:
-        from agent.linear.routes import linear_webhook
-
-        payload = {
-            "type": "Comment",
-            "action": "create",
-            "actor": {
-                "id": "user-1",
-                "name": "Test User",
-                "email": "test@test.com",
-            },
-            "data": {
-                "id": "comment-123",
-                "body": "@alephat please fix this bug",
-                "issueId": "issue-456",
-                "userId": "user-1",
-            },
-        }
-
+    async def test_falls_back_to_the_workspace_default(self) -> None:
         with (
-            patch("agent.webhooks.common.verify_linear_signature", return_value=True),
             patch(
-                "agent.webhooks.common.get_team_default_repo",
-                AsyncMock(return_value={"owner": "langchain-ai", "name": "alephat"}),
+                "openswe.webhooks.common.get_workspace_settings",
+                AsyncMock(
+                    return_value=WorkspaceSettings({"default_repo": "langchain-ai/open-swe"})
+                ),
             ),
-            patch("agent.webhooks.common.is_repo_allowed", return_value=True),
+            patch("openswe.webhooks.common.is_repo_allowed", return_value=True),
         ):
-            mock_request = AsyncMock()
-            mock_request.body.return_value = json.dumps(payload).encode()
-            mock_request.headers = {"Linear-Signature": "valid"}
+            chosen = await self._turn("please fix this bug").repository(_NEW_THREAD, _ZHEN)
+        assert chosen == ({"owner": "langchain-ai", "name": "open-swe"}, None)
 
-            bg_tasks = AsyncMock()
-            result = await linear_webhook(mock_request, bg_tasks)
+    @pytest.mark.asyncio
+    async def test_tells_the_session_a_repository_is_outside_the_allowlist(self) -> None:
+        with patch("openswe.webhooks.common.is_repo_allowed", return_value=False):
+            chosen = await self._turn("repo:other-org/other-repo").repository(_NEW_THREAD, _ZHEN)
+        assert chosen == {
+            "decline": "I'm not allowed to work in `other-org/other-repo`. Name a repository "
+            "Open SWE may work in, or ask your Open SWE admin to allow this one."
+        }
 
-            assert result["status"] == "accepted"
-            assert "langchain-ai/alephat" in result["message"]
+    @pytest.mark.asyncio
+    async def test_asks_which_repository_when_none_is_named_or_set(self) -> None:
+        with patch(
+            "openswe.webhooks.common.get_workspace_settings",
+            AsyncMock(return_value=WorkspaceSettings({})),
+        ):
+            chosen = await self._turn("please fix this bug").repository(_NEW_THREAD, _ZHEN)
+        assert chosen == NO_REPOSITORY
 
-            call_args = bg_tasks.add_task.call_args
-            repo_config = call_args[0][2]
-            assert repo_config == {"owner": "langchain-ai", "name": "alephat"}
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("thread_workspace", "chosen"),
+        [
+            # A new thread: the author's default for the workspace they resolve to, which the
+            # run then lands in.
+            (None, ({"owner": "zhen", "name": "personal"}, "personal")),
+            # The thread's workspace has no default of theirs: their global one, and the thread
+            # keeps its workspace.
+            ("core", ({"owner": "zhen", "name": "global"}, None)),
+        ],
+    )
+    async def test_the_authors_default_for_the_workspace_comes_first(
+        self,
+        thread_workspace: str | None,
+        chosen: tuple[dict[str, str], str | None],
+    ) -> None:
+        thread = ThreadRecord(True, {"workspace": thread_workspace} if thread_workspace else {})
+        with (
+            _defaults({"owner": "zhen", "name": "personal"}, {"owner": "zhen", "name": "global"}),
+            patch("openswe.webhooks.common.is_repo_allowed", return_value=True),
+        ):
+            assert await self._turn("please fix this bug").repository(thread, _ZHEN) == chosen
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("thread", "description", "name"),
+        [
+            # An earlier turn chose it; the thread recorded it.
+            (ThreadRecord(True, {"repo": {"owner": "acme", "name": "api"}}), None, "api"),
+            # "repo setup" is prose, not a choice; the explicit token is.
+            (_NEW_THREAD, "Fix the repo setup. It crashes in repo:acme/web on login.", "web"),
+            # An uploaded screenshot or a gist isn't a repository; the link after them is.
+            (
+                _NEW_THREAD,
+                "![shot](https://github.com/user-attachments/assets/0b1c) "
+                "https://gist.github.com/ada/123 https://github.com/acme/app/issues/7",
+                "app",
+            ),
+        ],
+        ids=["the-thread-remembers", "the-issue-names", "the-issue-links"],
+    )
+    async def test_a_turn_naming_no_repository_works_where_the_session_does(
+        self, thread: ThreadRecord, description: str | None, name: str
+    ) -> None:
+        with (
+            patch(
+                "openswe.webhooks.common.get_workspace_settings",
+                AsyncMock(return_value=WorkspaceSettings({})),
+            ),
+            patch("openswe.webhooks.common.is_repo_allowed", return_value=True),
+        ):
+            chosen = await self._turn("now add a test", description=description).repository(
+                thread, _ZHEN
+            )
+        assert chosen == ({"owner": "acme", "name": name}, None)

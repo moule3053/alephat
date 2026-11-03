@@ -1,47 +1,38 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useQueryClient } from "@tanstack/react-query"
 import { useState } from "react"
-import { IoLogoSlack } from "react-icons/io5"
-import { SiNotion } from "react-icons/si"
+import { Badge } from "@langchain/macaw-components/Badge"
+import { Button } from "@langchain/macaw-components/Button"
+import { GithubLogoIcon } from "@phosphor-icons/react/dist/ssr/GithubLogo"
+import { SlackLogoIcon } from "@phosphor-icons/react/dist/ssr/SlackLogo"
 
 import type { SessionUser } from "@/lib/api"
 import { SettingsRow, SettingsSection } from "@/components/AppShell"
-import { Button } from "@/components/ui/button"
-import { api, connectService } from "@/lib/api"
-import { cn } from "@/lib/utils"
-
-type SetError = (message: string | null) => void
+import { connectService, loginUrl } from "@/lib/api"
+import { hasLinkedGitHub } from "@/lib/linkedGitHub"
 
 function StatusPill({ connected }: { connected: boolean }) {
   return (
-    <span
-      className={cn(
-        "rounded-full px-2 py-0.5 text-[10px] font-medium",
-        connected
-          ? "bg-primary/10 text-primary"
-          : "bg-muted text-muted-foreground"
-      )}
-    >
+    <Badge color={connected ? "primary" : "secondary"} size="xs">
       {connected ? "Connected" : "Not connected"}
-    </span>
+    </Badge>
   )
 }
 
 function SlackRow({ user }: { user: SessionUser }) {
   const qc = useQueryClient()
-  const mapping = useQuery({ queryKey: ["myMapping"], queryFn: api.myMapping })
   const [connecting, setConnecting] = useState(false)
 
-  const slackUserId = mapping.data?.slack_user_id ?? null
-  const workEmail = mapping.data?.work_email ?? null
+  const slackUserId = user.slack_user_id ?? null
+  const workEmail = user.email ?? null
   const connected = !!slackUserId
 
   const connect = () => {
     setConnecting(true)
-    // Refresh the cached mapping when the user returns from the OAuth redirect.
-    void qc.invalidateQueries({ queryKey: ["myMapping"] })
+    // The link lands on the session's user row; refresh it when the OAuth redirect returns.
+    void qc.invalidateQueries({ queryKey: ["session"] })
     void connectService("slack")?.finally(() => {
       setConnecting(false)
-      void qc.invalidateQueries({ queryKey: ["myMapping"] })
+      void qc.invalidateQueries({ queryKey: ["session"] })
     })
   }
 
@@ -51,19 +42,20 @@ function SlackRow({ user }: { user: SessionUser }) {
       description={
         connected
           ? `Linked to Slack member ${slackUserId}${workEmail ? ` · ${workEmail}` : ""}.`
-          : "Sign in with Slack so Alephat resolves your GitHub account when you tag it — the verified email also resolves Linear mentions."
+          : "Sign in with Slack so Open SWE resolves your GitHub account when you tag it — the verified email also resolves Linear mentions."
       }
       control={
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-space-2">
           <StatusPill connected={connected} />
           {user.slack_oauth_enabled ? (
             <Button
-              size="sm"
-              variant={connected ? "outline" : "default"}
+              size="xs"
+              color={connected ? "secondary" : "primary"}
+              variant={connected ? "outlined" : "normal"}
+              leftDecorator={SlackLogoIcon}
               onClick={connect}
-              disabled={connecting || mapping.isLoading}
+              disabled={connecting}
             >
-              <IoLogoSlack className="size-4" />
               {connecting
                 ? "Redirecting…"
                 : connected
@@ -71,7 +63,7 @@ function SlackRow({ user }: { user: SessionUser }) {
                   : "Connect"}
             </Button>
           ) : (
-            <span className="text-[10px] text-muted-foreground">
+            <span className="text-xxs text-secondary">
               Sign in with Slack unavailable
             </span>
           )}
@@ -81,58 +73,55 @@ function SlackRow({ user }: { user: SessionUser }) {
   )
 }
 
-function NotionRow({ setError }: { setError: SetError }) {
+/** Link (or relink) the signed-in person's GitHub account, which unlocks coding features. */
+export function LinkGitHubButton({
+  user,
+  size = "xs",
+  className,
+}: {
+  user: SessionUser
+  size?: "xs" | "sm" | "md"
+  className?: string
+}) {
   const qc = useQueryClient()
-  const creds = useQuery({
-    queryKey: ["myNotion"],
-    queryFn: api.getMyNotionStatus,
-  })
   const [connecting, setConnecting] = useState(false)
+  const linked = !!user.github_login
+  return (
+    <Button
+      size={size}
+      color={linked ? "secondary" : "primary"}
+      variant={linked ? "outlined" : "normal"}
+      leftDecorator={GithubLogoIcon}
+      className={className}
+      onClick={() => {
+        setConnecting(true)
+        void connectService("github", window.location.href)?.finally(() => {
+          setConnecting(false)
+          void qc.invalidateQueries({ queryKey: ["session"] })
+        })
+      }}
+      disabled={connecting}
+    >
+      {connecting ? "Redirecting…" : linked ? "Relink" : "Link GitHub"}
+    </Button>
+  )
+}
 
-  const disconnect = useMutation({
-    mutationFn: () => api.disconnectNotion(),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["myNotion"] })
-      setError(null)
-    },
-    onError: (e: Error) => setError(e.message),
-  })
-
-  const connected = !!creds.data?.connected
-  const connect = () => {
-    setConnecting(true)
-    void qc.invalidateQueries({ queryKey: ["myNotion"] })
-    void connectService("notion")?.finally(() => {
-      setConnecting(false)
-      void qc.invalidateQueries({ queryKey: ["myNotion"] })
-    })
-  }
-
+function GitHubRow({ user }: { user: SessionUser }) {
+  const linked = !!user.github_login
   return (
     <SettingsRow
-      label="Notion"
-      description="Let agent runs use Notion MCP tools with your workspace permissions. OAuth tokens are encrypted at rest and scoped to your account."
+      label="GitHub"
+      description={
+        linked
+          ? `Linked to @${user.github_login}. Coding features act as this account.`
+          : "Link your GitHub account to use coding features and return to your existing coding threads."
+      }
       control={
-        <div className="flex items-center gap-2">
-          <StatusPill connected={connected} />
-          {connected ? (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => disconnect.mutate()}
-              disabled={disconnect.isPending}
-            >
-              Disconnect
-            </Button>
-          ) : (
-            <Button
-              size="sm"
-              onClick={connect}
-              disabled={connecting || creds.isLoading}
-            >
-              <SiNotion className="size-4" />
-              {connecting ? "Redirecting…" : "Connect"}
-            </Button>
+        <div className="flex items-center gap-space-2">
+          <StatusPill connected={linked} />
+          {user.auth_provider === "langsmith" && (
+            <LinkGitHubButton user={user} />
           )}
         </div>
       }
@@ -140,17 +129,36 @@ function NotionRow({ setError }: { setError: SetError }) {
   )
 }
 
-export function ConnectionsSection({ user }: { user: SessionUser }) {
-  const [error, setError] = useState<string | null>(null)
-
+/** Sends the person back through LangSmith sign-in, which renews the grant their tools use. */
+export function SignInWithLangSmithButton({
+  size = "xs",
+}: {
+  size?: "xs" | "sm" | "md"
+}) {
   return (
-    <SettingsSection
-      title="Personal connections"
-      description="Accounts and credentials Alephat can use on your behalf. Workspace MCP tools configured by an admin are shared with everyone."
-    >
-      <SlackRow user={user} />
-      <NotionRow setError={setError} />
-      {error && <p className="px-4 py-2 text-xs text-destructive">{error}</p>}
+    <Button as={<a href={loginUrl()} />} size={size} color="primary">
+      Sign in again
+    </Button>
+  )
+}
+
+function LangSmithRow({ user }: { user: SessionUser }) {
+  if (user.auth_provider !== "langsmith") return null
+  return (
+    <SettingsRow
+      label="LangSmith"
+      description={`Your sign-in account${user.email ? `: ${user.email}` : ""}. Open SWE calls LangSmith as you with it. Sign out to change accounts.`}
+      control={<StatusPill connected />}
+    />
+  )
+}
+
+export function ConnectionsSection({ user }: { user: SessionUser }) {
+  return (
+    <SettingsSection title="Accounts">
+      <GitHubRow user={user} />
+      {hasLinkedGitHub(user) && <SlackRow user={user} />}
+      <LangSmithRow user={user} />
     </SettingsSection>
   )
 }

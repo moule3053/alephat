@@ -39,7 +39,7 @@ export function createNewThreadCommand(run: () => void): AppCommand {
     id: "new-thread",
     label: "New thread",
     aliases: ["new chat", "start thread"],
-    shortcuts: ["c", "mod+n", "mod+shift+o"],
+    shortcuts: ["mod+n", "mod+shift+o"],
     group: "General",
     run,
     desktopId: "new-thread",
@@ -115,17 +115,6 @@ export function AppCommandProvider({
         aliases: ["home", "chats", "agents"],
         group: "Navigation",
         run: () => void navigate({ to: "/agents" }),
-      },
-      {
-        id: "open-kanban",
-        label: "Open Kanban",
-        aliases: ["board", "all threads"],
-        group: "Navigation",
-        run: () =>
-          void navigate({
-            to: "/agents/threads",
-            search: { page: 1, layout: "board", group: "focus" },
-          }),
       },
       {
         id: "open-skills",

@@ -1,24 +1,60 @@
-import { useId, useState } from "react"
+import { useId, useRef, useState } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { EyeIcon, EyeSlashIcon } from "@phosphor-icons/react"
+import { Button } from "@langchain/macaw-components/Button"
+import { Checkbox } from "@langchain/macaw-components/Checkbox"
+import { IconButton } from "@langchain/macaw-components/IconButton"
+import { Input } from "@langchain/macaw-components/Input"
+import { Select } from "@langchain/macaw-components/Select"
+import { EyeIcon } from "@phosphor-icons/react/dist/ssr/Eye"
+import { EyeSlashIcon } from "@phosphor-icons/react/dist/ssr/EyeSlash"
 
 import { SettingsSection } from "@/components/AppShell"
-import { Button, IconButton } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { api } from "@/lib/api"
+import { api, DEFAULT_WORKSPACE_SLUG } from "@/lib/api"
 import type { MCPConnection, MCPConnectionUpdate } from "@/lib/api"
+import { reportError } from "@/lib/errorReporting"
 import { MCPImport } from "./MCPImport"
 import type { ImportedMCP } from "./MCPImport"
-import { MCPOAuthFields } from "./MCPOAuthFields"
+import { MCPOAuthFields, SecretInput } from "./MCPOAuthFields"
 
 type Header = { name: string; value: string; revealed?: boolean }
 type Draft = Omit<MCPConnectionUpdate, "headers"> & { existing: boolean }
 type Catalog = { name: string; description: string }[]
+type AuthMode = "headers" | "oauth"
 
-export type MCPScope = "workspace" | "user"
+const TRANSPORTS: Array<{ value: MCPConnection["transport"]; label: string }> =
+  [
+    { value: "streamable_http", label: "Streamable HTTP" },
+    { value: "sse", label: "SSE" },
+  ]
+
+const AUTH_MODES: Array<{ value: AuthMode; label: string }> = [
+  { value: "headers", label: "Headers / API key" },
+  { value: "oauth", label: "OAuth client credentials" },
+]
+
+function editableValues(connection?: MCPConnectionUpdate): string {
+  const oauth = connection?.oauth
+  return JSON.stringify([
+    connection?.name ?? "",
+    connection?.url ?? "",
+    connection?.transport ?? "streamable_http",
+    connection?.enabled ?? true,
+    [...(connection?.allowed_tools ?? [])].sort(),
+    oauth
+      ? [
+          oauth.token_url,
+          oauth.client_id,
+          oauth.scope ?? "",
+          oauth.token_endpoint_auth_method ?? "client_secret_post",
+          oauth.client_secret ?? "",
+        ]
+      : null,
+  ])
+}
+
+export type MCPScope = "instance" | "workspace" | "user"
 
 type MCPScopeConfig = {
-  title: string
   description: string
   queryKey: string[]
   list: () => Promise<MCPConnection[]>
@@ -28,35 +64,60 @@ type MCPScopeConfig = {
   discover: (body: MCPConnectionUpdate) => Promise<Catalog>
 }
 
-const scopes: Record<MCPScope, MCPScopeConfig> = {
-  workspace: {
-    title: "Workspace MCPs",
-    description:
-      "Connect remote MCP servers for authorized coding-agent runs. New connections preselect all discovered tools; review the selection and save to enable them.",
-    queryKey: ["workspaceMCPs"],
-    list: api.getWorkspaceMCPs,
-    save: api.saveWorkspaceMCP,
-    remove: api.deleteWorkspaceMCP,
-    revealHeaders: api.revealWorkspaceMCPHeaders,
-    discover: api.discoverWorkspaceMCP,
-  },
-  user: {
-    title: "Personal MCPs",
-    description:
-      "Connect remote MCP servers with your own credentials. They load only in your private threads, never in threads other people can prompt. A personal connection replaces a workspace connection with the same name in your runs. New connections preselect all discovered tools; review the selection and save to enable them.",
-    queryKey: ["myMCPs"],
-    list: api.getMyMCPs,
-    save: api.saveMyMCP,
-    remove: api.deleteMyMCP,
-    revealHeaders: api.revealMyMCPHeaders,
-    discover: api.discoverMyMCP,
-  },
+function scopeConfig(scope: MCPScope, workspace: string): MCPScopeConfig {
+  const scopes: Record<MCPScope, MCPScopeConfig> = {
+    instance: {
+      description:
+        "Connect remote MCP servers that every workspace inherits. A workspace or personal connection with the same name replaces one of these in its runs. New connections preselect all discovered tools; review the selection and save to enable them.",
+      queryKey: ["instanceMCPs"],
+      list: api.getInstanceMCPs,
+      save: api.saveInstanceMCP,
+      remove: api.deleteInstanceMCP,
+      revealHeaders: api.revealInstanceMCPHeaders,
+      discover: api.discoverInstanceMCP,
+    },
+    workspace: {
+      description:
+        "Connect remote MCP servers for this workspace's runs. A connection here replaces an inherited instance connection with the same name. New connections preselect all discovered tools; review the selection and save to enable them.",
+      queryKey: ["workspaceMCPs", workspace],
+      list: () => api.getWorkspaceMCPs(workspace),
+      save: (body) => api.saveWorkspaceMCP(workspace, body),
+      remove: (name) => api.deleteWorkspaceMCP(workspace, name),
+      revealHeaders: (name) => api.revealWorkspaceMCPHeaders(workspace, name),
+      discover: (body) => api.discoverWorkspaceMCP(workspace, body),
+    },
+    user: {
+      description:
+        "Connect remote MCP servers with your own credentials. They load only in your private threads, never in threads other people can prompt. A personal connection replaces a workspace connection with the same name in your runs. New connections preselect all discovered tools; review the selection and save to enable them.",
+      queryKey: ["myMCPs"],
+      list: api.getMyMCPs,
+      save: api.saveMyMCP,
+      remove: api.deleteMyMCP,
+      revealHeaders: api.revealMyMCPHeaders,
+      discover: api.discoverMyMCP,
+    },
+  }
+  return scopes[scope]
 }
 
-export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
-  const { title, description, queryKey, ...client } = scopes[scope]
+export function MCPConnectionsSection({
+  scope,
+  workspace = DEFAULT_WORKSPACE_SLUG,
+}: {
+  scope: MCPScope
+  /** Only meaningful for `scope: "workspace"`; ignored for personal MCPs. */
+  workspace?: string
+}) {
+  const { description, queryKey, ...client } = scopeConfig(scope, workspace)
   const qc = useQueryClient()
   const connections = useQuery({ queryKey, queryFn: client.list })
+  // What this workspace inherits; shown so an admin can see what a same-named
+  // connection here would replace.
+  const inherited = useQuery({
+    queryKey: ["instanceMCPs"],
+    queryFn: api.getInstanceMCPs,
+    enabled: scope === "workspace",
+  })
   const [draft, setDraft] = useState<Draft | null>(null)
   const [headers, setHeaders] = useState<Header[]>([])
   const [replaceHeaders, setReplaceHeaders] = useState(false)
@@ -66,6 +127,10 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
   > | null>(null)
   const [catalog, setCatalog] = useState<Catalog>([])
   const [busy, setBusy] = useState(false)
+  const [pendingRows, setPendingRows] = useState<ReadonlySet<string>>(
+    () => new Set()
+  )
+  const rowWritesInFlight = useRef(0)
   const [error, setError] = useState<string | null>(null)
   const [toolsExpanded, setToolsExpanded] = useState(true)
   const [importing, setImporting] = useState(false)
@@ -75,6 +140,13 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
   const savedConnection = connections.data?.find(
     (connection) => connection.name === draft?.name
   )
+  const dirty =
+    draft !== null &&
+    (editableValues(draft) !==
+      editableValues(draft.existing ? savedConnection : undefined) ||
+      (replaceHeaders &&
+        (headers.length > 0 ||
+          (savedConnection?.header_names.length ?? 0) > 0)))
   const toolDescriptions = new Map(
     catalog.map((tool) => [tool.name, tool.description])
   )
@@ -171,6 +243,41 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
     setBusy(false)
   }
 
+  const optimistic = async (
+    name: string,
+    errorTitle: string,
+    apply: (list: MCPConnection[]) => MCPConnection[],
+    revert: (list: MCPConnection[]) => MCPConnection[],
+    action: () => Promise<void>
+  ) => {
+    setPendingRows((rows) => new Set(rows).add(name))
+    rowWritesInFlight.current++
+    await qc.cancelQueries({ queryKey })
+    qc.setQueryData<MCPConnection[]>(
+      queryKey,
+      (current) => current && apply(current)
+    )
+    try {
+      await action()
+    } catch (e) {
+      qc.setQueryData<MCPConnection[]>(
+        queryKey,
+        (current) => current && revert(current)
+      )
+      reportError({ title: errorTitle, error: e })
+    } finally {
+      setPendingRows((rows) => {
+        const next = new Set(rows)
+        next.delete(name)
+        return next
+      })
+      rowWritesInFlight.current--
+    }
+    // A refetch while another row's write is pending would revert that row.
+    if (rowWritesInFlight.current === 0)
+      await qc.invalidateQueries({ queryKey })
+  }
+
   const save = async (discover: boolean) => {
     if (!draft) return
     await run(async () => {
@@ -246,84 +353,80 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
       id={editorId}
       className={
         draft.existing
-          ? "space-y-4 border-t p-4"
-          : "space-y-4 rounded-md border p-4"
+          ? "space-y-space-4 border-t border-default p-space-4"
+          : "space-y-space-4 rounded-md border border-default p-space-4"
       }
       onSubmit={(event) => {
         event.preventDefault()
         void save(false)
       }}
     >
-      <fieldset disabled={busy} className="space-y-4">
+      <fieldset disabled={busy} className="space-y-space-4">
         {error && (
-          <p role="alert" className="text-sm text-destructive">
+          <p role="alert" className="text-sm text-error-secondary">
             {error}
           </p>
         )}
         {pendingImports.length > 0 && (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-xs text-secondary">
             {pendingImports.length} more{" "}
             {pendingImports.length === 1 ? "connection" : "connections"} to
             review after saving.
           </p>
         )}
-        <label className="block text-sm">
-          Connection name
-          <Input
-            aria-label="Connection name"
-            required
-            pattern={"[a-z][a-z0-9_\\-]{0,31}"}
-            maxLength={32}
-            title="Start with a lowercase letter; use lowercase letters, numbers, hyphens, or underscores."
-            placeholder="incident"
-            disabled={draft.existing}
-            value={draft.name}
-            onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-          />
-          <span className="text-xs text-muted-foreground">
-            Use a lowercase name such as incident. Dots and spaces are not
-            allowed.
+        <Input
+          label="Connection name"
+          aria-label="Connection name"
+          size="md"
+          required
+          pattern={"[a-z][a-z0-9_\\-]{0,31}"}
+          maxLength={32}
+          title="Start with a lowercase letter; use lowercase letters, numbers, hyphens, or underscores."
+          placeholder="incident"
+          hintText="Use a lowercase name such as incident. Dots and spaces are not allowed."
+          disabled={draft.existing}
+          value={draft.name}
+          onChange={(name) => setDraft({ ...draft, name })}
+        />
+        <Input
+          label="Server URL"
+          aria-label="Server URL"
+          size="md"
+          required
+          type="url"
+          placeholder="https://example.com/mcp"
+          value={draft.url}
+          onChange={(url) => setDraft({ ...draft, url })}
+        />
+        <div className="space-y-space-1">
+          <span className="block text-sm font-medium text-primary">
+            Transport
           </span>
-        </label>
-        <label className="block text-sm">
-          Server URL
-          <Input
-            aria-label="Server URL"
-            required
-            type="url"
-            placeholder="https://example.com/mcp"
-            value={draft.url}
-            onChange={(e) => setDraft({ ...draft, url: e.target.value })}
-          />
-        </label>
-        <label className="block text-sm">
-          Transport
-          <select
+          <Select
             aria-label="Transport"
-            className="mt-1 block w-full rounded-md border bg-background p-2 text-sm"
+            size="md"
+            options={TRANSPORTS}
             value={draft.transport}
-            onChange={(e) =>
-              setDraft({
-                ...draft,
-                transport: e.target.value as MCPConnection["transport"],
-              })
+            onChange={(transport) =>
+              transport && setDraft({ ...draft, transport })
             }
-          >
-            <option value="streamable_http">Streamable HTTP</option>
-            <option value="sse">SSE</option>
-          </select>
-        </label>
-        <label className="block text-sm">
-          Authentication
-          <select
+          />
+        </div>
+        <div className="space-y-space-1">
+          <span className="block text-sm font-medium text-primary">
+            Authentication
+          </span>
+          <Select
             aria-label="Authentication"
-            className="mt-1 block w-full rounded-md border bg-background p-2 text-sm"
+            size="md"
+            options={AUTH_MODES}
             value={draft.oauth ? "oauth" : "headers"}
-            onChange={(event) =>
+            onChange={(mode) =>
+              mode &&
               setDraft({
                 ...draft,
                 oauth:
-                  event.target.value === "oauth"
+                  mode === "oauth"
                     ? {
                         grant_type: "client_credentials",
                         token_url: "",
@@ -334,11 +437,8 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
                     : null,
               })
             }
-          >
-            <option value="headers">Headers / API key</option>
-            <option value="oauth">OAuth client credentials</option>
-          </select>
-        </label>
+          />
+        </div>
         {draft.oauth && (
           <MCPOAuthFields
             key={draft.name}
@@ -354,11 +454,11 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
             onChange={(oauth) => setDraft({ ...draft, oauth })}
           />
         )}
-        <div className="space-y-2">
-          <p className="text-sm font-medium">
+        <div className="space-y-space-2">
+          <p className="text-sm font-medium text-primary">
             {draft.oauth ? "Additional headers" : "Authentication headers"}
           </p>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-xs text-secondary">
             {draft.oauth
               ? "Optional headers are encrypted. OAuth supplies the Authorization header automatically."
               : "Values are encrypted and hidden by default. Use a header such as Authorization or X-API-Key."}
@@ -366,35 +466,33 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
           {!replaceHeaders ? (
             <>
               {savedHeaders && (
-                <div className="space-y-2" data-dd-privacy="hidden">
+                <div className="space-y-space-2" data-dd-privacy="hidden">
                   {Object.entries(savedHeaders).map(([name, value]) => (
-                    <label key={name} className="block text-sm">
-                      {name}
-                      <Input
-                        aria-label={`Saved ${name} value`}
-                        value={value}
-                        readOnly
-                        autoComplete="off"
-                        spellCheck={false}
-                      />
-                    </label>
+                    <Input
+                      key={name}
+                      label={name}
+                      aria-label={`Saved ${name} value`}
+                      size="md"
+                      value={value}
+                      onChange={() => {}}
+                      readOnly
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
                   ))}
                   {Object.keys(savedHeaders).length === 0 && (
-                    <p className="text-xs text-muted-foreground">
-                      No saved headers.
-                    </p>
+                    <p className="text-xs text-secondary">No saved headers.</p>
                   )}
                 </div>
               )}
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap gap-space-2">
                 <IconButton
                   type="button"
-                  size="icon-sm"
-                  variant="outline"
-                  aria-label={
-                    savedHeaders ? "Hide saved headers" : "Show saved headers"
-                  }
-                  title={
+                  size="sm"
+                  color="secondary"
+                  variant="outlined"
+                  icon={savedHeaders ? EyeSlashIcon : EyeIcon}
+                  label={
                     savedHeaders ? "Hide saved headers" : "Show saved headers"
                   }
                   aria-expanded={savedHeaders !== null}
@@ -405,17 +503,12 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
                         setSavedHeaders(await client.revealHeaders(draft.name))
                       })
                   }}
-                >
-                  {savedHeaders ? (
-                    <EyeSlashIcon aria-hidden="true" />
-                  ) : (
-                    <EyeIcon aria-hidden="true" />
-                  )}
-                </IconButton>
+                />
                 <Button
                   type="button"
                   size="sm"
-                  variant="outline"
+                  color="secondary"
+                  variant="outlined"
                   onClick={() => {
                     setSavedHeaders(null)
                     setReplaceHeaders(true)
@@ -428,54 +521,35 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
           ) : (
             <>
               {headers.map((header, index) => (
-                <div className="flex gap-2" key={index}>
+                <div className="flex gap-space-2" key={index}>
                   <Input
                     aria-label={`Header ${index + 1} name`}
+                    size="md"
                     placeholder="Authorization"
                     value={header.name}
-                    onChange={(e) =>
-                      updateHeader(index, "name", e.target.value)
-                    }
+                    onChange={(name) => updateHeader(index, "name", name)}
                   />
-                  <Input
-                    aria-label={`Header ${index + 1} value`}
+                  <SecretInput
+                    label={`Header ${index + 1} value`}
                     placeholder="Bearer …"
-                    type={header.revealed ? "text" : "password"}
-                    autoComplete="off"
-                    spellCheck={false}
-                    data-dd-privacy="hidden"
-                    value={header.value}
-                    onChange={(e) =>
-                      updateHeader(index, "value", e.target.value)
-                    }
-                  />
-                  <IconButton
-                    type="button"
-                    size="icon-sm"
-                    variant="outline"
-                    aria-label={`${header.revealed ? "Hide" : "Show"} header ${index + 1} value`}
-                    title={header.revealed ? "Hide value" : "Show value"}
-                    aria-pressed={Boolean(header.revealed)}
-                    onClick={() =>
+                    revealed={Boolean(header.revealed)}
+                    onRevealedChange={(revealed) =>
                       setHeaders(
                         headers.map((item, i) =>
-                          i === index
-                            ? { ...item, revealed: !item.revealed }
-                            : item
+                          i === index ? { ...item, revealed } : item
                         )
                       )
                     }
-                  >
-                    {header.revealed ? (
-                      <EyeSlashIcon aria-hidden="true" />
-                    ) : (
-                      <EyeIcon aria-hidden="true" />
-                    )}
-                  </IconButton>
+                    value={header.value}
+                    onChange={(event) =>
+                      updateHeader(index, "value", event.target.value)
+                    }
+                  />
                   <Button
                     type="button"
-                    size="sm"
-                    variant="outline"
+                    size="md"
+                    color="secondary"
+                    variant="outlined"
                     aria-label={`Remove header ${index + 1}`}
                     onClick={() =>
                       setHeaders(headers.filter((_, i) => i !== index))
@@ -488,7 +562,8 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
               <Button
                 type="button"
                 size="sm"
-                variant="outline"
+                color="secondary"
+                variant="outlined"
                 onClick={() =>
                   setHeaders([...headers, { name: "", value: "" }])
                 }
@@ -496,29 +571,30 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
                 Add header
               </Button>
               {draft.existing && headers.length === 0 && (
-                <p className="text-xs text-muted-foreground">
+                <p className="text-xs text-secondary">
                   Saving with no headers clears the saved authentication.
                 </p>
               )}
             </>
           )}
         </div>
-        <div className="space-y-2">
-          <p className="text-sm font-medium">Allowed tools</p>
-          <p className="text-xs text-muted-foreground">
+        <div className="space-y-space-2">
+          <p className="text-sm font-medium text-primary">Allowed tools</p>
+          <p className="text-xs text-secondary">
             Discover tools, review the selection, then save. All discovered
             tools are selected by default for new connections.
           </p>
           {toolNames.length > 0 && (
             <>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="mr-auto text-xs text-muted-foreground">
+              <div className="flex flex-wrap items-center gap-space-2">
+                <span className="mr-auto text-xs text-secondary">
                   {draft.allowed_tools.length} of {toolNames.length} selected
                 </span>
                 <Button
                   type="button"
                   size="sm"
-                  variant="outline"
+                  color="secondary"
+                  variant="outlined"
                   disabled={draft.allowed_tools.length === toolNames.length}
                   onClick={() =>
                     setDraft({ ...draft, allowed_tools: toolNames })
@@ -529,7 +605,8 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
                 <Button
                   type="button"
                   size="sm"
-                  variant="outline"
+                  color="secondary"
+                  variant="outlined"
                   disabled={draft.allowed_tools.length === 0}
                   onClick={() => setDraft({ ...draft, allowed_tools: [] })}
                 >
@@ -538,7 +615,8 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
                 <Button
                   type="button"
                   size="sm"
-                  variant="ghost"
+                  color="secondary"
+                  variant="plain"
                   aria-expanded={toolsExpanded}
                   aria-controls={toolsId}
                   onClick={() => setToolsExpanded(!toolsExpanded)}
@@ -552,29 +630,32 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
                 aria-label="Available tools"
                 tabIndex={0}
                 hidden={!toolsExpanded}
-                className="max-h-80 space-y-3 overflow-y-auto overscroll-contain rounded-md border p-3"
+                className="max-h-80 space-y-space-3 overflow-y-auto overscroll-contain rounded-md border border-default p-space-3"
               >
                 {toolNames.map((name) => (
-                  <label key={name} className="flex items-start gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      className="mt-1 shrink-0"
+                  <label
+                    key={name}
+                    className="flex items-start gap-space-2 text-sm text-primary"
+                  >
+                    <Checkbox
+                      containerClassName="mt-0.5 shrink-0"
                       aria-label={`Allow ${name}`}
                       checked={selectedTools.has(name)}
-                      onChange={(e) =>
+                      onCheckedChange={(checked) =>
                         setDraft({
                           ...draft,
-                          allowed_tools: e.target.checked
-                            ? [...draft.allowed_tools, name]
-                            : draft.allowed_tools.filter(
-                                (tool) => tool !== name
-                              ),
+                          allowed_tools:
+                            checked === true
+                              ? [...draft.allowed_tools, name]
+                              : draft.allowed_tools.filter(
+                                  (tool) => tool !== name
+                                ),
                         })
                       }
                     />
                     <span className="min-w-0 break-words">
                       {name}
-                      <span className="block text-xs text-muted-foreground">
+                      <span className="block text-xs text-secondary">
                         {toolDescriptions.get(name)}
                       </span>
                     </span>
@@ -584,11 +665,12 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
             </>
           )}
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-space-2">
           <Button
             type="button"
             size="sm"
-            variant="outline"
+            color="secondary"
+            variant="outlined"
             disabled={!draft.name || !draft.url}
             onClick={(event) => {
               if (event.currentTarget.form?.reportValidity()) void save(true)
@@ -596,21 +678,28 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
           >
             Save and discover tools
           </Button>
-          <Button type="submit" size="sm">
+          <Button type="submit" size="sm" color="primary">
             Save connection
           </Button>
           {pendingImports.length > 0 && (
             <Button
               type="button"
               size="sm"
-              variant="ghost"
+              color="secondary"
+              variant="plain"
               onClick={finishEditing}
             >
               Skip connection
             </Button>
           )}
-          <Button type="button" size="sm" variant="ghost" onClick={closeEditor}>
-            Cancel
+          <Button
+            type="button"
+            size="sm"
+            color="secondary"
+            variant="plain"
+            onClick={closeEditor}
+          >
+            {dirty ? "Cancel" : "Close"}
           </Button>
         </div>
       </fieldset>
@@ -618,41 +707,85 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
   ) : null
 
   return (
-    <SettingsSection title={title} description={description}>
-      <div className="space-y-4 p-4">
+    <SettingsSection title="MCP Servers" description={description}>
+      <div className="space-y-space-4 p-space-4">
         {connections.isLoading && (
-          <p className="text-sm text-muted-foreground">Loading connections…</p>
+          <p className="text-sm text-secondary">Loading connections…</p>
         )}
-        {((error && !draft) || connections.error) && (
-          <p role="alert" className="text-sm text-destructive">
-            {connections.error?.message || error}
+        {connections.error && (
+          <p role="alert" className="text-sm text-error-secondary">
+            {connections.error.message}
           </p>
         )}
+        {scope === "workspace" &&
+          inherited.data &&
+          inherited.data.length > 0 && (
+            <section
+              aria-label="Inherited instance MCP connections"
+              className="rounded-md border border-dashed border-default"
+            >
+              <p className="px-space-3 pt-space-3 text-xs font-medium text-secondary">
+                Inherited from the instance
+              </p>
+              <ul className="divide-y divide-default">
+                {inherited.data.map((connection) => {
+                  const replaced = connections.data?.some(
+                    (own) => own.name === connection.name
+                  )
+                  return (
+                    <li
+                      key={connection.name}
+                      className="flex flex-wrap items-center justify-between gap-space-3 p-space-3"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-sm text-primary">
+                          {connection.name}{" "}
+                          <span className="text-secondary">
+                            · {connection.enabled ? "Enabled" : "Disabled"} ·{" "}
+                            {connection.allowed_tools.length} tools
+                          </span>
+                        </p>
+                        <p className="text-xs break-all text-secondary">
+                          {connection.url}
+                        </p>
+                      </div>
+                      <span className="text-xs text-secondary">
+                        {replaced
+                          ? "Replaced by this workspace's connection"
+                          : "Edit under Admin"}
+                      </span>
+                    </li>
+                  )
+                })}
+              </ul>
+            </section>
+          )}
         {connections.data?.map((connection) => {
           const isEditing = draft?.existing && draft.name === connection.name
           return (
             <section
               key={connection.name}
               aria-label={`${connection.name} MCP connection`}
-              className="rounded-md border"
+              className="rounded-md border border-default"
             >
-              <div className="flex flex-wrap items-center justify-between gap-3 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-space-3 p-space-3">
                 <div className="min-w-0">
-                  <p className="text-sm font-medium">
+                  <p className="text-sm font-medium text-primary">
                     {connection.name}{" "}
-                    <span className="text-muted-foreground">
+                    <span className="text-secondary">
                       · {connection.enabled ? "Enabled" : "Disabled"} ·{" "}
                       {connection.allowed_tools.length} tools
                     </span>
                   </p>
-                  <p className="text-xs break-all text-muted-foreground">
+                  <p className="text-xs break-all text-secondary">
                     {connection.url}
                   </p>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex gap-space-2">
                   <Button
-                    size="sm"
-                    variant="outline"
+                    size="xs"
+                    color="secondary"
+                    variant="outlined"
                     disabled={busy}
                     onClick={() => {
                       if (isEditing) closeEditor()
@@ -665,36 +798,57 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
                     {isEditing ? "Close" : "Edit"}
                   </Button>
                   <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={busy}
-                    onClick={() =>
-                      run(async () => {
-                        await client.save({
-                          name: connection.name,
-                          url: connection.url,
-                          transport: connection.transport,
-                          enabled: !connection.enabled,
-                          allowed_tools: connection.allowed_tools,
-                        })
-                        await qc.invalidateQueries({ queryKey })
-                        if (draft?.name === connection.name) closeEditor()
-                      })
-                    }
+                    size="xs"
+                    color="secondary"
+                    variant="outlined"
+                    disabled={busy || pendingRows.has(connection.name)}
+                    onClick={() => {
+                      const withEnabled =
+                        (enabled: boolean) => (list: MCPConnection[]) =>
+                          list.map((c) =>
+                            c.name === connection.name ? { ...c, enabled } : c
+                          )
+                      void optimistic(
+                        connection.name,
+                        `Couldn't ${connection.enabled ? "disable" : "enable"} ${connection.name}`,
+                        withEnabled(!connection.enabled),
+                        withEnabled(connection.enabled),
+                        async () => {
+                          await client.save({
+                            name: connection.name,
+                            url: connection.url,
+                            transport: connection.transport,
+                            enabled: !connection.enabled,
+                            allowed_tools: connection.allowed_tools,
+                          })
+                          if (draft?.name === connection.name) closeEditor()
+                        }
+                      )
+                    }}
                     aria-label={`${connection.enabled ? "Disable" : "Enable"} ${connection.name}`}
                   >
                     {connection.enabled ? "Disable" : "Enable"}
                   </Button>
                   <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={busy}
+                    size="xs"
+                    color="error"
+                    variant="outlined"
+                    disabled={busy || pendingRows.has(connection.name)}
                     onClick={() =>
-                      run(async () => {
-                        await client.remove(connection.name)
-                        await qc.invalidateQueries({ queryKey })
-                        if (draft?.name === connection.name) closeEditor()
-                      })
+                      void optimistic(
+                        connection.name,
+                        `Couldn't delete ${connection.name}`,
+                        (list) =>
+                          list.filter((c) => c.name !== connection.name),
+                        (list) =>
+                          list.some((c) => c.name === connection.name)
+                            ? list
+                            : [...list, connection],
+                        async () => {
+                          await client.remove(connection.name)
+                          if (draft?.name === connection.name) closeEditor()
+                        }
+                      )
                     }
                     aria-label={`Delete ${connection.name}`}
                   >
@@ -717,17 +871,19 @@ export function MCPConnectionsSection({ scope }: { scope: MCPScope }) {
             onCancel={() => setImporting(false)}
           />
         ) : !draft ? (
-          <div className="flex gap-2">
+          <div className="flex gap-space-2">
             <Button
-              size="sm"
+              size="xs"
+              color="primary"
               disabled={connections.isPending || connections.isError}
               onClick={() => edit()}
             >
               Add MCP server
             </Button>
             <Button
-              size="sm"
-              variant="outline"
+              size="xs"
+              color="secondary"
+              variant="outlined"
               disabled={connections.isPending || connections.isError}
               onClick={() => {
                 setImporting(true)

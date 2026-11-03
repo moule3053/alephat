@@ -3,9 +3,12 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 
-from agent.dashboard import routes, workspace_mcps
-from agent.dashboard import user_mcps as mcps
-from agent.mcp import MCPConnectionUpdate, load_mcp_tools
+from openswe.dashboard import oauth, routes
+from openswe.mcp import MCPConnectionUpdate, load_mcp_tools
+from openswe.mcp import user as mcps
+from openswe.mcp import workspace as workspace_mcps
+from openswe.users.models import User
+from openswe.users.records import UserRecords
 
 
 @pytest.fixture(autouse=True)
@@ -13,22 +16,35 @@ def encryption(monkeypatch):
     monkeypatch.setenv("TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
 
+@pytest.fixture
+async def people(registry_db, monkeypatch):
+    monkeypatch.setenv("ALLOWED_GITHUB_USERS", "alice,bob")
+    monkeypatch.setenv("ALLOWED_GITHUB_ORGS", "")
+    for external_id, login in enumerate(("alice", "bob")):
+        await User.sign_in("github", str(external_id), login=login)
+
+
 def update(**fields):
     return MCPConnectionUpdate(name="linear", url="https://mcp.linear.app/mcp", **fields)
 
 
-async def test_saved_credentials_are_reused_only_from_the_same_user(fake_store):
+async def test_saved_credentials_are_reused_only_from_the_same_user(people):
     await mcps.save_user_mcp("bob", "linear", update(headers={"Authorization": "bob-secret"}))
     await workspace_mcps.save_workspace_mcp(
-        "linear", update(headers={"Authorization": "workspace-secret"}, allowed_tools=["search"])
+        "default",
+        "linear",
+        update(headers={"Authorization": "workspace-secret"}, allowed_tools=["search"]),
     )
     saved = await mcps.save_user_mcp(" Alice ", "linear", update(enabled=False))
     assert saved["header_names"] == []
-    assert fake_store.values(["user_mcps", "alice"])["linear"]["encrypted_headers"] == ""
+    stored = await UserRecords("mcp_connection").get("alice", "linear")
+    assert stored is not None and stored["encrypted_headers"] == ""
     assert await mcps.list_user_mcps("bob") != [saved]
     assert await mcps.list_user_mcps("ALICE") == [saved]
     assert (
-        await load_mcp_tools(workspace_mcps.workspace_mcp_source, mcps.user_mcp_source("alice"))
+        await load_mcp_tools(
+            workspace_mcps.workspace_mcp_source("default"), mcps.user_mcp_source("alice")
+        )
         == []
     )
     record = await mcps.user_mcp_source("ALICE").get_connection("linear")
@@ -37,12 +53,12 @@ async def test_saved_credentials_are_reused_only_from_the_same_user(fake_store):
     assert await mcps.list_user_mcps("alice") == []
 
 
-async def test_routes_serve_only_the_signed_in_users_connections(fake_store, monkeypatch):
+async def test_routes_serve_only_the_signed_in_users_connections(people, monkeypatch):
     monkeypatch.setenv("DASHBOARD_BASE_URL", "http://test")
     app = FastAPI()
     app.include_router(routes.router)
     session = {"sub": "alice", "email": "alice@example.com"}
-    app.dependency_overrides[routes.require_session] = lambda: session
+    app.dependency_overrides[oauth.require_session] = lambda: session
     body = {
         "name": "linear",
         "url": "https://mcp.linear.app/mcp",

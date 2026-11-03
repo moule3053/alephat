@@ -1,0 +1,158 @@
+import { Link as MacawLink } from "@langchain/macaw-components/Link"
+import { Card } from "@langchain/macaw-components/Card"
+import { useEffect, useState } from "react"
+
+import { SettingsRow } from "@/components/AppShell"
+import { CopyDiagnosticsButton } from "@/components/CopyDiagnosticsButton"
+import { buildEnvironmentDiagnostics } from "@/lib/environment-diagnostics"
+import {
+  describeApiBase,
+  normalizeBuildInfo,
+  type BuildInfo,
+  type SessionUser,
+} from "@/lib/api"
+import { useIsHydrated } from "@/lib/hydration"
+import { cn, INHERITED_LINK } from "@/lib/utils"
+
+export function AboutSection({ user }: { user: SessionUser }) {
+  const [version, setVersion] = useState<string>()
+  const buildInfo = normalizeBuildInfo(user.build_info)
+  const apiBase = describeApiBase(user.api_base_url)
+
+  useEffect(() => {
+    void window.openSweDesktop?.getVersion().then(setVersion)
+  }, [])
+
+  return (
+    <Card id="about" className="divide-y divide-default overflow-hidden p-0">
+      {version ? (
+        <SettingsRow
+          label="Open SWE Desktop"
+          control={
+            <span className="text-xs text-secondary">Version {version}</span>
+          }
+        />
+      ) : null}
+      <div className="flex flex-col gap-space-2 p-space-4 text-xs break-words text-secondary">
+        <p>
+          API: {apiBase.origin ?? "same origin"} {apiBase.path}
+        </p>
+        <p>
+          OPENSWE_ENV: <IdentityValue value={buildInfo?.backend.environment} />
+        </p>
+        <BuildIdentityDetails buildInfo={buildInfo} />
+        <CopyDiagnosticsButton
+          getDiagnostics={() => buildEnvironmentDiagnostics(user, version)}
+        />
+      </div>
+    </Card>
+  )
+}
+
+function IdentityValue({ value }: { value: string | null | undefined }) {
+  return value ? (
+    <code className="select-all">{value}</code>
+  ) : (
+    <span>Unavailable</span>
+  )
+}
+
+function CommitValue({ value }: { value: string | null }) {
+  if (!value) return <IdentityValue value={value} />
+  return (
+    <MacawLink
+      variant="xs"
+      href={`https://github.com/langchain-ai/open-swe/commit/${encodeURIComponent(value)}`}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={cn(
+        INHERITED_LINK,
+        "underline underline-offset-2 hover:text-primary"
+      )}
+    >
+      <IdentityValue value={value} />
+    </MacawLink>
+  )
+}
+
+function BuildIdentityDetails({ buildInfo }: { buildInfo: BuildInfo | null }) {
+  const hydrated = useIsHydrated()
+
+  return (
+    <>
+      {buildInfo ? (
+        <>
+          <p>
+            Backend: revision{" "}
+            <IdentityValue value={buildInfo.backend.revision_id} />
+            {" · "}commit <CommitValue value={buildInfo.backend.commit} />
+            {" · "}built{" "}
+            {buildInfo.backend.built_at ? (
+              <time dateTime={buildInfo.backend.built_at}>
+                {new Date(buildInfo.backend.built_at).toLocaleString()}
+              </time>
+            ) : (
+              "Unavailable"
+            )}
+            {" · "}package{" "}
+            <IdentityValue value={buildInfo.backend.package_version} />
+          </p>
+          <p>
+            Dashboard bundle:{" "}
+            {buildInfo.dashboard.served ? (
+              <>
+                commit <CommitValue value={buildInfo.dashboard.commit} />
+                {" · "}built{" "}
+                {buildInfo.dashboard.built_at ? (
+                  <time dateTime={buildInfo.dashboard.built_at}>
+                    {new Date(buildInfo.dashboard.built_at).toLocaleString()}
+                  </time>
+                ) : (
+                  "Unavailable"
+                )}
+              </>
+            ) : (
+              "not served by this backend"
+            )}
+          </p>
+        </>
+      ) : (
+        <p>
+          Build identifiers: Unavailable (the connected backend does not report
+          them).
+        </p>
+      )}
+      {(() => {
+        const bundle = hydrated ? window.__OPEN_SWE_BUNDLE__ : undefined
+        if (!bundle) return null
+        const comparable =
+          buildInfo?.dashboard.served &&
+          bundle.commit != null &&
+          buildInfo?.dashboard.commit != null
+        const differs =
+          comparable && bundle.commit !== buildInfo?.dashboard.commit
+        return (
+          <p>
+            This browser is running: commit{" "}
+            <CommitValue value={bundle.commit} />
+            {" · "}built{" "}
+            <time dateTime={bundle.built_at}>
+              {new Date(bundle.built_at).toLocaleString()}
+            </time>
+            {differs ? (
+              <span className="text-warning-secondary">
+                {" "}
+                — different from the bundle the backend reports serving.
+              </span>
+            ) : buildInfo?.dashboard.served && !comparable ? (
+              <span className="text-secondary">
+                {" "}
+                — comparison with the backend-served bundle unavailable.
+              </span>
+            ) : null}
+          </p>
+        )
+      })()}
+    </>
+  )
+}

@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import {
-  ArrowsInIcon,
-  ArrowsOutIcon,
-  SidebarSimpleIcon,
-} from "@phosphor-icons/react"
+import { IconButton } from "@langchain/macaw-components/IconButton"
+import { ArrowsInIcon } from "@phosphor-icons/react/dist/ssr/ArrowsIn"
+import { ArrowsOutIcon } from "@phosphor-icons/react/dist/ssr/ArrowsOut"
+import { SidebarSimpleIcon } from "@phosphor-icons/react/dist/ssr/SidebarSimple"
 import type { ReactNode } from "react"
 
 import type {
@@ -12,11 +11,11 @@ import type {
 } from "@/features/agents/lib/rightPanelStore"
 import type { TerminalGroupsController } from "@/features/agents/lib/terminalGroups"
 import type { TerminalTarget } from "@/features/agents/lib/terminalSession"
-import { Tooltip, TooltipPopup, TooltipTrigger } from "@/components/ui/tooltip"
 import {
   TerminalActions,
   TerminalPanel,
 } from "@/features/agents/components/TerminalPanel"
+import { FilesPanel } from "@/features/agents/components/files/FilesPanel"
 import { RightPanelTabs } from "@/features/agents/components/panel/RightPanelTabs"
 import { RightPanelSheet } from "@/features/agents/components/panel/RightPanelSheet"
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "@/features/agents/components/panel/rightPanelLayout"
@@ -25,8 +24,10 @@ import {
   useRightPanelStore,
 } from "@/features/agents/lib/rightPanelStore"
 import { terminalTabTitle } from "@/features/agents/lib/terminalTabTitle"
+import { workspaceTargetKey } from "@/features/agents/lib/workspaceFiles"
 import { useRegisterAppCommands } from "@/lib/appCommands"
 import { cn } from "@/lib/utils"
+import type { PassageReply } from "@/features/agents/utils/passageReply"
 
 export interface AgentRightPanelProps {
   threadRef: PanelThreadRef
@@ -37,10 +38,18 @@ export interface AgentRightPanelProps {
   diffAvailable: boolean
   /** Rendered for the Changes surface; `fullScreen` drives layout-only extras. */
   renderDiff: (state: { fullScreen: boolean }) => ReactNode
+  /** Rendered for the Browser surface, which only cloud threads offer. */
+  renderBrowser?: () => ReactNode
+  browserAvailable?: boolean
+  /** Rendered for the Background work surface, which only cloud threads offer. */
+  renderBackgroundWork?: () => ReactNode
+  backgroundWorkAvailable?: boolean
   collapsed: boolean
   onCollapsedChange: (next: boolean) => void
   onTerminalOpenFile?: (path: string) => void
   onTerminalAddToChat?: (text: string) => void
+  /** Offers Reply on text selected in an open file. */
+  onReply?: (reply: PassageReply) => void
 }
 
 function useIsNarrowLayout(): boolean {
@@ -57,26 +66,6 @@ function useIsNarrowLayout(): boolean {
     return () => media.removeEventListener("change", onChange)
   }, [])
   return narrow
-}
-
-function PanelControl(props: {
-  label: string
-  onClick: () => void
-  children: ReactNode
-}) {
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        aria-label={props.label}
-        className="rounded-md p-1.5 text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
-        onClick={props.onClick}
-        type="button"
-      >
-        {props.children}
-      </TooltipTrigger>
-      <TooltipPopup>{props.label}</TooltipPopup>
-    </Tooltip>
-  )
 }
 
 /**
@@ -100,6 +89,7 @@ export function AgentRightPanel(props: AgentRightPanelProps) {
   const byThreadKey = useRightPanelStore((state) => state.byThreadKey)
   const openSurface = useRightPanelStore((state) => state.open)
   const openTerminalSurface = useRightPanelStore((state) => state.openTerminal)
+  const openFileSurface = useRightPanelStore((state) => state.openFile)
   const activateSurface = useRightPanelStore((state) => state.activateSurface)
   const closeSurfaceById = useRightPanelStore((state) => state.closeSurface)
   const closeOtherSurfaces = useRightPanelStore(
@@ -151,6 +141,18 @@ export function AgentRightPanel(props: AgentRightPanelProps) {
 
   const handleAddDiff = useCallback(() => {
     openSurface(threadRef, "diff")
+  }, [openSurface, threadRef])
+
+  const handleAddFiles = useCallback(() => {
+    openSurface(threadRef, "files")
+  }, [openSurface, threadRef])
+
+  const handleAddBrowser = useCallback(() => {
+    openSurface(threadRef, "preview")
+  }, [openSurface, threadRef])
+
+  const handleAddBackgroundWork = useCallback(() => {
+    openSurface(threadRef, "background")
   }, [openSurface, threadRef])
 
   const handleActivate = useCallback(
@@ -255,15 +257,15 @@ export function AgentRightPanel(props: AgentRightPanelProps) {
 
   if (collapsed) {
     return (
-      <button
-        type="button"
+      <IconButton
+        className="fixed top-2 right-2 z-sidebar size-7"
+        color="secondary"
+        icon={SidebarSimpleIcon}
+        label="Show panel"
         onClick={() => onCollapsedChange(false)}
-        aria-label="Show panel"
-        title="Show panel"
-        className="fixed top-2 right-2 z-30 flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-      >
-        <SidebarSimpleIcon className="size-4" />
-      </button>
+        tooltipProps={{ side: "left" }}
+        variant="plain"
+      />
     )
   }
 
@@ -276,26 +278,26 @@ export function AgentRightPanel(props: AgentRightPanelProps) {
         />
       ) : null}
       {narrow ? null : (
-        <PanelControl
+        <IconButton
+          className="size-7"
+          color="secondary"
+          icon={maximized ? ArrowsInIcon : ArrowsOutIcon}
           label={maximized ? "Exit full screen" : "Expand panel"}
           onClick={() => setMaximized((value) => !value)}
-        >
-          {maximized ? (
-            <ArrowsInIcon className="size-4" />
-          ) : (
-            <ArrowsOutIcon className="size-4" />
-          )}
-        </PanelControl>
+          variant="plain"
+        />
       )}
-      <PanelControl
+      <IconButton
+        className="size-7"
+        color="secondary"
+        icon={SidebarSimpleIcon}
         label="Hide panel"
         onClick={() => {
           setMaximized(false)
           onCollapsedChange(true)
         }}
-      >
-        <SidebarSimpleIcon className="size-4" />
-      </PanelControl>
+        variant="plain"
+      />
     </div>
   )
 
@@ -304,6 +306,26 @@ export function AgentRightPanel(props: AgentRightPanelProps) {
       {activeSurface?.kind === "diff"
         ? props.renderDiff({ fullScreen: maximized })
         : null}
+      {activeSurface?.kind === "preview" && props.renderBrowser
+        ? props.renderBrowser()
+        : null}
+      {activeSurface?.kind === "background" && props.renderBackgroundWork
+        ? props.renderBackgroundWork()
+        : null}
+      {activeSurface?.kind === "files" || activeSurface?.kind === "file" ? (
+        <FilesPanel
+          key={workspaceTargetKey(terminalTarget)}
+          target={terminalTarget}
+          relativePath={
+            activeSurface.kind === "file" ? activeSurface.relativePath : null
+          }
+          revealRequestId={
+            activeSurface.kind === "file" ? activeSurface.revealRequestId : 0
+          }
+          onOpenFile={(path) => openFileSurface(threadRef, path)}
+          onReply={props.onReply}
+        />
+      ) : null}
       {/* Terminals stay mounted while hidden so their scrollback survives tab
           switches; every other surface unmounts. */}
       {surfaces
@@ -356,6 +378,19 @@ export function AgentRightPanel(props: AgentRightPanelProps) {
       }}
       onAddTerminal={handleAddTerminal}
       onAddDiff={handleAddDiff}
+      onAddFiles={handleAddFiles}
+      {...(props.renderBrowser
+        ? {
+            onAddBrowser: handleAddBrowser,
+            browserAvailable: props.browserAvailable ?? false,
+          }
+        : {})}
+      {...(props.renderBackgroundWork
+        ? {
+            onAddBackgroundWork: handleAddBackgroundWork,
+            backgroundWorkAvailable: props.backgroundWorkAvailable ?? false,
+          }
+        : {})}
       terminalAvailable={terminalAvailable}
       diffAvailable={diffAvailable}
       layoutControls={layoutControls}

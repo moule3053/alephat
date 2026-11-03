@@ -9,8 +9,8 @@ import {
 export type Theme = "light" | "dark" | "system"
 export type ResolvedTheme = "light" | "dark"
 
-export const THEME_STORAGE_KEY = "alephat-theme"
-const THEME_CHANGE_EVENT = "alephat-theme-change"
+export const THEME_STORAGE_KEY = "open-swe-theme"
+const THEME_CHANGE_EVENT = "open-swe-theme-change"
 
 function isTheme(value: string | null): value is Theme {
   return value === "light" || value === "dark" || value === "system"
@@ -32,8 +32,8 @@ export function resolveTheme(theme: Theme): ResolvedTheme {
   return theme
 }
 
-/** Browser chrome colour per resolved theme, mirroring `--background`. */
-export const THEME_COLOR = { light: "#fcfcfc", dark: "#0a0a0a" } as const
+/** Browser chrome colour per resolved theme, mirroring `--bg-surface-level-1`. */
+export const THEME_COLOR = { light: "#ffffff", dark: "#09090f" } as const
 
 function applyTheme(resolved: ResolvedTheme) {
   if (typeof document === "undefined") return

@@ -1,21 +1,30 @@
-import { createFileRoute } from "@tanstack/react-router"
+import { MagnifyingGlassRegularIcon } from "@langchain/macaw-components/icons"
+import { Text } from "@langchain/macaw-components/Text"
+import { Button } from "@langchain/macaw-components/Button"
+import { Input } from "@langchain/macaw-components/Input"
+import { Skeleton } from "@langchain/macaw-components/Skeleton"
+import { Switch } from "@langchain/macaw-components/Switch"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { createFileRoute } from "@tanstack/react-router"
 import { useMemo, useState } from "react"
 
 import { AppShell } from "@/components/AppShell"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Skeleton } from "@/components/ui/skeleton"
-import { Switch } from "@/components/ui/switch"
 import { api } from "@/lib/api"
 import { RequireLogin } from "@/lib/auth-redirect"
+import { pageTitle } from "@/lib/pageTitle"
 import { useRepos } from "@/lib/profile"
 import { useSession } from "@/lib/session"
 
 const PAGE_SIZE = 20
+const autoReviewMutationKey = ["setAutoReviewRepo"]
+
+type AutoReviewRepos = Awaited<ReturnType<typeof api.listAutoReviewRepos>>
 
 export const Route = createFileRoute("/review_/repositories/$owner")({
   component: RepositoriesOwnerPage,
+  head: ({ params }: { params: { owner: string } }) => ({
+    meta: [{ title: pageTitle(`${params.owner} repositories`) }],
+  }),
 })
 
 function RepositoriesOwnerPage() {
@@ -31,11 +40,35 @@ function RepositoriesOwnerPage() {
     enabled: !!session.data,
   })
 
+  const [toggling, setToggling] = useState<ReadonlySet<string>>(new Set())
+  const setRepoAutoReview = (full_name: string, on: boolean) =>
+    qc.setQueryData<AutoReviewRepos>(["autoReviewRepos"], (old) => {
+      const rest = (old?.repos ?? []).filter((name) => name !== full_name)
+      return { repos: on ? [...rest, full_name] : rest }
+    })
   const toggleAutoReview = useMutation({
+    mutationKey: autoReviewMutationKey,
     mutationFn: ({ full_name, on }: { full_name: string; on: boolean }) =>
       api.setAutoReviewRepo(full_name, on),
+    meta: { errorTitle: "Couldn't update auto-review" },
+    onMutate: async ({ full_name, on }) => {
+      setToggling((prev) => new Set(prev).add(full_name))
+      await qc.cancelQueries({ queryKey: ["autoReviewRepos"] })
+      setRepoAutoReview(full_name, on)
+    },
     onSuccess: (data) => {
-      qc.setQueryData(["autoReviewRepos"], data)
+      if (qc.isMutating({ mutationKey: autoReviewMutationKey }) === 1)
+        qc.setQueryData(["autoReviewRepos"], data)
+    },
+    onError: (_error, { full_name, on }) => setRepoAutoReview(full_name, !on),
+    onSettled: (_data, _error, { full_name }) => {
+      setToggling((prev) => {
+        const next = new Set(prev)
+        next.delete(full_name)
+        return next
+      })
+      if (qc.isMutating({ mutationKey: autoReviewMutationKey }) === 1)
+        void qc.invalidateQueries({ queryKey: ["autoReviewRepos"] })
     },
   })
 
@@ -74,7 +107,7 @@ function RepositoriesOwnerPage() {
 
   if (session.isLoading) {
     return (
-      <main className="p-6">
+      <main className="p-space-5">
         <Skeleton className="h-64 w-full" />
       </main>
     )
@@ -93,65 +126,68 @@ function RepositoriesOwnerPage() {
       title={owner}
       description={
         canEdit
-          ? "Choose which repositories run Alephat Review automatically. All installed repositories remain available for on-demand reviews."
+          ? "Choose which repositories run Open SWE Review automatically. All installed repositories remain available for on-demand reviews."
           : "Automatic review settings are read-only for non-admins."
       }
-      backTo={{ to: "/review", label: "Back to Alephat Review" }}
+      backTo={{ to: "/review", label: "Back to Code review" }}
     >
-      <section className="space-y-3">
+      <section className="space-y-space-3">
         <div className="flex items-center justify-between">
-          <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+          <Text
+            as="h2"
+            variant="sm"
+            weight="medium"
+            color="secondary"
+            className="tracking-wide uppercase"
+          >
             Repositories
-          </h2>
-          <span className="text-xs text-muted-foreground">
+          </Text>
+          <span className="text-xs text-secondary">
             {autoReviewCount}/{ownerRepos.length} run automatically
           </span>
         </div>
         <Input
-          type="search"
+          size="md"
+          leftIcon={MagnifyingGlassRegularIcon}
           value={search}
-          onChange={(event) =>
-            setSearchPosition({ owner, search: event.target.value })
-          }
+          onChange={(next) => setSearchPosition({ owner, search: next })}
           placeholder="Search repositories…"
           aria-label="Search repositories"
         />
-        <div className="rounded-lg border border-border bg-card">
+        <div className="rounded-lg border border-default bg-surface-level-1">
           {loading && (
-            <div className="p-4">
+            <div className="p-space-4">
               <Skeleton className="h-32 w-full" />
             </div>
           )}
           {!loading && filteredRepos.length === 0 && (
-            <p className="px-4 py-3 text-xs text-muted-foreground">
+            <p className="px-space-4 py-space-3 text-xs text-secondary">
               {ownerRepos.length === 0
                 ? "No repositories found for this installation."
                 : "No repositories match your search."}
             </p>
           )}
-          <ul className="divide-y divide-border">
+          <ul className="divide-y divide-default">
             {pageRepos.map((r) => {
               const runsAutomatically = autoReviewSet.has(r.full_name)
               return (
                 <li
                   key={r.full_name}
-                  className="flex items-center justify-between gap-4 px-4 py-3"
+                  className="flex items-center justify-between gap-space-4 px-space-4 py-space-3"
                 >
-                  <div className="flex min-w-0 items-center gap-2 text-xs">
+                  <div className="flex min-w-0 items-center gap-space-2 text-xs">
                     <span className="truncate">
-                      <span className="text-muted-foreground">{owner}/</span>
-                      <span className="font-medium text-foreground">
+                      <span className="text-secondary">{owner}/</span>
+                      <span className="font-medium text-primary">
                         {r.full_name.slice(owner.length + 1)}
                       </span>
                     </span>
                     {r.private && (
-                      <span className="text-[10px] text-muted-foreground">
-                        private
-                      </span>
+                      <span className="text-xxs text-tertiary">private</span>
                     )}
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-muted-foreground">
+                  <div className="flex items-center gap-space-2">
+                    <span className="text-xs text-secondary">
                       Run automatically
                     </span>
                     <span
@@ -165,8 +201,8 @@ function RepositoriesOwnerPage() {
                       <Switch
                         aria-label={`Run reviews automatically for ${r.full_name}`}
                         checked={runsAutomatically}
-                        disabled={!canEdit || toggleAutoReview.isPending}
-                        onCheckedChange={(v) =>
+                        disabled={!canEdit || toggling.has(r.full_name)}
+                        onChange={(v) =>
                           toggleAutoReview.mutate({
                             full_name: r.full_name,
                             on: v,
@@ -180,25 +216,27 @@ function RepositoriesOwnerPage() {
             })}
           </ul>
           {filteredRepos.length > PAGE_SIZE && (
-            <div className="flex items-center justify-between gap-4 border-t border-border px-4 py-2 text-xs">
-              <span className="text-muted-foreground">
+            <div className="flex items-center justify-between gap-space-4 border-t border-default px-space-4 py-space-2 text-xs">
+              <span className="text-secondary">
                 Showing {pageStart + 1}-{pageEnd} of {filteredRepos.length}
               </span>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-space-2">
                 <Button
-                  size="sm"
-                  variant="outline"
+                  size="xs"
+                  color="secondary"
+                  variant="outlined"
                   disabled={safePage === 0}
                   onClick={() => setPage((p) => Math.max(0, p - 1))}
                 >
                   Prev
                 </Button>
-                <span className="text-muted-foreground">
+                <span className="text-secondary">
                   {safePage + 1} / {totalPages}
                 </span>
                 <Button
-                  size="sm"
-                  variant="outline"
+                  size="xs"
+                  color="secondary"
+                  variant="outlined"
                   disabled={safePage >= totalPages - 1}
                   onClick={() =>
                     setPage((p) => Math.min(totalPages - 1, p + 1))

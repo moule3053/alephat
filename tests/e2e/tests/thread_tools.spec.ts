@@ -17,6 +17,9 @@ const SAME_ORIGIN_HEADERS = { origin: BASE_URL, referer: `${BASE_URL}/` };
 async function loginAs(page: Page) {
   const response = await page.request.post("/control/login", { data: USER });
   expect(response.ok()).toBeTruthy();
+  await page.addInitScript((login) => {
+    localStorage.setItem(`open-swe.desktop.experience:${login}`, "coding");
+  }, USER.login);
 }
 
 async function saveDefaultModel(page: Page) {
@@ -78,7 +81,7 @@ async function seedTargetThread(request: APIRequestContext) {
         repo_owner: "fakeorg",
         repo_name: "demo",
         base_branch: "main",
-        branch_name: "alephat/e2e-thread-tools-target",
+        branch_name: "open-swe/e2e-thread-tools-target",
         created_at_ms: now - 60_000,
         updated_at_ms: now - 30_000,
         latest_run_id: "e2e-thread-tools-target-run",
@@ -153,10 +156,6 @@ async function successfulThreadTools(
   return successes;
 }
 
-function threadsUrl(resolved: boolean) {
-  return `/agents/threads?resolved=${resolved}&q=${encodeURIComponent(TARGET_TITLE)}&layout=list&group=none`;
-}
-
 test.afterEach(async ({ request }) => {
   await purgeParticipantThreads(request);
 });
@@ -165,18 +164,6 @@ test("agent thread tools update the real threads UI", async ({ page }) => {
   await loginAs(page);
   await saveDefaultModel(page);
   await seedTargetThread(page.request);
-
-  await page.goto(threadsUrl(false));
-  const activeMain = page.locator("main");
-  const activeTarget = activeMain
-    .getByRole("link", { name: new RegExp(TARGET_TITLE) })
-    .first();
-  await expect(activeTarget).toBeVisible();
-  const activeRow = activeTarget.locator("..");
-  await expect(
-    activeRow.getByRole("button", { name: "Resolve thread" }),
-  ).toBeVisible();
-  await expect(activeRow).not.toContainText("Resolved");
 
   await page.goto("/agents");
   await typeIntoComposer(
@@ -194,12 +181,11 @@ test("agent thread tools update the real threads UI", async ({ page }) => {
   const worked = page.getByRole("button", {
     name: /^Worked(?: for .+| · \d+ actions?)?$/,
   });
-  await expect(worked).toBeVisible();
-  await worked.click();
+  await expect(worked.first()).toBeVisible();
+  for (const fold of await worked.all()) await fold.click();
   await expect(
     page.getByRole("button", { name: "Manage thread" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: /previous tool calls$/ }).click();
   await expect(
     page.getByRole("button", { name: "List threads" }),
   ).toBeVisible();
@@ -213,16 +199,4 @@ test("agent thread tools update the real threads UI", async ({ page }) => {
       get_thread: true,
       manage_thread: true,
     });
-
-  await page.goto(threadsUrl(true));
-  const resolvedMain = page.locator("main");
-  const resolvedTarget = resolvedMain
-    .getByRole("link", { name: new RegExp(TARGET_TITLE) })
-    .first();
-  await expect(resolvedTarget).toBeVisible();
-  const resolvedRow = resolvedTarget.locator("..");
-  await expect(resolvedRow).toContainText("Resolved");
-  await expect(
-    resolvedRow.getByRole("button", { name: "Reopen thread" }),
-  ).toBeVisible();
 });

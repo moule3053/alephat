@@ -1,4 +1,5 @@
 import http from "node:http"
+import { execSync } from "node:child_process"
 import { defineConfig } from "vite"
 import { devtools } from "@tanstack/devtools-vite"
 import { tanstackStart } from "@tanstack/react-start/plugin/vite"
@@ -8,17 +9,23 @@ import { nitro } from "nitro/vite"
 import type { IncomingMessage } from "node:http"
 import type { Plugin } from "vite"
 
-// Paths the backend owns, not the app router. `/dashboard/api` is the only one a
-// deployed dashboard serves; the rest exist when the backend is the mock harness,
-// and a browser navigates to `/fake-gh` mid-login, so dev has to reach them too.
-const BACKEND_PREFIXES = [
+// Backend paths a deployed dashboard fronts: its API, webhook deliveries, and the
+// remote MCP server with the OAuth discovery an MCP client fetches from its origin.
+const DEPLOYED_PREFIXES = [
   "/dashboard/api",
   "/webhooks",
+  "/oswe",
+  "/.well-known/oauth-protected-resource",
+  "/.well-known/oauth-authorization-server",
+]
+
+// Served when the backend is the mock harness; a browser navigates to `/fake-gh`
+// mid-login, so dev has to reach them too.
+const E2E_HARNESS_PREFIXES = [
   "/mock",
   "/control",
   "/fake-gh",
   "/fake-slack",
-  "/static",
   "/ok",
   // LangGraph's own API, which the harness serves alongside the fake SaaS. The
   // app router has no route under either, so fronting them shadows nothing.
@@ -26,18 +33,21 @@ const BACKEND_PREFIXES = [
   "/store",
 ]
 
-// The harness-owned subset: everything but the two a deployment fronts and
-// `/static`, which would shadow nitro's own assets.
-const E2E_HARNESS_PREFIXES = BACKEND_PREFIXES.filter(
-  (prefix) => !["/dashboard/api", "/webhooks", "/static"].includes(prefix)
-)
+// Paths the backend owns, not the app router. Only dev fronts `/static`; a
+// deployed build serves nitro's own assets there.
+const BACKEND_PREFIXES = [
+  ...DEPLOYED_PREFIXES,
+  "/static",
+  ...E2E_HARNESS_PREFIXES,
+]
 
 function matchesBackendPrefix(url?: string): boolean {
   return (
     !!url &&
-    BACKEND_PREFIXES.some(
-      (p) => url === p || url.startsWith(`${p}/`) || url.startsWith(`${p}?`)
-    )
+    (url.split("?")[0] === "/desktop-ui.json" ||
+      BACKEND_PREFIXES.some(
+        (p) => url === p || url.startsWith(`${p}/`) || url.startsWith(`${p}?`)
+      ))
   )
 }
 
@@ -144,11 +154,14 @@ const IS_PRODUCTION = process.env.NODE_ENV === "production"
 const devRouteRules = IS_PRODUCTION
   ? {}
   : Object.fromEntries(
-      BACKEND_PREFIXES.map((prefix) => [
-        `${prefix}/**`,
+      [
+        "/desktop-ui.json",
+        ...BACKEND_PREFIXES.map((prefix) => `${prefix}/**`),
+      ].map((route) => [
+        route,
         {
           proxy: {
-            to: `${process.env.DASHBOARD_API_URL ?? "http://localhost:2024"}${prefix}/**`,
+            to: `${process.env.DASHBOARD_API_URL ?? "http://localhost:2024"}${route}`,
             fetchOptions: { redirect: "manual" as const },
           },
         },
@@ -170,14 +183,14 @@ function setRequestHeader(
   raw.push(name, value)
 }
 
-// `pnpm run dev:prod`: a deployed backend keeps `alephat_session` on its own origin and
+// `pnpm run dev:prod`: a deployed backend keeps `osw_session` on its own origin and
 // rejects mutations carrying any other Origin, so this dev server presents the
 // session that target minted (scripts/dev-prod.mjs) and speaks as that origin.
 // The cookie also has to reach the server render, which forwards the incoming
 // one by hand; the Origin rewrite is confined to proxied paths so Vite's own
 // module and HMR requests keep the origin they arrived with.
 function deployedBackendSession(): Plugin | null {
-  const session = process.env.ALEPHAT_DEV_SESSION
+  const session = process.env.OPEN_SWE_DEV_SESSION
   const backend = process.env.DASHBOARD_API_URL
   if (!session || !backend) return null
   const origin = new URL(backend).origin
@@ -206,8 +219,8 @@ function deployedBackendSession(): Plugin | null {
         const jar = (req.headers.cookie ?? "")
           .split(";")
           .map((cookie) => cookie.trim())
-          .filter((cookie) => cookie && !cookie.startsWith("alephat_session="))
-        jar.push(`alephat_session=${session}`)
+          .filter((cookie) => cookie && !cookie.startsWith("osw_session="))
+        jar.push(`osw_session=${session}`)
         setRequestHeader(req, "cookie", jar.join("; "))
         next()
       })
@@ -240,8 +253,52 @@ const BASE_PATH = process.env.DASHBOARD_BASE_PATH || "/"
 // client is told to open it against this port whatever page origin it loaded from.
 const DEV_PORT = Number(process.env.PORT) || 3000
 
+// The bundle's own identity, discovered by the build that emits it: CI or a
+// platform can pass SOURCE_COMMIT explicitly, a local build can prove the
+// checkout's HEAD, and otherwise the value stays null (rendered Unavailable)
+// rather than guessed.
+const BUNDLE_BUILD_AT = new Date().toISOString()
+
+function sourceCommit(): string | null {
+  const fromEnv = process.env.SOURCE_COMMIT?.trim()
+  if (fromEnv) return fromEnv
+  try {
+    return execSync("git rev-parse HEAD", {
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .toString()
+      .trim()
+  } catch {
+    return null // Not a git checkout (source archive); no trustworthy commit.
+  }
+}
+
+// Writes the sidecar the backend reads when it serves this bundle.
+function buildInfoStamp(): Plugin {
+  return {
+    name: "build-info-stamp",
+    apply: "build",
+    applyToEnvironment: (environment) => environment.name === "client",
+    generateBundle() {
+      const info: Record<string, string> = { built_at: BUNDLE_BUILD_AT }
+      const commit = sourceCommit()
+      if (commit) info.commit = commit
+      this.emitFile({
+        type: "asset",
+        fileName: "open-swe-build-info.json",
+        source: JSON.stringify(info),
+      })
+    },
+  }
+}
+
 const config = defineConfig({
   base: BASE_PATH,
+  define: {
+    // Read by window.__OPEN_SWE_BUNDLE__ in the emitted bundle.
+    __OPEN_SWE_BUNDLE_COMMIT__: JSON.stringify(sourceCommit()),
+    __OPEN_SWE_BUNDLE_BUILT_AT__: JSON.stringify(BUNDLE_BUILD_AT),
+  },
   server: { port: DEV_PORT, strictPort: true, hmr: { clientPort: DEV_PORT } },
   resolve: { tsconfigPaths: true },
   optimizeDeps: {
@@ -264,23 +321,26 @@ const config = defineConfig({
     devtools(),
     nitro({
       routeRules: devRouteRules,
-      // A sandbox service is reached through this server so its LangSmith token
-      // rides as a header on our own request, and hot reload through that proxy
-      // needs the WebSocket upgrade.
-      features: { websocket: true },
+      // Ships gzip and brotli copies of the build, served to a browser that accepts them.
+      compressPublicAssets: true,
       // Registered explicitly: nitro's convention scan does not reach this
-      // directory under the vite plugin. `/sandbox` is this server's own route
-      // in both dev and production; the backend prefixes below are proxied by a
+      // directory under the vite plugin. The backend prefixes are proxied by a
       // deployed build only — dev proxies them through devRouteRules, which has
       // a localhost default the handler deliberately refuses to have. Only the
-      // two prefixes a deployed dashboard fronts, since proxying `/static`
-      // would shadow nitro's assets.
-      handlers: [
-        { route: "/sandbox/**", handler: "./server/sandbox-proxy.ts" },
-        ...(IS_PRODUCTION
-          ? [
-              "/dashboard/api",
-              "/webhooks",
+      // prefixes a deployed dashboard fronts, since proxying `/static` would
+      // shadow nitro's assets.
+      handlers: IS_PRODUCTION
+        ? [
+            {
+              route: "/desktop-ui.json",
+              handler: "./server/backend-proxy.ts",
+            },
+            {
+              route: "/.well-known/apple-app-site-association",
+              handler: "./server/apple-app-site-association.ts",
+            },
+            ...[
+              ...DEPLOYED_PREFIXES,
               // A built server fronting the mock harness fronts its fake-SaaS and
               // control routes too, so the E2E browser has the one origin a
               // deployment gives it and reaches the backend the way it really
@@ -290,9 +350,9 @@ const config = defineConfig({
             ].map((prefix) => ({
               route: `${prefix}/**`,
               handler: "./server/backend-proxy.ts",
-            }))
-          : []),
-      ],
+            })),
+          ]
+        : [],
       // Nitro gives every node_modules package its own server chunk. The
       // LangGraph SDK reaches CJS-only `eventemitter3` through `p-queue`, and
       // splitting that cycle puts the CommonJS interop helper in the SDK's chunk
@@ -313,6 +373,7 @@ const config = defineConfig({
     }),
     tailwindcss(),
     tanstackStart({ pages: [SHELL_PAGE] }),
+    buildInfoStamp(),
     // React Compiler via oxc-transform-react, the Rust port. Upstream still
     // marks it experimental; the fallback is `@rolldown/plugin-babel` with
     // plugin-react's `reactCompilerPreset()`, which runs the Babel compiler.

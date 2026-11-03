@@ -1,14 +1,31 @@
-import { Link } from "@tanstack/react-router"
-import { ArrowLeftIcon, CaretRightIcon } from "@phosphor-icons/react"
+import {
+  ArrowLeftIcon,
+  CaretRightIcon,
+} from "@langchain/macaw-components/icons"
+import { Badge } from "@langchain/macaw-components/Badge"
+import { Card } from "@langchain/macaw-components/Card"
+import { Skeleton } from "@langchain/macaw-components/Skeleton"
+import { Text } from "@langchain/macaw-components/Text"
+import { Link, Navigate } from "@tanstack/react-router"
 import type { ReactNode } from "react"
 
 import type { SessionUser } from "@/lib/api"
 import { AppSidebar } from "@/components/AppSidebar"
+import { RequireLogin } from "@/lib/auth-redirect"
+import { useSession } from "@/lib/session"
 import { cn } from "@/lib/utils"
+import { useExperience } from "@/lib/experience"
+import {
+  AgentWorkspaceProvider,
+  useAgentWorkspace,
+} from "@/features/agents/lib/agentWorkspace"
 
 interface AppShellProps {
   user: SessionUser
-  title: string
+  title?: string
+  /** Hand the whole content area to the page, which renders its own header. */
+  fill?: boolean
+  action?: ReactNode
   description?: string
   backTo?: { to: string; label: string }
   className?: string
@@ -18,77 +35,141 @@ interface AppShellProps {
 export function AppShell({
   user,
   title,
+  action,
   description,
   backTo,
   className,
+  fill,
   children,
 }: AppShellProps) {
+  const agentWorkspace = useAgentWorkspace()
+  if (fill) {
+    return (
+      <div className="flex h-svh overflow-hidden bg-surface-level-1 text-primary">
+        <AppSidebar user={user} />
+        <main className="relative flex min-w-0 flex-1">{children}</main>
+      </div>
+    )
+  }
   return (
-    <div className="flex h-svh overflow-hidden bg-background text-foreground">
+    <div className="flex h-svh overflow-hidden bg-surface-level-1 text-primary">
       <AppSidebar user={user} />
-      <main className="flex-1 overflow-y-auto">
+      <main className="relative flex-1 overflow-y-auto">
         <div
           className={cn(
-            "mx-auto max-w-3xl px-4 pt-14 pb-16 sm:px-8 sm:py-12",
+            "mx-auto max-w-3xl px-space-4 pt-space-8 pb-space-9 sm:px-space-6 sm:py-space-8",
+            agentWorkspace && "max-w-4xl sm:px-space-9 sm:py-space-9",
             className
           )}
         >
           {backTo && (
             <Link
               to={backTo.to}
-              className="mb-4 inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+              className="mb-space-4 inline-flex items-center gap-space-2 text-xs text-secondary hover:text-primary"
             >
-              <ArrowLeftIcon className="size-3.5" />
+              <ArrowLeftIcon size={14} weight="regular" />
               {backTo.label}
             </Link>
           )}
-          <header className="mb-10">
-            <h1 className="font-heading text-xl font-medium tracking-tight">
-              {title}
-            </h1>
-            {description && (
-              <p className="mt-1.5 max-w-2xl text-xs text-muted-foreground">
-                {description}
-              </p>
-            )}
+          <header className="mb-space-6 flex flex-wrap items-center justify-between gap-space-4">
+            <div>
+              <Text variant="h1" weight={agentWorkspace ? "medium" : undefined}>
+                {title}
+              </Text>
+              {description && (
+                <Text
+                  as="p"
+                  variant="sm"
+                  color="secondary"
+                  className="mt-space-1 max-w-2xl"
+                >
+                  {description}
+                </Text>
+              )}
+            </div>
+            {action}
           </header>
-          <div className="space-y-10">{children}</div>
+          <div className="flex flex-col gap-space-6">{children}</div>
         </div>
       </main>
     </div>
   )
 }
 
+interface SettingsPageProps extends Omit<AppShellProps, "user" | "children"> {
+  adminOnly?: boolean
+  children: ReactNode | ((user: SessionUser) => ReactNode)
+}
+
+/** An AppShell page that waits for the session and requires sign-in (and admin, when asked). */
+export function SettingsPage({
+  adminOnly,
+  children,
+  ...props
+}: SettingsPageProps) {
+  const { experience } = useExperience()
+  const agentWorkspace = experience === "agent_workspace"
+  const session = useSession()
+  if (session.isLoading) {
+    return (
+      <main className="p-space-5">
+        <Skeleton className="h-40 w-full" />
+      </main>
+    )
+  }
+  if (!session.data) return <RequireLogin />
+  if (adminOnly && !session.data.is_admin) return <Navigate to="/my-settings" />
+  return (
+    <AgentWorkspaceProvider enabled={agentWorkspace}>
+      <AppShell user={session.data} {...props}>
+        {typeof children === "function" ? children(session.data) : children}
+      </AppShell>
+    </AgentWorkspaceProvider>
+  )
+}
+
 interface SettingsSectionProps {
-  title: string
+  id?: string
+  title: ReactNode
   description?: string
   action?: ReactNode
-  children: ReactNode
+  children?: ReactNode
 }
 
 /** A titled group of rows rendered as a single card. */
 export function SettingsSection({
+  id,
   title,
   description,
   action,
   children,
 }: SettingsSectionProps) {
+  const agentWorkspace = useAgentWorkspace()
   return (
-    <section className="space-y-3">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-sm font-medium text-foreground">{title}</h2>
+    <section id={id} className="flex flex-col gap-space-3">
+      <div className="flex items-start justify-between gap-space-4">
+        <div className="flex flex-col gap-space-1">
+          <Text as="h2" variant="h5" weight="medium">
+            {title}
+          </Text>
           {description && (
-            <p className="mt-1 max-w-2xl text-xs text-muted-foreground">
+            <Text as="p" variant="sm" color="secondary" className="max-w-2xl">
               {description}
-            </p>
+            </Text>
           )}
         </div>
         {action}
       </div>
-      <div className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
-        {children}
-      </div>
+      {children && (
+        <Card
+          className={cn(
+            "divide-y divide-default overflow-hidden p-0",
+            agentWorkspace && "rounded-2xl shadow-none"
+          )}
+        >
+          {children}
+        </Card>
+      )}
     </section>
   )
 }
@@ -99,6 +180,9 @@ interface SettingsRowProps {
   control: ReactNode
   htmlFor?: string
   comingSoon?: boolean
+  /** A short tag after the label, such as where a value comes from. */
+  badge?: string
+  badgeClassName?: string
 }
 
 /** Label + description on the left, a single control on the right. */
@@ -108,29 +192,42 @@ export function SettingsRow({
   control,
   htmlFor,
   comingSoon,
+  badge,
+  badgeClassName,
 }: SettingsRowProps) {
+  const agentWorkspace = useAgentWorkspace()
   return (
-    <div className="flex flex-col gap-2 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between sm:gap-8">
-      <label className="flex flex-col gap-1" htmlFor={htmlFor}>
-        <span className="flex items-center gap-2">
-          <span
-            className={cn(
-              "text-sm/none font-medium",
-              comingSoon ? "text-muted-foreground" : "text-foreground"
-            )}
+    <div
+      className={cn(
+        "flex flex-col gap-space-2 px-space-4 py-space-3 sm:flex-row sm:items-center sm:justify-between sm:gap-space-6",
+        agentWorkspace && "px-space-5 py-space-4"
+      )}
+    >
+      <label className="flex flex-col gap-space-1" htmlFor={htmlFor}>
+        <span className="flex items-center gap-space-2">
+          <Text
+            as="span"
+            variant="md"
+            weight="medium"
+            color={comingSoon ? "secondary" : "primary"}
           >
             {label}
-          </span>
-          {comingSoon && (
-            <span className="rounded-sm border border-border bg-muted px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground">
-              Coming soon
-            </span>
+          </Text>
+          {(comingSoon || badge) && (
+            <Badge
+              color="secondary"
+              rounded="sm"
+              size="xxs"
+              className={comingSoon ? undefined : badgeClassName}
+            >
+              {comingSoon ? "Coming soon" : (badge ?? "")}
+            </Badge>
           )}
         </span>
         {description && (
-          <span className="text-xs/relaxed text-muted-foreground">
+          <Text as="span" variant="sm" color="secondary">
             {description}
-          </span>
+          </Text>
         )}
       </label>
       <div className={cn("sm:shrink-0", comingSoon && "opacity-50")}>
@@ -156,19 +253,23 @@ export function SettingsNavRow({
     <Link
       to={to}
       params={params}
-      className="flex items-center justify-between gap-8 px-4 py-3.5 transition-colors hover:bg-muted/40"
+      className="flex items-center justify-between gap-space-6 px-space-4 py-space-3 transition-colors hover:bg-surface-level-2-hover"
     >
-      <div className="flex flex-col gap-1">
-        <span className="text-sm/none font-medium text-foreground">
+      <div className="flex flex-col gap-space-1">
+        <Text as="span" variant="md" weight="medium">
           {label}
-        </span>
+        </Text>
         {description && (
-          <span className="text-xs/relaxed text-muted-foreground">
+          <Text as="span" variant="sm" color="secondary">
             {description}
-          </span>
+          </Text>
         )}
       </div>
-      <CaretRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
+      <CaretRightIcon
+        className="shrink-0 text-icon-secondary"
+        size={14}
+        weight="regular"
+      />
     </Link>
   )
 }
@@ -182,6 +283,8 @@ export function SettingsPanel({
   className?: string
 }) {
   return (
-    <div className={cn("flex flex-col gap-3 p-4", className)}>{children}</div>
+    <div className={cn("flex flex-col gap-space-3 p-space-4", className)}>
+      {children}
+    </div>
   )
 }

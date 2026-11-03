@@ -26,20 +26,24 @@ function warmApiRequests(
   if (sidebarPath) {
     let includeAutomations = false
     let includeResolved = false
-    let projectMode = true
+    let owned = false
+    let includeClaudeCode = true
+    let repoMode = true
     let sortByCreated = true
     try {
       const raw = localStorage.getItem(prefsKey)
       const prefs = raw ? JSON.parse(raw) : null
       const filters = prefs?.filters
-      projectMode = prefs?.organize !== "list"
-      sortByCreated = prefs?.sortChats !== "updated"
+      repoMode = prefs?.organize !== "list"
+      sortByCreated = repoMode && prefs?.sortChats !== "updated"
       if (filters) {
         includeAutomations =
           filters.includeAutomations === true ||
           (Array.isArray(filters.sources) &&
             filters.sources.indexOf("schedule") !== -1)
         includeResolved = filters.includeResolved === true
+        owned = filters.ownedOnly === true
+        includeClaudeCode = filters.includeClaudeCode !== false
       }
     } catch {
       // An unreadable preference just means the default (false).
@@ -47,11 +51,14 @@ function warmApiRequests(
     // Parameter order has to match the api client's, because the handoff below
     // matches on the resolved URL.
     const search = new URLSearchParams()
+    search.set("hierarchy", "true")
     search.set("limit", String(pageSize))
     search.set("offset", "0")
     if (!includeResolved) search.set("resolved", "false")
     search.set("scope", includeAutomations ? "all" : "interactive")
-    if (projectMode) search.set("ownerless", "true")
+    if (repoMode) search.set("ownerless", "true")
+    if (owned) search.set("owned", "true")
+    if (!includeClaudeCode) search.append("exclude_source", "claude_code")
     search.set("sort_by", sortByCreated ? "created_at" : "updated_at")
     targets.push(sidebarPath + "?" + search.toString())
   }

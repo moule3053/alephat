@@ -1,0 +1,543 @@
+"""Single durable dispatch contract behind every openswe/reviewer run trigger.
+
+Replaces the per-site ``runs.create`` calls (plus the ``is_thread_active``
+busy-check and the custom store-queue) with one function that uses:
+
+- ``multitask_strategy="interrupt"`` by default — a follow-up halts the active run
+  (progress preserved by its checkpoints) and resumes the agent with full
+  history + the new message; on an idle thread it just starts. Background
+  follow-ups such as `/baby-sit` can opt into ``enqueue`` instead.
+- ``durability="async"`` — checkpoint every step, written while the next one
+  runs, so a crash/recycle resumes from at most a step back instead of losing
+  all work. ``"sync"`` made every step wait on its write (~0.3s per model/tool
+  step in prod); dashboard-started runs already use the platform's async default.
+- ``webhook=COMPLETION_WEBHOOK_URL`` — the platform calls us on completion or
+  failure so every run ends with a signal even if the agent died.
+- ``stream_resumable=False`` — nothing replays these runs' streams: the dashboard
+  reads a thread from its transcript, so keeping every event in the Agent
+  Server's Redis only costs it memory. A client streaming the thread through the
+  SDK sees a run's events from when it joins.
+- the v3 run shape — the same ``stream_mode`` set, ``stream_subgraphs`` and
+  compatibility marker that ``langgraph_api``'s ``run.start`` command applies
+  when the dashboard submits a run. The server fixes a run's streaming protocol
+  at creation: without the marker a run streams ``values`` only, so the dashboard
+  sees no ``tools`` events or subagent namespaces for externally triggered runs.
+"""
+
+import logging
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from typing import Any, Self
+from urllib.parse import urlparse
+from uuid import UUID
+
+from langgraph.types import Durability
+from langgraph_sdk import get_client
+from langgraph_sdk.client import LangGraphClient
+from langgraph_sdk.schema import Run
+from pydantic import BaseModel, ConfigDict
+
+from openswe.agent_api.connections import ACTING_USER_KEY
+from openswe.config import ENV
+from openswe.github.pull_request_key import PullRequestKey
+from openswe.input_messages import (
+    ChannelIdentity,
+    InputMessageContext,
+    PersonIdentity,
+    RunInput,
+    Surface,
+    SystemIdentity,
+    build_run_input,
+)
+from openswe.invocation import new_invocation_id, resolve_invocation_id, with_invocation_id
+from openswe.run_config import RunConfig
+from openswe.source_context import SourceContext
+from openswe.threads.creation import ensure_titled_thread
+from openswe.ui_invalidations import Topic
+from openswe.users import User
+
+logger = logging.getLogger(__name__)
+
+ContentBlocks = str | list[dict[str, Any]]
+LangGraphRunConfig = dict[str, Any]
+
+
+_PULL_REQUEST_GRAPHS = frozenset({"reviewer", "review-scout"})
+# Who a run is for, which the backend works out for each run and never takes from its caller.
+TURN_ATTRIBUTION_FIELDS = frozenset(
+    {
+        "user_id",
+        ACTING_USER_KEY,
+        "ls_repo_provider",
+        "ls_attribution_identifier",
+        "ls_git_repo",
+        "ls_git_branch",
+        "open_swe_git_targets",
+    }
+)
+
+
+class RunMetadata(BaseModel):
+    """What ``create_durable_run`` records on a run and the run-complete webhook reads back."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    pull_request: PullRequestKey | None = None
+    """The pull request whose review page shows this run; its start and end refresh it."""
+
+    @classmethod
+    def of_run(cls, assistant_id: str, config: LangGraphRunConfig | None) -> Self:
+        cfg = RunConfig.from_config(config)
+        if assistant_id not in _PULL_REQUEST_GRAPHS or cfg.repo is None or cfg.pr_number is None:
+            return cls()
+        return cls(pull_request=PullRequestKey.of(cfg.repo.owner, cfg.repo.name, cfg.pr_number))
+
+
+# The server's legacy-named compatibility marker selects the v3 stream path.
+V3_STREAMING_CONFIG_KEY = "__event_streaming_v2"
+# Run metadata ``kind`` of a run started only to deliver store leftovers.
+FOLLOW_UP_PICKUP_KIND = "follow_up_pickup"
+#: Names the MDA channel (``linear``, ``github``, ...) that owns a thread or started a
+#: run, in run metadata and in the thread index's metadata alike. The channel answers
+#: in its conversation, failures included, and starts every run on its threads, so the
+#: backend neither replies there nor starts runs on them.
+CHANNEL_METADATA_KEY = "channel"
+
+
+def channel_of(metadata: Mapping[str, object] | None) -> str | None:
+    """The MDA channel ``metadata`` (a run's or a thread's) names, whatever the provider."""
+    channel = (metadata or {}).get(CHANNEL_METADATA_KEY)
+    return channel if isinstance(channel, str) and channel else None
+
+
+# The dashboard's ``run.start`` defaults, minus protocol-only channels rejected by
+# the REST ``POST /runs`` schema.
+V3_RUN_STREAM_MODES: tuple[str, ...] = (
+    "values",
+    "updates",
+    "messages",
+    "custom",
+    "tasks",
+    "checkpoints",
+)
+
+
+async def _dispatch_input(
+    content: ContentBlocks, source: str, configurable: dict[str, Any]
+) -> RunInput:
+    surface: Surface = (
+        source if source in {"slack", "linear", "github", "web", "eval"} else "automation"
+    )  # type: ignore[assignment]
+    channels: list[ChannelIdentity] = []
+    systems: list[SystemIdentity] = []
+    cfg = RunConfig.parse(configurable)
+    login = cfg.github_login
+    email = cfg.user_email
+    slack_thread = cfg.slack_thread
+    sender_id = ""
+    # Only for resolving the canonical id: the run describes the sender itself.
+    sender: PersonIdentity | None = None
+    channel_id: str | None = None
+    if surface == "slack" and slack_thread is not None:
+        if slack_thread.triggering_user_id:
+            sender_id = f"slack:{slack_thread.triggering_user_id}"
+            sender = {"id": sender_id}
+            if login:
+                sender["github_login"] = login
+            if email:
+                sender["email"] = email
+        if slack_thread.channel_id:
+            channel_id = f"slack:{slack_thread.channel_id}"
+            channel: ChannelIdentity = {"id": channel_id, "platform": "slack"}
+            channel_context = slack_thread.channel_context
+            if channel_context is not None:
+                name = channel_context.label
+                topic = channel_context.topic
+                purpose = channel_context.purpose
+                if name:
+                    channel["name"] = name
+                if topic:
+                    channel["topic"] = topic
+                if purpose:
+                    channel["purpose"] = purpose
+            if slack_thread.thread_ts:
+                channel["thread_id"] = slack_thread.thread_ts
+            channels.append(channel)
+    if not sender_id and cfg.auth_provider == "langsmith" and cfg.user_id:
+        sender_id = f"user:{cfg.user_id}"
+        sender = {"id": sender_id}
+    if not sender_id and login:
+        sender_id = f"github:{login}"
+        sender = {"id": sender_id, "github_login": login}
+        if email:
+            sender["email"] = email
+    if not sender_id and surface == "linear" and email:
+        sender_id = f"linear:{email.lower()}"
+        sender = {"id": sender_id, "email": email}
+    if sender is not None:
+        sender_id = (await User.canonical_person(sender))["id"]
+    kind = "human" if sender_id else "system"
+    if not sender_id:
+        sender_id = f"system:{source.replace('_', '-')}"
+        systems.append(
+            {
+                "id": sender_id,
+                "display_name": source.replace("-", " ").title(),
+                "platform": "open-swe",
+            }
+        )
+    context: InputMessageContext = {
+        "sender_id": sender_id,
+        "surface": surface,
+        "kind": kind,
+    }
+    if channel_id:
+        context["channel_id"] = channel_id
+    return build_run_input(
+        content,
+        context,
+        channels=channels,
+        systems=systems,
+    )
+
+
+# FastAPI route the platform POSTs run completion/failure to. The platform
+# rejects loopback webhooks (relative URLs / localhost) — they bypass auth via
+# the in-process ASGI transport — so a loopback URL would 422 *every* run at
+# create time. COMPLETION_WEBHOOK_URL must therefore be the deployment's
+# absolute https URL (…/webhooks/run-complete). The route is fail-closed on
+# RUN_COMPLETE_WEBHOOK_SECRET, so we only attach the webhook when the secret is
+# set, appending it as ?token= so the route can verify the call came from us
+# (completion.verify_run_complete_token). Secret unset, or URL relative/loopback
+# → no webhook attached (the completion reply is best-effort; it must never
+# break run creation).
+_COMPLETION_WEBHOOK_BASE = ENV.COMPLETION_WEBHOOK_URL.optional() or "/webhooks/run-complete"
+_RUN_COMPLETE_SECRET = ENV.RUN_COMPLETE_WEBHOOK_SECRET.optional()
+
+
+def _is_loopback_webhook(url: str) -> bool:
+    """Whether a webhook URL is relative or points at localhost (platform-rejected)."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return True  # relative / schemeless
+    return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}
+
+
+def _resolve_completion_webhook_url(base: str, secret: str | None) -> str | None:
+    """Resolve the completion webhook URL, or None to attach no webhook.
+
+    Degrades to None (with a warning) for a relative/loopback URL rather than
+    letting a rejected webhook poison every ``runs.create``.
+    """
+    if not secret:
+        return None
+    if _is_loopback_webhook(base):
+        logger.warning(
+            "RUN_COMPLETE_WEBHOOK_SECRET is set but COMPLETION_WEBHOOK_URL (%r) is relative "
+            "or loopback; the platform rejects such webhooks, so run-completion replies are "
+            "disabled. Set COMPLETION_WEBHOOK_URL to the deployment's absolute https URL "
+            "ending in /webhooks/run-complete to enable them.",
+            base,
+        )
+        return None
+    if "?" in base:
+        return base
+    return f"{base}?token={secret}"
+
+
+COMPLETION_WEBHOOK_URL: str | None = _resolve_completion_webhook_url(
+    _COMPLETION_WEBHOOK_BASE, _RUN_COMPLETE_SECRET
+)
+
+
+def _langgraph_url() -> str:
+    return ENV.LANGGRAPH_URL.get()
+
+
+def dispatch_client() -> LangGraphClient:
+    return get_client(url=_langgraph_url())
+
+
+def _slack_conversation_type(source: str, config: LangGraphRunConfig | None) -> str | None:
+    if source != "slack" or not isinstance(config, dict):
+        return None
+    configurable = config.get("configurable")
+    if not isinstance(configurable, dict):
+        return None
+    slack_thread = configurable.get("slack_thread")
+    if not isinstance(slack_thread, dict):
+        return None
+    channel_context = slack_thread.get("channel_context")
+    if not isinstance(channel_context, dict):
+        return None
+    is_im = channel_context.get("is_im")
+    if not isinstance(is_im, bool):
+        return None
+    return "dm" if is_im else "channel"
+
+
+def _slack_channel_metadata(configurable: object) -> dict[str, str]:
+    slack_thread = RunConfig.parse(configurable).slack_thread
+    if slack_thread is None:
+        return {}
+    channel = slack_thread.channel_context
+    values = {
+        "slack_channel_id": slack_thread.channel_id,
+        "slack_channel_name": channel.label if channel else "",
+    }
+    return {key: value for key, value in values.items() if value}
+
+
+def thread_workspace(metadata: Mapping[str, Any]) -> str | None:
+    """The workspace a thread's follow-up run carries; ``environment`` is the pre-workspace key."""
+    for key in ("workspace", "environment"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def follow_up_configurable(metadata: Mapping[str, Any], thread_id: str) -> dict[str, Any]:
+    """Config for a system-started run that continues a thread where its last run left off."""
+    configurable: dict[str, Any] = {
+        "thread_id": thread_id,
+        "experience": metadata.get("experience", "coding"),
+    }
+    for key in ("source", "repo", "github_login", "started_by_id", "triggering_user_email"):
+        value = metadata.get(key)
+        if value is not None:
+            configurable["user_email" if key == "triggering_user_email" else key] = value
+    owner = metadata.get("owner_login")
+    if isinstance(owner, str) and owner.startswith("user:"):
+        configurable.update(
+            user_id=owner.removeprefix("user:"),
+            auth_provider="langsmith",
+            repo_explicitly_none=True,
+        )
+        configurable.pop("github_login", None)
+        configurable.pop("repo", None)
+    workspace = thread_workspace(metadata)
+    if workspace is not None:
+        configurable["workspace"] = workspace
+        configurable["environment"] = workspace
+    configurable.update(SourceContext.from_metadata(metadata).dump())
+    return configurable
+
+
+def prepare_run_config(
+    config: LangGraphRunConfig | None,
+    metadata: dict[str, Any] | None,
+) -> LangGraphRunConfig:
+    run_config = dict(config or {})
+    configurable = run_config.get("configurable")
+    configurable = dict(configurable) if isinstance(configurable, dict) else {}
+    existing_metadata = run_config.get("metadata")
+    merged_metadata = dict(existing_metadata) if isinstance(existing_metadata, dict) else {}
+    for key in TURN_ATTRIBUTION_FIELDS:
+        merged_metadata.pop(key, None)
+    if metadata is not None:
+        merged_metadata.update(metadata)
+    merged_metadata.update(_slack_channel_metadata(configurable))
+    merged_metadata["ls_repo_provider"] = "github"
+    invocation_id = resolve_invocation_id(configurable, merged_metadata) or new_invocation_id()
+    started_at = merged_metadata.setdefault("invocation_started_at", datetime.now(UTC).isoformat())
+    configurable = with_invocation_id(configurable, invocation_id)
+    configurable.setdefault("invocation_started_at", started_at)
+    configurable[V3_STREAMING_CONFIG_KEY] = True
+    configurable.setdefault("background_task_completion", False)
+    run_config["configurable"] = configurable
+    run_config["metadata"] = with_invocation_id(merged_metadata, invocation_id)
+    return run_config
+
+
+async def _run_user_metadata(
+    config: LangGraphRunConfig | None, *, source: str | None = None
+) -> dict[str, str]:
+    """Resolve canonical attribution identically for durable and dashboard-started turns."""
+    metadata = {"ls_repo_provider": "github"}
+    configurable = (config or {}).get("configurable")
+    if not isinstance(configurable, Mapping):
+        return metadata
+    cfg = RunConfig.parse(dict(configurable))
+    if cfg.background_task_completion:
+        return metadata
+    try:
+        if cfg.auth_provider == "langsmith" and cfg.user_id:
+            user = await User.get(UUID(cfg.user_id))
+        elif (source or cfg.source) in {"dashboard", "web"} and cfg.github_login:
+            user = await User.for_login("github", cfg.github_login)
+        elif cfg.slack_thread and cfg.slack_thread.triggering_user_id:
+            user = await User.for_identity("slack", cfg.slack_thread.triggering_user_id)
+        elif cfg.github_user_id:
+            user = await User.for_identity("github", str(cfg.github_user_id))
+        elif cfg.github_login:
+            user = await User.for_login("github", cfg.github_login)
+        elif cfg.user_email:
+            user = await User.for_email(cfg.user_email)
+        else:
+            return metadata
+        if user is not None:
+            metadata["user_id"] = str(user.id)
+            if user.github_login:
+                metadata["ls_attribution_identifier"] = user.github_login
+    except Exception:
+        logger.warning("Could not resolve run user for trace metadata", exc_info=True)
+    return metadata
+
+
+async def prepare_durable_run(
+    assistant_id: str,
+    config: LangGraphRunConfig | None,
+    metadata: Mapping[str, object] | None,
+    *,
+    source: str,
+    as_sender: bool = False,
+) -> LangGraphRunConfig:
+    """The config and metadata a durable run starts with, wherever it is created.
+
+    The run is attributed to the person its config names (``user_id``), and acts as them
+    (``ACTING_USER_KEY``) only when they started it: ``as_sender`` for a message they
+    sent from the dashboard, and a channel's own run, which MDA starts as its verified
+    sender. Any other run, such as a wakeup, an event match or a task message, acts as
+    no one, whoever it is attributed to.
+    """
+    recorded = RunMetadata.of_run(assistant_id, config)
+    run_metadata = {
+        key: value for key, value in (metadata or {}).items() if key not in TURN_ATTRIBUTION_FIELDS
+    } | recorded.model_dump(exclude_none=True)
+    run_metadata.update(await _run_user_metadata(config, source=source))
+    user_id = run_metadata.get("user_id")
+    if user_id is not None and (as_sender or channel_of(run_metadata) is not None):
+        run_metadata[ACTING_USER_KEY] = user_id
+    conversation_type = _slack_conversation_type(source, config)
+    if conversation_type is not None:
+        run_metadata["slack_conversation_type"] = conversation_type
+    run_config = prepare_run_config(config, run_metadata)
+    if "user_id" not in run_metadata:
+        configurable = run_config["configurable"]
+        if isinstance(configurable, dict):
+            configurable.pop("user_id", None)
+    return run_config
+
+
+async def create_durable_run(
+    thread_id: str,
+    assistant_id: str,
+    *,
+    input: RunInput | dict[str, Any],
+    source: str,
+    thread_title: str | None,
+    config: LangGraphRunConfig | None = None,
+    metadata: dict[str, Any] | None = None,
+    client: LangGraphClient | None = None,
+    multitask_strategy: str = "interrupt",
+    durability: Durability = "async",
+    if_not_exists: str = "create",
+    after_seconds: int | float | None = None,
+    source_context: SourceContext | None = None,
+    as_sender: bool = False,
+) -> Run:
+    """Create a run with Open SWE's durable LangGraph defaults.
+
+    ``thread_title`` names a thread the system owns, creating it if needed; ``None``
+    means the caller already created and titled the thread. Agent and reviewer
+    threads run on Managed Deep Agents; the request goes here regardless and
+    ``openswe.threads.router`` routes it. ``as_sender`` is for a run the person it is
+    attributed to started themselves (``prepare_durable_run``).
+    """
+    client = client or dispatch_client()
+    if thread_title is not None:
+        await ensure_titled_thread(client, thread_id, title=thread_title)
+    run_config = await prepare_durable_run(
+        assistant_id, config, metadata, source=source, as_sender=as_sender
+    )
+    recorded = RunMetadata.of_run(assistant_id, config)
+    create_kwargs: dict[str, Any] = {
+        "input": input,
+        "config": run_config,
+        "metadata": run_config["metadata"],
+        "multitask_strategy": multitask_strategy,
+        "durability": durability,
+        "if_not_exists": if_not_exists,
+        "stream_mode": list(V3_RUN_STREAM_MODES),
+        "stream_subgraphs": True,
+        "stream_resumable": False,
+    }
+    if COMPLETION_WEBHOOK_URL:
+        create_kwargs["webhook"] = COMPLETION_WEBHOOK_URL
+    if after_seconds is not None:
+        create_kwargs["after_seconds"] = after_seconds
+
+    run = await client.runs.create(thread_id, assistant_id, **create_kwargs)
+    if recorded.pull_request is not None:
+        await Topic.PULL_REQUESTS.invalidate(key=recorded.pull_request)
+    cfg = RunConfig.from_config(run_config)
+    if assistant_id == "agent" and cfg.slack_ask is not True:
+        from openswe.slack.thinking import sync_slack_background_status
+
+        await sync_slack_background_status(
+            client, thread_id, resume=True, run_id=run["run_id"], source_context=source_context
+        )
+    logger.info(
+        "Dispatched %s run on thread %s (source=%s, run=%s)",
+        assistant_id,
+        thread_id,
+        source,
+        run.get("run_id") if isinstance(run, dict) else None,
+    )
+    return run
+
+
+async def dispatch_agent_run(
+    thread_id: str,
+    content: ContentBlocks | None,
+    configurable: dict[str, Any],
+    *,
+    source: str,
+    thread_title: str | None,
+    input: RunInput | None = None,
+    context: InputMessageContext | None = None,
+    channels: list[ChannelIdentity] | None = None,
+    systems: list[SystemIdentity] | None = None,
+    assistant_id: str = "agent",
+    metadata: dict[str, Any] | None = None,
+    client: LangGraphClient | None = None,
+    multitask_strategy: str = "interrupt",
+    source_context: SourceContext | None = None,
+) -> Run:
+    """Create a durable run for ``thread_id`` using the requested multitask strategy.
+
+    Routes every Slack / Linear / GitHub / dashboard trigger through one
+    contract. ``source`` is for logging/metadata only; ``assistant_id`` selects
+    the graph (``"agent"`` or ``"reviewer"``).
+    """
+    if input is not None and any(
+        value is not None for value in (content, context, channels, systems)
+    ):
+        raise ValueError("prebuilt input cannot be combined with content or source identities")
+    if input is None:
+        if content is None:
+            raise ValueError("content is required when input is not provided")
+        input = (
+            build_run_input(
+                content,
+                context,
+                channels=channels,
+                systems=systems,
+            )
+            if context is not None
+            else await _dispatch_input(content, source, configurable)
+        )
+    client = client or dispatch_client()
+    return await create_durable_run(
+        thread_id,
+        assistant_id,
+        input=input,
+        config={"configurable": configurable},
+        metadata=metadata or {},
+        source=source,
+        thread_title=thread_title,
+        client=client,
+        multitask_strategy=multitask_strategy,
+        source_context=source_context,
+    )

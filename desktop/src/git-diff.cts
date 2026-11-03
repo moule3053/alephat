@@ -2,13 +2,17 @@ const { execFile, execFileSync, spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
+const {
+  parseGitHubRemote,
+  repoFullName: githubRepoName,
+} = require("open-swe-bridge-client");
 
 const MAX_FILES = 200;
 const MAX_FILE_BYTES = 400_000;
 const MAX_CONTENT_BYTES = 16 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_GH_OUTPUT_BYTES = 1024 * 1024;
-const CHECKPOINT_NAMESPACE = "refs/alephat/local";
+const CHECKPOINT_NAMESPACE = "refs/open-swe/local";
 // `worktree add` checks out the whole tree, which on a large repository takes
 // far longer than any other git call here.
 const WORKTREE_TIMEOUT_MS = 300_000;
@@ -132,7 +136,61 @@ async function checkoutBranch(cwd, branch, create = false) {
   return name;
 }
 
-async function addWorktree(repo, worktreePath, branch, baseRef) {
+async function addWorktree(
+  repo,
+  worktreePath,
+  branch,
+  baseRef,
+  fetchUpstream = false,
+) {
+  if (fetchUpstream) {
+    const [localRef, remote, upstream] = text(
+      await git(
+        repo,
+        [
+          "for-each-ref",
+          "--format=%(refname)%0a%(upstream:remotename)%0a%(upstream:remoteref)",
+          `refs/heads/${baseRef}`,
+        ],
+        null,
+        5_000,
+      ),
+    ).split("\n");
+    if (localRef === `refs/heads/${baseRef}`) {
+      try {
+        await git(
+          repo,
+          ["fetch", remote || "origin", upstream || `refs/heads/${baseRef}`],
+          null,
+          60_000,
+        );
+        const tip = text(
+          await git(
+            repo,
+            ["rev-parse", "--verify", "FETCH_HEAD^{commit}"],
+            null,
+            5_000,
+          ),
+        );
+        if (
+          await ok(
+            git(
+              repo,
+              ["merge-base", "--is-ancestor", localRef, tip],
+              null,
+              5_000,
+            ),
+          )
+        )
+          baseRef = tip;
+      } catch (error) {
+        console.warn(
+          "Could not refresh worktree base; using the local branch",
+          error,
+        );
+      }
+    }
+  }
   await git(
     repo,
     ["worktree", "add", "-b", branch, worktreePath, baseRef],
@@ -318,6 +376,18 @@ function checkpointRef(sessionId) {
   return `${CHECKPOINT_NAMESPACE}/${sessionId.replace(/[^A-Za-z0-9._-]/g, "-")}`;
 }
 
+/** `owner/name` of the checkout's GitHub `origin`, for the cloud thread's repo. */
+async function originRepo(cwd) {
+  try {
+    const remote = parseGitHubRemote(
+      text(await git(cwd, ["remote", "get-url", "origin"])),
+    );
+    return remote ? githubRepoName(remote) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function repoRoot(cwd) {
   try {
     return text(await git(cwd, ["rev-parse", "--show-toplevel"])) || null;
@@ -329,7 +399,7 @@ async function repoRoot(cwd) {
 /** Snapshot the worktree (tracked + untracked, ignoring .gitignore) into a tree oid. */
 async function writeWorktreeTree(repo) {
   const gitDir = text(await git(repo, ["rev-parse", "--absolute-git-dir"]));
-  const indexFile = path.join(gitDir, `alephat-index-${randomUUID()}`);
+  const indexFile = path.join(gitDir, `open-swe-index-${randomUUID()}`);
   const env = { ...process.env, GIT_INDEX_FILE: indexFile };
   try {
     const hasHead = await ok(
@@ -354,14 +424,14 @@ async function captureCheckpoint(repo, ref) {
         tree,
         ...(hasHead ? ["-p", "HEAD"] : []),
         "-m",
-        "alephat-local-turn",
+        "open-swe-local-turn",
       ],
       {
         ...process.env,
-        GIT_AUTHOR_NAME: "Alephat",
-        GIT_AUTHOR_EMAIL: "alephat@users.noreply.github.com",
-        GIT_COMMITTER_NAME: "Alephat",
-        GIT_COMMITTER_EMAIL: "alephat@users.noreply.github.com",
+        GIT_AUTHOR_NAME: "Open SWE",
+        GIT_AUTHOR_EMAIL: "open-swe@users.noreply.github.com",
+        GIT_COMMITTER_NAME: "Open SWE",
+        GIT_COMMITTER_EMAIL: "open-swe@users.noreply.github.com",
       },
     ),
   );
@@ -620,6 +690,9 @@ async function readBranchDiff(repo, baseRef, headRef = null) {
 
 module.exports = {
   addWorktree,
+  git,
+  gitStdin,
+  ok,
   captureCheckpoint,
   readBranchDiff,
   checkoutBranch,
@@ -628,6 +701,7 @@ module.exports = {
   defaultBranch,
   localBranches,
   deleteRefs,
+  originRepo,
   parsePullRequest,
   readDiff,
   removeWorktree,

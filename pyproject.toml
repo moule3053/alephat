@@ -6,63 +6,74 @@ readme = "README.md"
 requires-python = ">=3.14"
 license = { text = "MIT" }
 dependencies = [
-    "deepagents==0.7.13",
+    "deepagents==0.7.32",
+    # Remove this explicit dependency after upgrading to deepagents 0.7.33 once released.
+    "langchain-core>=1.7.4,<2",
+    # The types of the event endpoint requests the MDA deployment's channels send (mda/),
+    # from the vendored SDK the deployment runs (vendor/README.md).
+    "managed-deepagents>=0.10.1",
+    # Verifies the signature MDA puts on those requests (MDA_SERVICE_SECRET).
+    "standardwebhooks>=1.1.0",
     "fastapi>=0.141.1",
     "uvicorn>=0.52.4",
-    "httpx2>=2.12.0,<3.0.0",
+    "httpx2>=2.12.0",
     "PyJWT>=2.13.0",
     "cryptography>=50.0.0",
-    "langgraph-sdk>=0.4.3",
-    "langchain>=1.3.16",
-    "langgraph>=1.2.11",
+    "langgraph-sdk>=0.4.11",
+    "langchain[mcp]>=1.4.8",
+    "langgraph>=1.2.19",
     "markdownify>=1.2.3",
-    "langchain-anthropic>=1.6.1",
-    "langgraph-cli[inmem]>=0.4.31",
-    "langsmith>=0.12.0",
-    "langchain-openai>=1.6.1,<2.0.0",
-    "openai>=3.10.0,<4.0.0",
-    "langchain-fireworks>=1.6.0",
+    "markdown-it-py==4.2.0",
+    "langchain-anthropic>=1.7.9",
+    "langgraph-cli[inmem]>=0.4.40",
+    "langsmith>=0.14.17",
+    "langchain-openai>=1.7.3,<2.0.0",
+    "openai>=3.10.0",
+    "langchain-fireworks>=1.7.1",
     # langchain-fireworks 1.4.2 pins a pre-release fireworks-ai; opt in explicitly so uv resolves it.
     "fireworks-ai>=1.2.9",
-    "langchain-daytona>=0.0.8",
-    "langchain-modal>=0.0.6",
-    "langchain-runloop>=0.0.7",
-    "langchain-e2b==0.0.6",
     "exa-py>=2.18.1",
-    "langchain-google-genai>=4.3.5",
-    "langchain-mcp-adapters>=0.3.2",
+    "langchain-google-genai>=4.4.2",
     "websockets>=16.1.1",
-    "slack-sdk>=3.44.1,<4.0.0",
-    "aiohttp>=3.14.3,<4.0.0",
+    "slack-sdk>=3.44.1",
+    "aiohttp>=3.14.3",
     "alembic==1.20.0",
-    "sqlalchemy[asyncio]==2.0.52",
+    "croniter>=6.0.0",
+    "sqlalchemy[asyncio]==2.1.1",
     "asyncpg==0.31.0",
+    "pillow>=12.1.0",
+    "Pygments>=2.21.0",
+    "githubkit[auth-app]==0.16.1",
+    "githubkit-schemas[2022-11-28]==26.9.29",
+    "jinja2>=3.1.6",
+    "langchain-typesafe==0.0.1a3",
+    "langchain-quickjs==0.3.11",
+    "langchain-daytona>=0.0.8",
     "nats-py>=2.9.0",
     "httpx>=0.28.1",
     "pydantic>=2.10.0",
+    "open-swe-runtime-api",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "ty==0.0.78",
+    "ty==0.0.84",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.16.4",
-    "Pygments>=2.21.0",
 ]
 
+# Shared with mda/: the contract between the backend and its MDA runtime.
+[tool.uv.sources]
+open-swe-runtime-api = { path = "packages/runtime-api", editable = true }
+managed-deepagents = { path = "vendor/managed-deepagents-sdk/packages/pypi", editable = true }
+
 [tool.uv]
-# The externally maintained langchain-e2b integration still declares
-# `deepagents<0.7.0`, but 0.7.13 keeps the sandbox API backward compatible. Its e2b
-# dependency also caps wcmatch<11.0 while deepagents requires wcmatch>=11.0, so
-# override both transitive bounds until langchain-e2b publishes compatible metadata.
-override-dependencies = ["deepagents==0.7.13", "wcmatch>=11.0"]
-# Each langgraph-api release pins its langgraph-runtime-inmem peer to a single
-# minor window expressed in `.dev0` bounds (`>=0.32.0.dev0,<0.33.0.dev0`), which
-# uv's default pre-release policy shies away from, so a plain resolve lands on the
-# end-of-life 0.10.3. Hold the local dev server at the version `langgraph.json`
-# declares for the deployment, so tests run against the runtime that serves prod.
-constraint-dependencies = ["langgraph-api>=0.13.3,<0.14"]
+constraint-dependencies = [
+    "langgraph-api==0.19.0.dev3",
+    "langgraph-runtime-inmem==0.39.0.dev3",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -72,10 +83,14 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["agent", "alephat_platform"]
+packages = ["openswe", "alephat_platform"]
 
 [tool.ruff]
 line-length = 100
+# Scripts copied into sandboxes run on whatever python3 the image ships.
+per-file-target-version = { "openswe/sandbox_scripts/*.py" = "py38", "mda/rt/sandbox_scripts/*.py" = "py38" }
+# Vendored upstream code keeps its own style.
+extend-exclude = ["vendor"]
 
 [tool.ruff.lint]
 # PLC2701 (private-name imports) is preview-only; explicit-preview-rules keeps every
@@ -101,10 +116,14 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["SLF001", "PLC2701"]
+"mda/tests/**" = ["SLF001", "PLC2701"]
 # Siblings of one package sharing package-internal helpers. PLC2701 cannot tell
 # an intra-package import from a cross-package one; names these modules expose
 # to the rest of the codebase are public.
-"agent/dashboard/threads/*" = ["PLC2701"]
+"openswe/threads/*" = ["PLC2701"]
+# MDA builds the deployment on Python 3.13, which evaluates annotations as it
+# defines them, so a name imported only for type checking stays quoted there.
+"mda/**" = ["UP037"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "__future__.annotations".msg = "Do not use postponed annotation evaluation."
@@ -114,10 +133,18 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ty.src]
-include = ["agent", "alephat_platform", "tests"]
+include = ["openswe", "alephat_platform", "packages", "tests"]
+# Runs in the mda/ project's environment, against the graph `mda build` compiles.
+# Sandbox scripts run on an older python3; `make typecheck` checks them at 3.8.
+exclude = ["tests/e2e/mda_entrypoint.py", "openswe/sandbox_scripts/*.py"]
 
 [tool.ty.analysis]
-allowed-unresolved-imports = ["langgraph_api.metrics_datadog", "ddtrace", "ddtrace.trace"]
+allowed-unresolved-imports = [
+    "ddtrace",
+    "ddtrace.trace",
+    "langchain_mcp_adapters.client",
+    "langchain_mcp_adapters.sessions",
+]
 
 [tool.ty.terminal]
 error-on-warning = false

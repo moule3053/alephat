@@ -3,8 +3,24 @@ import { expect, type Page } from "@playwright/test";
 // Shared fixtures for the specs that drive the REAL built ui/ app (served
 // same-origin from the harness). Only the LLM/GitHub/Slack/token boundaries
 // are faked.
-export const SAME_USER = { login: "alice", email: "alice@example.com" };
-export const OTHER_USER = { login: "bob", email: "bob@example.com" };
+export const SAME_USER = {
+  login: "alice",
+  email: "alice@example.com",
+  name: "Alice",
+};
+export const OTHER_USER = {
+  login: "bob",
+  email: "bob@example.com",
+  name: "Bob",
+};
+
+// The dashboard's mutating routes enforce same-origin, which a browser sets for
+// itself but APIRequestContext does not.
+const BASE_URL = `http://127.0.0.1:${process.env.E2E_PORT ?? 2024}`;
+export const SAME_ORIGIN_HEADERS = {
+  origin: BASE_URL,
+  referer: `${BASE_URL}/`,
+};
 
 export async function loginAs(
   page: Page,
@@ -12,6 +28,28 @@ export async function loginAs(
 ) {
   const res = await page.request.post("/control/login", { data: user });
   expect(res.ok()).toBeTruthy();
+  await page.addInitScript((login) => {
+    localStorage.setItem(`open-swe.desktop.experience:${login}`, "coding");
+  }, user.login);
+}
+
+// What a message sent while a run is live does. It is the person's saved
+// preference, so a spec that depends on it sets it rather than inherit another's.
+export async function setFollowUpBehavior(
+  page: Page,
+  behavior: "queue" | "steer",
+) {
+  const saved = await page.request.get("/dashboard/api/me/preferences");
+  expect(saved.ok()).toBeTruthy();
+  const res = await page.request.put("/dashboard/api/me/preferences", {
+    data: { ...(await saved.json()), follow_up_behavior: behavior },
+    headers: SAME_ORIGIN_HEADERS,
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+export async function optIntoQueue(page: Page) {
+  await setFollowUpBehavior(page, "queue");
 }
 
 // The composer is a rich-text editor, not a <textarea>: it carries the prompt
@@ -35,25 +73,22 @@ export async function typeIntoComposer(page: Page, text: string) {
   await editor.press("Enter");
 }
 
-// A fresh user lands on the default-model dialog, whose backdrop swallows
-// clicks on the composer behind it.
 export async function dismissOnboardingIfShown(page: Page) {
   const profile = (await (
     await page.request.get("/dashboard/api/profile")
-  ).json()) as { default_model?: string };
-  const mapping = (await (
-    await page.request.get("/dashboard/api/my-mapping")
-  ).json()) as { slack_user_id?: string };
+  ).json()) as { slack_onboarding_dismissed?: boolean };
   const session = (await (
     await page.request.get("/dashboard/api/me")
   ).json()) as {
     slack_oauth_enabled?: boolean;
+    slack_user_id?: string | null;
   };
   const needsOnboarding =
-    !profile.default_model ||
-    (session.slack_oauth_enabled && !mapping.slack_user_id);
+    session.slack_oauth_enabled &&
+    !session.slack_user_id &&
+    !profile.slack_onboarding_dismissed;
   if (!needsOnboarding) return;
-  const dismiss = page.getByRole("button", { name: "Maybe later" });
+  const dismiss = page.getByRole("button", { name: "Don't ask again" });
   await expect(dismiss).toBeVisible();
   await dismiss.click();
   await expect(dismiss).toBeHidden();
@@ -76,11 +111,156 @@ export async function setPullRequestHealth(
   expect(res.ok()).toBeTruthy();
 }
 
+export type MergeMethod = "squash" | "merge" | "rebase";
+
+export interface FakeCheckRun {
+  name: string;
+  status: "queued" | "in_progress" | "completed";
+  conclusion?:
+    | "success"
+    | "failure"
+    | "timed_out"
+    | "action_required"
+    | "startup_failure"
+    | "cancelled"
+    | "stale"
+    | "skipped"
+    | "neutral"
+    | null;
+  details_url?: string;
+  required?: boolean;
+}
+
+export interface FakeCommitStatus {
+  context: string;
+  state: "pending" | "success" | "failure" | "error";
+  target_url?: string;
+  required?: boolean;
+}
+
+export interface FakeReview {
+  id?: number;
+  author: string;
+  state: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED";
+  body?: string;
+  url?: string;
+}
+
+export interface FakeReviewThread {
+  path: string;
+  line?: number;
+  original_line?: number;
+  is_resolved?: boolean;
+  is_outdated?: boolean;
+  author?: string;
+  body?: string;
+  url?: string;
+  comments?: Array<{ author: string; body: string; url?: string }>;
+}
+
+export interface SeedPullRequestOptions {
+  repo?: string;
+  title?: string;
+  body?: string;
+  author?: string;
+  head?: string;
+  base?: string;
+  draft?: boolean;
+  created_at?: string;
+  updated_at?: string;
+  mergeable?: boolean;
+  mergeable_state?: "clean" | "dirty" | "blocked" | "behind" | "unknown";
+  check_runs?: FakeCheckRun[];
+  statuses?: FakeCommitStatus[];
+  reviews?: FakeReview[];
+  review_threads?: FakeReviewThread[];
+  review_decision?: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED";
+  // Committed to `head` off the base branch, so the PR carries a real diff.
+  files?: Record<string, string>;
+}
+
+export interface SeededPullRequest {
+  number: number;
+  repo: string;
+  head_sha: string;
+}
+
+// Put an open PR in the fake GitHub store so the PR search ("Pull Requests →
+// Mine") returns it. `author` defaults to SAME_USER's login, the identity
+// `loginAs(page, SAME_USER)` signs in as.
+export async function seedOpenPullRequest(
+  page: Page,
+  options: SeedPullRequestOptions = {},
+): Promise<SeededPullRequest> {
+  const res = await page.request.post("/control/pull-request", {
+    data: { author: SAME_USER.login, ...options },
+  });
+  expect(res.ok()).toBeTruthy();
+  const payload = (await res.json()) as SeededPullRequest;
+  return payload;
+}
+
+export async function setRepoMergeMethods(
+  page: Page,
+  repo: string,
+  methods: MergeMethod[],
+) {
+  const res = await page.request.post("/control/repo-merge-methods", {
+    data: { repo, methods },
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
+export interface MockPullRequest {
+  number: number;
+  repo: string;
+  title: string;
+  head: string;
+  head_sha: string;
+  base: string;
+  state: "open" | "closed";
+  draft: boolean;
+  merged: boolean;
+  merge_method: MergeMethod | "" | null;
+  mergeable: boolean;
+  mergeable_state: string;
+  author: string;
+  body: string;
+  created_at: string;
+  updated_at: string;
+  url: string;
+}
+
+// Read one PR straight out of the fake GitHub store, so a spec can assert what
+// the dashboard's merge/close actually did server-side.
+export async function readPullRequest(
+  page: Page,
+  owner: string,
+  repo: string,
+  number: number,
+): Promise<MockPullRequest> {
+  const res = await page.request.get("/mock/github/data");
+  expect(res.ok()).toBeTruthy();
+  const pulls = (await res.json()) as MockPullRequest[];
+  const match = pulls.find(
+    (pull) => pull.repo === `${owner}/${repo}` && pull.number === number,
+  );
+  expect(match, `no fake PR ${owner}/${repo}#${number}`).toBeDefined();
+  return match as MockPullRequest;
+}
+
 // Hold the fake run open long enough to load its busy composer and queue a
 // follow-up. It may finish while the UI observes the next server refresh.
 export async function openRunningThreadViaSlackLink(page: Page) {
   await page.goto("/mock/slack");
-  await page.locator("#reset").click();
+  await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/control/reset") &&
+        response.request().method() === "POST",
+    ),
+    page.locator("#reset").click(),
+  ]);
   await expect(page.locator("#thread")).toContainText("No messages yet");
   await page
     .locator("#text")
@@ -100,7 +280,14 @@ export async function openThreadViaSlackLink(
   options: { repoPrivate?: boolean; message?: string } = {},
 ) {
   await page.goto("/mock/slack");
-  await page.locator("#reset").click();
+  await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/control/reset") &&
+        response.request().method() === "POST",
+    ),
+    page.locator("#reset").click(),
+  ]);
   if (options.repoPrivate) {
     await setRepoPrivate(page, true);
   }
@@ -125,7 +312,14 @@ export async function openThreadViaSlackLink(
 // briefly lag; a reload re-fetches it. Retry until the PR link renders.
 export async function openMultiRepoPrThreadViaSlackLink(page: Page) {
   await page.goto("/mock/slack");
-  await page.locator("#reset").click();
+  await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/control/reset") &&
+        response.request().method() === "POST",
+    ),
+    page.locator("#reset").click(),
+  ]);
   await page
     .locator("#text")
     .fill(
@@ -142,6 +336,27 @@ export async function openMultiRepoPrThreadViaSlackLink(page: Page) {
   await expect(page).toHaveURL(/\/agents\//);
 }
 
+// Every call the backend planned the thread's runs for, once its runs are done. The
+// harness answers each call as a replica that never served the run (patches.py).
+export async function plannedCalls(page: Page, threadId: string) {
+  await expect
+    .poll(
+      async () => {
+        const res = await page.request.get(
+          `${BASE_URL}/control/thread-idle?thread_id=${threadId}`,
+        );
+        return ((await res.json()) as { idle: boolean }).idle;
+      },
+      { timeout: 30_000, intervals: [500] },
+    )
+    .toBe(true);
+  const res = await page.request.get(
+    `${BASE_URL}/control/plans?thread_id=${threadId}`,
+  );
+  expect(res.ok()).toBeTruthy();
+  return (await res.json()) as string[];
+}
+
 export function threadIdFromUrl(page: Page): string {
   const id = new URL(page.url()).pathname.split("/").pop() ?? "";
   expect(id).not.toBe("");
@@ -152,7 +367,10 @@ export async function expectTranscriptVisible(page: Page) {
   await expect(async () => {
     await page.reload();
     await expect(
-      page.getByRole("link", { name: "Add greet() helper" }).first(),
+      page
+        .getByRole("main")
+        .getByRole("link", { name: "Add greet() helper", exact: true })
+        .first(),
     ).toBeVisible({ timeout: 8000 });
   }).toPass({ timeout: 60000 });
 }

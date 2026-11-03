@@ -1,0 +1,230 @@
+import { Badge } from "@langchain/macaw-components/Badge"
+import { Button } from "@langchain/macaw-components/Button"
+import { Text } from "@langchain/macaw-components/Text"
+import {
+  useId,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react"
+
+import type { OpenPullRequest } from "@/lib/api"
+import { cn } from "@/lib/utils"
+import { dateLabel } from "../lib/dateLabel"
+import { statusDetail, statusLabels } from "../lib/status"
+import { Diffstat } from "./Diffstat"
+import {
+  PullRequestActions,
+  type PullRequestOutcome,
+} from "./PullRequestActions"
+import { PullRequestChecks } from "./PullRequestChecks"
+import { StatusPill } from "./StatusPill"
+import { UnresolvedConversations } from "./UnresolvedConversations"
+
+export type { PullRequestOutcome }
+
+const outcomeLabels: Record<PullRequestOutcome, string> = {
+  merged: "Merged",
+  closed: "Closed",
+}
+
+const assignmentLabels: Partial<
+  Record<NonNullable<OpenPullRequest["assignment"]>, [string, string]>
+> = {
+  tentative: [
+    "May be assigned",
+    "Open SWE may assign you this review if nobody claims it in time",
+  ],
+  mentioned: ["Mentioned", "Linked in a Slack thread that mentions you"],
+}
+
+function AssignmentBadge({ pr }: { pr: OpenPullRequest }) {
+  const label = pr.assignment ? assignmentLabels[pr.assignment] : undefined
+  if (!label) return null
+  return (
+    <Badge size="sm" color="secondary" title={label[1]}>
+      {label[0]}
+    </Badge>
+  )
+}
+
+const interactive =
+  'a,button,input,select,textarea,[role="button"],[role="menu"]'
+
+export function PullRequestCard({
+  pr,
+  login,
+  review,
+  outcome,
+  compact,
+  selected,
+  onSelect,
+  onSettled,
+  onReady,
+}: {
+  pr: OpenPullRequest
+  login: string
+  review: ReactNode
+  // Set once the PR has left GitHub's open list. The card keeps its place
+  // until the next refresh so the rows below it never jump.
+  outcome?: PullRequestOutcome
+  // Rail form: title plus the one thing blocking the merge, and no controls —
+  // those live in the preview the row opens.
+  compact?: boolean
+  selected?: boolean
+  onSelect: () => void
+  onSettled: (outcome: PullRequestOutcome | undefined) => void
+  onReady: () => void
+}) {
+  const contentId = useId()
+  if (compact) {
+    return (
+      <Button
+        color="secondary"
+        variant="plain"
+        size="sm"
+        aria-labelledby={contentId}
+        type="button"
+        aria-current={selected ? "true" : undefined}
+        onClick={onSelect}
+        className={cn(
+          "h-auto justify-start whitespace-normal",
+          "w-full gap-space-3 py-space-2 pr-space-2 pl-space-2 text-left",
+          selected
+            ? "bg-selected hover:bg-selected dark:hover:bg-selected"
+            : "hover:bg-surface-level-1-hover",
+          outcome && "opacity-60"
+        )}
+      >
+        <span
+          aria-hidden="true"
+          className={cn(
+            "mt-0.5 w-0.5 shrink-0 self-stretch rounded-full",
+            selected ? "bg-brand" : "bg-transparent"
+          )}
+        />
+        <span id={contentId} className="min-w-0 flex-1">
+          <span className="flex items-baseline gap-space-2 text-xs text-secondary">
+            <span className="min-w-0 truncate">{pr.repo}</span>
+            <span className="font-mono tabular-nums">#{pr.number}</span>
+          </span>
+          <span className="mt-0.5 block truncate text-xs font-medium text-primary">
+            {pr.title}
+          </span>
+          {outcome ? (
+            <span className="mt-0.5 block truncate text-xs text-secondary">
+              {outcomeLabels[outcome]}
+            </span>
+          ) : (
+            <>
+              <span className="mt-space-1 flex flex-wrap gap-space-1">
+                <AssignmentBadge pr={pr} />
+                {statusLabels(pr).map((status) => (
+                  <StatusPill key={status} status={status} />
+                ))}
+              </span>
+              {statusDetail(pr) && (
+                <span className="mt-0.5 block truncate text-xs text-secondary">
+                  {statusDetail(pr)}
+                </span>
+              )}
+            </>
+          )}
+        </span>
+      </Button>
+    )
+  }
+
+  // Anywhere on the card opens the preview, but the card is full of its own
+  // controls, and a click that lands on one of those means that control. The
+  // title stays a real button so the card is reachable without a pointer.
+  const openFromCard = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.target instanceof Element && event.target.closest(interactive))
+      return
+    if (window.getSelection()?.toString()) return
+    onSelect()
+  }
+
+  return (
+    <div
+      onClick={openFromCard}
+      className={cn(
+        "cursor-pointer rounded-lg border bg-surface-level-1 p-space-4 transition-colors",
+        selected
+          ? "border-brand"
+          : "border-default hover:bg-surface-level-1-hover",
+        outcome && "opacity-60"
+      )}
+    >
+      <div className="min-w-0 space-y-space-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-x-space-2 gap-y-space-2 text-xs text-secondary">
+            <span>
+              {pr.repo}{" "}
+              <span className="font-mono tabular-nums">#{pr.number}</span>
+            </span>
+            <AssignmentBadge pr={pr} />
+            {statusLabels(pr).map((status) => (
+              <StatusPill key={status} status={status} />
+            ))}
+          </div>
+          <Text
+            as="h3"
+            variant="h5"
+            weight="medium"
+            className="mt-space-1 break-words"
+          >
+            <Button
+              color="secondary"
+              variant="plain"
+              size="xs"
+              aria-label={pr.title}
+              type="button"
+              className="block h-auto max-w-full border-0 px-0 text-left whitespace-normal hover:underline"
+              onClick={onSelect}
+            >
+              <Text as="span" variant="h5" weight="medium" color="primary">
+                {pr.title}
+              </Text>
+            </Button>
+          </Text>
+        </div>
+        <div className="flex flex-wrap items-center gap-x-space-5 gap-y-space-2 text-xs text-secondary">
+          <Diffstat pr={pr} />
+          {review}
+          <span>
+            Updated{" "}
+            <time
+              dateTime={pr.updatedAt ?? undefined}
+              title={pr.updatedAt ?? undefined}
+            >
+              {dateLabel(pr.updatedAt)}
+            </time>
+          </span>
+          <span>
+            Opened{" "}
+            <time
+              dateTime={pr.createdAt ?? undefined}
+              title={pr.createdAt ?? undefined}
+            >
+              {dateLabel(pr.createdAt)}
+            </time>
+          </span>
+          <UnresolvedConversations pr={pr} />
+          {!pr.statusAvailable && !pr.detailsLoading && (
+            <span className="text-warning-secondary">
+              Live PR status unavailable
+            </span>
+          )}
+        </div>
+        <PullRequestChecks pr={pr} />
+        <PullRequestActions
+          pr={pr}
+          login={login}
+          outcome={outcome}
+          onSettled={onSettled}
+          onReady={onReady}
+        />
+      </div>
+    </div>
+  )
+}

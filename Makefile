@@ -1,4 +1,4 @@
-.PHONY: all format format-check lint typecheck test tests integration_tests help run dev dev-ui tunnel web build-dashboard desktop install-desktop install-checkout swagger platform-api platform-webhook platform-harness platform-deps platform-migrate platform-up platform-down platform-build platform-logs platform-ps
+.PHONY: all format format-check lint typecheck mda-typecheck mda-test test tests integration_tests help run dev dev-mda mda-cli dev-ui postgres migration tunnel web build-dashboard desktop install-desktop install-checkout swagger cli hooks platform-api platform-webhook platform-harness platform-deps platform-migrate platform-up platform-down platform-build platform-logs platform-ps
 
 # Default target executed when no arguments are given to make.
 all: help
@@ -7,8 +7,39 @@ all: help
 # DEVELOPMENT
 ######################
 
-dev:
+# Local PostgreSQL. An explicit POSTGRES_URI (shell environment, or the gitignored .env
+# that langgraph dev loads) is left alone; without one, `dev` starts a postgres:16 container
+# on loopback port 5433 with a named volume, so `docker rm` does not lose local data.
+ifeq ($(origin POSTGRES_URI),undefined)
+POSTGRES_URI := $(shell sh scripts/dotenv_value.sh .env POSTGRES_URI)
+endif
+dev: $(if $(POSTGRES_URI),,postgres)
+	@if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:2024 -sTCP:LISTEN >/dev/null 2>&1; then \
+		echo 'Port 2024 is already in use (a stale container or another backend?):' >&2; \
+		lsof -nP -iTCP:2024 -sTCP:LISTEN >&2; exit 1; fi
 	uv run langgraph dev --no-browser --port 2024 --n-jobs-per-worker 10
+
+# The Managed Deep Agents runtime `make dev` sends every agent run to (mda/README.md).
+dev-mda: mda-cli
+	cd mda && uv run --locked mda dev --port 2025 --no-browser
+
+# The `mda` CLI, built from the vendored SDK (vendor/README.md) into the runtime
+# package mda/ installs, where its `mda` command runs it from. Rebuilt only when its
+# sources change: the vendored build script, missing its .git, always reruns.
+MDA_SDK := vendor/managed-deepagents-sdk
+MDA_CLI := $(MDA_SDK)/packages/pypi/src/managed_deepagents/_binaries/mda
+mda-cli: $(MDA_CLI)
+$(MDA_CLI): $(MDA_SDK)/Cargo.toml $(MDA_SDK)/Cargo.lock $(MDA_SDK)/UPSTREAM $(shell find $(MDA_SDK)/crates -type f)
+	MDA_GIT_SHA=$$(cut -d' ' -f1 $(MDA_SDK)/UPSTREAM) MDA_GIT_DATE=$$(cut -d' ' -f2 $(MDA_SDK)/UPSTREAM) \
+		cargo build --locked --release --manifest-path $(MDA_SDK)/Cargo.toml
+	mkdir -p $(@D)
+	cp $(MDA_SDK)/target/release/mda $@
+
+postgres:
+	docker compose up -d --wait postgres
+
+migration:
+	uv run python scripts/new_migration.py "$(m)"
 
 # UI development in one terminal: Vite (`make web`) and the backend fronting it, so
 # http://localhost:2024 hot-reloads without a build or any cross-origin setup. The two
@@ -20,25 +51,27 @@ web:
 	pnpm run dev
 
 # Public URL for GitHub and Slack webhooks while developing (docs/DEVELOPMENT.md, step 3).
-# ngrok's free plan includes one static domain: NGROK_DOMAIN=<name>.ngrok-free.dev. The policy
-# file exposes only /webhooks/*; langgraph dev has no auth, so the rest of the API stays local.
+# ngrok's free plan includes one static domain: NGROK_DOMAIN=<name>.ngrok-free.dev. A pasted
+# https:// URL with a trailing slash also works. The policy file exposes only /webhooks/*;
+# langgraph dev has no auth, so the rest of the API stays local.
 # Another tunnel is fine only if it enforces the same /webhooks/* allowlist (or a filtering proxy does).
 tunnel:
 	@test -n "$(NGROK_DOMAIN)" || { echo 'Set NGROK_DOMAIN=<your-domain>.ngrok-free.dev (claim it under Domains at https://dashboard.ngrok.com)' >&2; exit 1; }
-	ngrok http 2024 --url https://$(NGROK_DOMAIN) --traffic-policy-file examples/ngrok/webhooks-only.yml
+	$(eval DOMAIN := $(shell DOMAIN="$(NGROK_DOMAIN)"; DOMAIN="$${DOMAIN#https://}"; DOMAIN="$${DOMAIN#http://}"; echo "$${DOMAIN%/}"))
+	ngrok http 2024 --url https://$(DOMAIN) --traffic-policy-file examples/ngrok/webhooks-only.yml
 
 # Build the dashboard into ui/.output/public; `make dev` then serves it at /.
 # With a LangGraph http.mount_prefix, pass DASHBOARD_BASE_PATH=<prefix>/ so the
 # build's asset URLs and router match where the server mounts it.
 build-dashboard:
-	pnpm install --frozen-lockfile --filter alephat-dashboard...
-	pnpm --filter alephat-dashboard run build
+	pnpm install --frozen-lockfile --filter open-swe-dashboard...
+	pnpm --filter open-swe-dashboard run build
 
 run:
-	uv run uvicorn agent.webapp:app --reload --port 8000
+	uv run uvicorn openswe.webapp:app --reload --port 8000
 
 swagger:
-	uv run python -c 'import json; from pathlib import Path; from agent.webapp import app; Path("swagger.json").write_text(json.dumps(app.openapi(), indent=2, sort_keys=True) + "\n", encoding="utf-8")'
+	uv run python -c 'import json; from pathlib import Path; from openswe.webapp import app; Path("swagger.json").write_text(json.dumps(app.openapi(), indent=2, sort_keys=True) + "\n", encoding="utf-8")'
 
 desktop:
 	pnpm run dev:desktop
@@ -102,15 +135,27 @@ platform-harness:
 install:
 	uv sync --extra dev
 
+hooks:
+	prek install
+
+# Single-file `oswe` binary. Bun compiles its own runtime into the output,
+# so the result runs on any machine without Node or Bun installed.
+cli:
+	@command -v bun >/dev/null 2>&1 || { echo 'bun is required: https://bun.com/docs/installation' >&2; exit 1; }
+	pnpm install --frozen-lockfile --filter open-swe-cli --filter open-swe
+	pnpm --filter open-swe-cli run build
+	@echo "Built $(CURDIR)/cli/dist/oswe"
+
 ######################
 # TESTING
 ######################
 
 TEST_FILE ?= tests/
+PYTEST_ARGS ?=
 
 test tests:
 	@if [ -d "$(TEST_FILE)" ] || [ -f "$(TEST_FILE)" ]; then \
-		uv run pytest -vvv $(TEST_FILE); \
+		uv run pytest -vvv $(PYTEST_ARGS) $(TEST_FILE); \
 	else \
 		echo "Skipping tests: path not found: $(TEST_FILE)"; \
 	fi
@@ -140,7 +185,16 @@ format-check:
 	uv run ruff format $(PYTHON_FILES) --check
 
 typecheck:
-	uv run ty check agent alephat_platform tests
+	uv run ty check openswe alephat_platform packages tests
+	uv run ty check --python-version 3.8 openswe/sandbox_scripts/*.py mda/rt/sandbox_scripts/*.py
+
+# mda/ is its own project: checked and tested against its own environment alone,
+# so an import reaching for the backend (`openswe`) or a database driver fails here.
+mda-typecheck:
+	cd mda && uv sync --locked --group test && uv run --with ty==0.0.84 ty check --python .venv
+
+mda-test:
+	cd mda && uv run --locked --group test pytest $(PYTEST_ARGS)
 
 ######################
 # HELP
@@ -156,19 +210,27 @@ help:
 	@echo 'platform-api                 - host API on :8080 (needs platform-deps)'
 	@echo 'platform-webhook             - host webhooks on :8081'
 	@echo 'platform-harness             - host harness worker (picks up NATS jobs)'
-	@echo 'dev                          - run LangGraph dev server'
+	@echo 'dev                          - run LangGraph dev server (starts the local PostgreSQL container unless POSTGRES_URI is set)'
+	@echo 'dev-mda                      - Managed Deep Agents dev server on :2025, where every agent run goes'
+	@echo 'mda-cli                      - build the mda CLI from the vendored SDK (needs cargo)'
 	@echo 'dev-ui                       - Vite dev server plus the LangGraph dev server fronting it (UI hot reload on :2024)'
+	@echo 'postgres                     - start the local PostgreSQL container on 127.0.0.1:5433'
+	@echo 'migration m="..."            - create the next database migration'
 	@echo 'web                          - run the dashboard web server'
 	@echo 'tunnel                       - ngrok tunnel to :2024 on NGROK_DOMAIN, webhooks only (any other tunnel works too)'
-	@echo 'run                          - run webhook server'
+	@echo 'run                          - run the FastAPI app alone on :8000'
 	@echo 'swagger                      - regenerate swagger.json from the backend routes'
 	@echo 'desktop                      - run the Electron desktop app (backend must be running)'
 	@echo 'install-desktop              - install or update Alephat Desktop on macOS'
 	@echo 'install-checkout             - install the current checkout of Alephat Desktop on macOS'
 	@echo 'install                      - install dependencies (incl. dev extras)'
+	@echo 'cli                          - build the oswe CLI binary into cli/dist/oswe'
+	@echo 'hooks                        - install the prek pre-commit hook'
 	@echo 'format                       - run code formatters'
 	@echo 'lint                         - run linters'
-	@echo 'typecheck                    - run ty on agent/ and tests/'
+	@echo 'typecheck                    - run ty on openswe/ and tests/'
+	@echo 'mda-typecheck                - type-check mda/ against its own environment'
+	@echo 'mda-test                     - run mda/ tests in its own environment'
 	@echo 'test                         - run unit tests'
 	@echo 'integration_tests            - run integration tests'
 	@echo '----'

@@ -4,7 +4,7 @@ import {
   extractTerminalLinks,
 } from "../terminalLinks"
 import { installGhosttyStyles } from "./styles"
-import { GhosttyTerminalCore } from "./core"
+import { GhosttyTerminalCore, ghosttyColorsEqual } from "./core"
 import {
   measureGhosttyCell,
   renderGhosttySnapshot,
@@ -374,13 +374,6 @@ export function terminalLinkAtPositionWithRange(
   return null
 }
 
-export function terminalLinkAtColumn(
-  row: GhosttySnapshot["rowData"][number],
-  column: number
-) {
-  return terminalLinkAtPosition([row], 0, column)
-}
-
 export function isTerminalCopyShortcut(
   event: Pick<KeyboardEvent, "ctrlKey" | "key" | "metaKey" | "shiftKey">,
   platform = navigator.platform
@@ -648,12 +641,12 @@ export class GhosttyTerminalSurface {
     options: GhosttyTerminalSurfaceOptions
   ): Promise<GhosttyTerminalSurface> {
     const canvas = document.createElement("canvas")
-    canvas.className = "alephat-ghostty-canvas"
+    canvas.className = "open-swe-ghostty-canvas"
     canvas.style.cssText = "display:block;width:100%;height:100%;"
     canvas.setAttribute("aria-hidden", "true")
 
     const input = document.createElement("textarea")
-    input.className = "alephat-ghostty-input"
+    input.className = "open-swe-ghostty-input"
     input.setAttribute("aria-label", "Terminal input")
     input.autocapitalize = "off"
     input.autocomplete = "off"
@@ -662,14 +655,14 @@ export class GhosttyTerminalSurface {
       "position:absolute;left:4px;top:4px;width:1px;height:1px;opacity:0;padding:0;border:0;resize:none;pointer-events:none;"
 
     const scrollbar = document.createElement("div")
-    scrollbar.className = "alephat-ghostty-scrollbar"
+    scrollbar.className = "open-swe-ghostty-scrollbar"
     scrollbar.setAttribute("role", "scrollbar")
     scrollbar.setAttribute("aria-label", "Terminal scrollback")
     scrollbar.setAttribute("aria-orientation", "vertical")
     scrollbar.tabIndex = 0
     scrollbar.hidden = true
     const scrollbarThumb = document.createElement("div")
-    scrollbarThumb.className = "alephat-ghostty-scrollbar-thumb"
+    scrollbarThumb.className = "open-swe-ghostty-scrollbar-thumb"
     scrollbar.append(scrollbarThumb)
     mount.replaceChildren(canvas, input, scrollbar)
     installGhosttyStyles(mount)
@@ -1324,6 +1317,7 @@ export class GhosttyTerminalSurface {
     if (this.selectionScrollTimer !== null) return
     // Dragging past the edge scrolls the viewport and keeps extending the
     // selection into the newly revealed rows, like xterm's drag scroller.
+    // oxlint-disable-next-line invalidations/no-polling -- a scroll timer, not a fetch
     this.selectionScrollTimer = window.setInterval(() => {
       if (this.disposed || this.selectionScrollDelta === 0) return
       this.scrollViewport(this.selectionScrollDelta)
@@ -1666,7 +1660,14 @@ export class GhosttyTerminalSurface {
       window.cancelAnimationFrame(this.frame)
       this.frame = 0
     }
+    const previousBackground = this.snapshot?.background
     this.snapshot = this.core.snapshot()
+    if (
+      previousBackground === undefined ||
+      !ghosttyColorsEqual(previousBackground, this.snapshot.background)
+    ) {
+      this.forceFullRender = true
+    }
     // A cursor that is not blinking right now must be drawn, never caught in an
     // off phase left behind by a blink that has since been turned off.
     if (!this.blinkEnabled()) this.cursorOn = true

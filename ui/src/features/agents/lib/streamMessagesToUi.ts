@@ -1,7 +1,9 @@
+import { maybeDiffFromArgs, outputIframeDisplay } from "./toolDisplay"
 import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { messageArrivalTimestamp } from "./messageTimestamps"
 import {
   collectStructuredEntities,
+  isSilentSender,
   parseStructuredInput,
 } from "./structuredInputMessages"
 import { humanizeToolName } from "./toolNames"
@@ -9,17 +11,11 @@ import type { BaseMessage, ContentBlock } from "@langchain/core/messages"
 import type { AssembledToolCall } from "@langchain/react"
 
 import type { StructuredEntity } from "./structuredInputMessages"
-import type {
-  Chunk,
-  DiffData,
-  Message,
-  OutputIframeDisplay,
-  ToolExecutionChunk,
-} from "./types"
+import type { Chunk, ImageChunk, Message, ToolExecutionChunk } from "./types"
 
 function senderNote(entity: StructuredEntity | undefined): string | undefined {
-  if (entity?.senderType === "bot") return "bot"
-  if (entity?.openSweAccount === "unlinked") return "not an Alephat user"
+  if (entity?.senderType === "bot") return undefined
+  if (entity?.openSweAccount === "unlinked") return "not an Open SWE user"
   return undefined
 }
 
@@ -35,14 +31,19 @@ const EDIT_TOOLS = new Set([
 const EXECUTE_TOOLS = new Set(["execute", "bash", "shell", "run_terminal_cmd"])
 const SEARCH_TOOLS = new Set(["glob", "grep", "web_search", "search"])
 const FETCH_TOOLS = new Set(["fetch", "fetch_url", "http_request"])
-const INTERNAL_TOOLS = new Set(["confirming_completion", "no_op"])
+/** Bookkeeping calls the transcript never shows. */
+export const INTERNAL_TOOLS = new Set(["confirming_completion", "no_op"])
 
 type ToolKind = ToolExecutionChunk["toolKind"]
 
-function toolKind(name: string): ToolKind {
+export function toolKind(name: string): ToolKind {
   const lowered = name.toLowerCase()
+  if (lowered.startsWith("mcp_")) return "other"
   if (lowered === "task") return "task"
-  if (lowered === "slack_thread_reply") return "slack"
+  if (lowered === "eval") return "code"
+  if (lowered === "read_only_sql") return "sql"
+  if (lowered === "slack_reply") return "slack"
+  if (lowered === "connect_managed_tools") return "managed-tools"
   if (lowered === "linear_comment") return "linear"
   if (
     EDIT_TOOLS.has(lowered) ||
@@ -58,7 +59,8 @@ function toolKind(name: string): ToolKind {
   return "other"
 }
 
-function toolTitle(name: string, args: Record<string, unknown>): string {
+export function toolTitle(name: string, args: Record<string, unknown>): string {
+  if (name.toLowerCase().startsWith("mcp_")) return humanizeToolName(name)
   const path = args.path ?? args.file_path ?? args.target_file
   if (typeof path === "string" && path.trim()) return `${name} ${path.trim()}`
   const command = args.command
@@ -84,36 +86,12 @@ function parseToolArgs(raw: unknown): Record<string, unknown> {
   return {}
 }
 
-function maybeDiffFromArgs(args: Record<string, unknown>): DiffData | null {
-  const path = args.path ?? args.file_path ?? args.target_file
-  if (typeof path !== "string" || !path.trim()) return null
-  const oldContent = args.old_string ?? args.original_content
-  const newContent = args.new_string ?? args.content ?? args.new_content
-  if (typeof newContent !== "string") return null
-  const original = typeof oldContent === "string" ? oldContent : null
-  return {
-    originalContent: original,
-    newContent,
-    filePath: path.trim(),
-    isNewFile: original === null,
-    isBinary: false,
-    isTruncated: false,
-    totalLines: Math.max(newContent.split("\n").length, 1),
-  }
-}
-
-function mergeTextChunks(chunks: Array<Chunk>): Array<Chunk> {
-  const textIndices = chunks.flatMap((c, i) => (c.kind === "text" ? [i] : []))
-  if (textIndices.length <= 1) return chunks
-  const lastText = textIndices[textIndices.length - 1]
-  return chunks.filter((c, i) => c.kind !== "text" || i === lastText)
-}
-
 type AgentTurn = {
   id: string
   author: Message["author"]
   timestamp: string
   turnKey?: string
+  invocationIds: Array<string>
   startedAt: string
   timestampIsFallback?: boolean
   chunks: Array<Chunk>
@@ -176,39 +154,45 @@ function reasoningText(raw: BaseMessage): string {
   return text.trim()
 }
 
-function imageChunks(content: unknown): Array<Chunk> {
+type InlineImage = { base64?: string; mimeType?: string }
+
+function dataUrlImage(url: unknown): InlineImage {
+  const match =
+    typeof url === "string"
+      ? /^data:(image\/[^;]+);base64,(.+)$/s.exec(url)
+      : null
+  return match ? { mimeType: match[1], base64: match[2] } : {}
+}
+
+/** The bytes an `image` or `image_url` content block carries inline, if any. */
+function inlineImage(block: Record<string, unknown>): InlineImage {
+  if (block.type === "image") {
+    const data = block.data ?? block.base64
+    const mimeType = block.mime_type ?? block.mimeType
+    if (typeof data === "string" && typeof mimeType === "string")
+      return { base64: data, mimeType }
+    // The standard block's data-URL form, which MDA's browser screenshots use.
+    return dataUrlImage(block.url)
+  }
+  if (block.type === "image_url") {
+    const imageUrl = block.image_url
+    return dataUrlImage(
+      imageUrl && typeof imageUrl === "object"
+        ? (imageUrl as Record<string, unknown>).url
+        : undefined
+    )
+  }
+  return {}
+}
+
+function imageChunks(content: unknown): Array<ImageChunk> {
   if (!Array.isArray(content)) return []
 
-  const chunks: Array<Chunk> = []
+  const chunks: Array<ImageChunk> = []
   for (const item of content) {
     if (!item || typeof item !== "object" || Array.isArray(item)) continue
     const block = item as Record<string, unknown>
-    const type = block.type
-    let base64: string | undefined
-    let mimeType: string | undefined
-
-    if (type === "image") {
-      const data = block.data ?? block.base64
-      const mime = block.mime_type ?? block.mimeType
-      if (typeof data === "string" && typeof mime === "string") {
-        base64 = data
-        mimeType = mime
-      }
-    } else if (type === "image_url") {
-      const imageUrl = block.image_url
-      const url =
-        imageUrl && typeof imageUrl === "object"
-          ? (imageUrl as Record<string, unknown>).url
-          : undefined
-      if (typeof url === "string") {
-        const match = /^data:(image\/[^;]+);base64,(.+)$/s.exec(url)
-        if (match) {
-          mimeType = match[1]
-          base64 = match[2]
-        }
-      }
-    }
-
+    const { base64, mimeType } = inlineImage(block)
     if (base64 && mimeType) {
       const fileName = block.fileName ?? block.file_name
       chunks.push({
@@ -258,51 +242,6 @@ function toolOutputText(
   return text || undefined
 }
 
-function isHttpUrl(value: unknown): value is string {
-  if (typeof value !== "string") return false
-  try {
-    const url = new URL(value)
-    return url.protocol === "https:" || url.protocol === "http:"
-  } catch {
-    return false
-  }
-}
-
-function outputIframeDisplay(
-  toolMessage: ToolMessage | undefined
-): OutputIframeDisplay | undefined {
-  const artifact = toolMessage?.artifact
-  if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) {
-    return undefined
-  }
-  const value = artifact as Record<string, unknown>
-  if (
-    value.type !== "output_iframe" ||
-    typeof value.title !== "string" ||
-    typeof value.filename !== "string"
-  ) {
-    return undefined
-  }
-  if (isHttpUrl(value.preview_url) && isHttpUrl(value.download_url)) {
-    return {
-      type: "output_iframe",
-      previewUrl: value.preview_url,
-      downloadUrl: value.download_url,
-      title: value.title,
-      filename: value.filename,
-    }
-  }
-  if (typeof value.html === "string") {
-    return {
-      type: "output_iframe",
-      html: value.html,
-      title: value.title,
-      filename: value.filename,
-    }
-  }
-  return undefined
-}
-
 /**
  * Convert the SDK's live projections into the dashboard chunk model so the
  * transcript streams (and hydrates) directly from the SDK instead of a
@@ -346,7 +285,7 @@ export function streamMessagesToUi(
 
   const flushAgentTurn = () => {
     if (!agentTurn) return
-    uiMessages.push({ ...agentTurn, chunks: mergeTextChunks(agentTurn.chunks) })
+    uiMessages.push(agentTurn)
     agentTurn = null
   }
 
@@ -354,7 +293,8 @@ export function streamMessagesToUi(
     msgId: string,
     timestamp: string,
     timestampIsFallback: boolean,
-    chunks: Array<Chunk>
+    chunks: Array<Chunk>,
+    invocationId?: string
   ) => {
     if (!agentTurn) {
       agentTurn = {
@@ -362,12 +302,15 @@ export function streamMessagesToUi(
         author: "agent",
         timestamp,
         turnKey,
+        invocationIds: invocationId ? [invocationId] : [],
         startedAt: timestamp,
         timestampIsFallback,
         chunks: [...chunks],
       }
     } else {
       agentTurn.timestamp = timestamp
+      if (invocationId && !agentTurn.invocationIds.includes(invocationId))
+        agentTurn.invocationIds.push(invocationId)
       agentTurn.timestampIsFallback =
         agentTurn.timestampIsFallback || timestampIsFallback
       agentTurn.chunks.push(...chunks)
@@ -384,26 +327,25 @@ export function streamMessagesToUi(
       flushAgentTurn()
       turnKey = typeof raw.id === "string" ? raw.id : undefined
       const content = (raw as unknown as { content?: unknown }).content
-      const chunks = imageChunks(content)
+      const chunks: Array<Chunk> = imageChunks(content)
       const parsed = parseStructuredInput(raw.text, structuredEntities)
       if (parsed.type === "entity") return
-      if (
-        parsed.type === "message" &&
-        parsed.sender === "system:sender-context"
-      )
-        return
+      if (parsed.type === "message" && isSilentSender(parsed.sender)) return
       const entity =
         parsed.type === "message"
           ? structuredEntities.get(parsed.sender)
           : undefined
       // Our own replies reach the transcript twice: once forwarded as thread
-      // context, once as the `slack_thread_reply` call that sent them.
+      // context, once as the `slack_reply` call that sent them.
       if (entity?.senderType === "self") return
-      const text = parsed.content
+      const taskEvent = parsed.type === "message" ? parsed.taskEvent : undefined
+      const text = taskEvent?.content ?? parsed.content
+      const replies = parsed.type === "message" ? parsed.replies : undefined
       if (text.trim()) chunks.push({ kind: "text", text })
-      if (!chunks.length) return
+      if (!chunks.length && !taskEvent && !replies) return
       uiMessages.push({
         id: msgId,
+        ...(taskEvent ? { taskEvent } : {}),
         author:
           parsed.type === "message" && parsed.senderKind === "system"
             ? "system"
@@ -416,10 +358,12 @@ export function streamMessagesToUi(
               structuredSenderId: parsed.sender,
               structuredSenderKind: parsed.senderKind,
               structuredSurface: parsed.surface,
+              ...(replies ? { replies } : {}),
               structuredSenderName:
                 entity?.displayName ??
                 (entity?.handle ? `@${entity.handle}` : undefined),
               structuredSenderNote: senderNote(entity),
+              structuredSenderIsBot: entity?.senderType === "bot",
             }
           : {}),
       })
@@ -427,12 +371,19 @@ export function streamMessagesToUi(
     }
 
     if (AIMessage.isInstance(raw)) {
+      if (raw.response_metadata?.open_swe_superseded === true) return
       if (raw.additional_kwargs.lc_source === "summarization") return
       const chunks: Array<Chunk> = []
       const reasoning = reasoningText(raw)
       if (reasoning) chunks.push({ kind: "reasoning", text: reasoning })
       const text = raw.text.trim()
-      if (text) chunks.push({ kind: "text", text })
+      if (text) {
+        chunks.push({
+          kind: "text",
+          text,
+          ...(timestampIsFallback ? {} : { timestamp }),
+        })
+      }
 
       for (const toolCall of raw.tool_calls ?? []) {
         const name = toolCall.name || "tool"
@@ -444,6 +395,7 @@ export function streamMessagesToUi(
         const chunk: ToolExecutionChunk = {
           kind: "tool-execution",
           toolCallId,
+          toolName: name,
           timestamp: messageArrivalTimestamp(toolCallId),
           title: toolTitle(name, args),
           toolKind: toolKind(name),
@@ -452,15 +404,24 @@ export function streamMessagesToUi(
         }
         const output = toolOutputText(assembled, toolMessage)
         if (output) chunk.output = output
-        const display = outputIframeDisplay(toolMessage)
+        const display = outputIframeDisplay(toolMessage?.artifact)
         if (display) chunk.display = display
+        const images = imageChunks(toolMessage?.content)
+        if (images.length) chunk.images = images
         const diffData = maybeDiffFromArgs(args)
         if (diffData) chunk.diffData = diffData
         chunks.push(chunk)
       }
 
       if (chunks.length) {
-        appendAgentChunks(msgId, timestamp, timestampIsFallback, chunks)
+        const invocationId = raw.response_metadata?.open_swe_invocation_id
+        appendAgentChunks(
+          msgId,
+          timestamp,
+          timestampIsFallback,
+          chunks,
+          typeof invocationId === "string" ? invocationId : undefined
+        )
       }
     }
 

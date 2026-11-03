@@ -1,10 +1,23 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from langchain_core.messages import AIMessage
 
-from agent import completion
+from openswe import completion
+from openswe.message_queue import QueuedMessage
+from openswe.review import run_failure
+from openswe.slack import thinking as slack_thinking
+from openswe.tasks import events, store
+from openswe.threads import runs
+from tests.conftest import MemoryEventClaims
+
+
+@pytest.fixture(autouse=True)
+def _failure_reply_claims(memory_event_claims: MemoryEventClaims) -> MemoryEventClaims:
+    return memory_event_claims
 
 
 class _FakeThreads:
@@ -31,106 +44,26 @@ def _slack_metadata() -> dict[str, Any]:
     }
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("status", ["error", "timeout", "interrupted"])
-async def test_terminal_status_finalizes_agent_usage(
-    monkeypatch: pytest.MonkeyPatch, status: str
-) -> None:
-    client = _FakeClient({"source": "schedule"})
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-    finalize = AsyncMock()
-    monkeypatch.setattr(completion, "finalize_agent_invocation_usage", finalize)
+async def test_failed_run_offers_a_requester_scoped_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
 
-    await completion.handle_run_completion(
-        {
-            "thread_id": "t1",
-            "run_id": "run-1",
-            "status": status,
-            "metadata": {"prepare_run_id": "prepare-1"},
-            "values": {
-                "messages": [
-                    {
-                        "type": "ai",
-                        "content": "partial work",
-                        "usage_metadata": {
-                            "input_tokens": 100,
-                            "output_tokens": 10,
-                            "total_tokens": 110,
-                        },
-                    }
-                ]
-            },
-        }
-    )
+    from openswe.slack.retry import SlackRetry
 
-    finalize.assert_awaited_once()
-    assert finalize.await_args.kwargs["invocation_id"] == "prepare-1"
-    assert finalize.await_args.kwargs["thread_id"] == "t1"
-    assert isinstance(finalize.await_args.kwargs["state"]["messages"][0], AIMessage)
-
-
-@pytest.mark.asyncio
-async def test_error_status_posts_slack_failure_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _FakeClient(_slack_metadata())
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "retry-test-secret-at-least-32-bytes")
     reply = AsyncMock(return_value=True)
     monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
-    monkeypatch.setattr(
-        completion,
-        "get_langsmith_trace_url",
-        AsyncMock(return_value="https://smith.example/t1"),
-    )
-
-    result = await completion.handle_run_completion(
-        {"thread_id": "t1", "run_id": "run-1", "status": "error"}
-    )
-
-    assert result["status"] == "ok"
-    reply.assert_awaited_once()
-    await_args = reply.await_args
-    assert await_args is not None
-    args = await_args.args
-    assert args[0] == "C1"
-    assert args[1] == "123.45"
-    assert "View the error in <https://smith.example/t1|LangSmith>" in args[2]
-    assert await_args.kwargs == {"agent_thread_id": "t1"}
-    assert client.threads.updates == [
-        {"failure_reply_posted_run_id": "run-1", "failure_reply_posted_run_ids": ["run-1"]}
-    ]
-
-
-@pytest.mark.asyncio
-async def test_reviewer_error_settles_tracked_check(monkeypatch: pytest.MonkeyPatch) -> None:
-    metadata = {
-        "kind": "reviewer",
-        "review_check_run_id": 42,
-        "pr": {"owner": "acme", "name": "widgets"},
-        "source": "schedule",
-    }
-    client = _FakeClient(metadata)
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-    monkeypatch.setattr(
-        completion, "get_github_app_installation_token", AsyncMock(return_value="token")
-    )
-    settle = AsyncMock()
-    monkeypatch.setattr(completion, "settle_review_check_run", settle)
-
-    result = await completion.handle_run_completion(
-        {"thread_id": "t1", "run_id": "run-1", "status": "error"}
-    )
-
-    assert result["status"] == "ignored"
-    settle.assert_awaited_once_with(
-        thread_id="t1",
-        owner="acme",
-        repo="widgets",
-        token="token",
-        conclusion="neutral",
-        title="Review did not complete",
-        summary=(
-            "The Alephat review run ended without publishing a review. "
-            "Re-trigger the review by pushing a commit or re-requesting it."
-        ),
+    monkeypatch.setattr(completion, "get_langsmith_error_url", AsyncMock(return_value=None))
+    metadata = _slack_metadata()
+    metadata["source_context"]["slack_thread"]["triggering_user_id"] = "U1"
+    await completion._post_failure_reply("t1", metadata, "error", invocation_id="run-1")
+    assert reply.await_args is not None
+    blocks = reply.await_args.kwargs["blocks"]
+    notice = reply.await_args.kwargs["notice"]
+    assert blocks[0]["block_id"] == notice.block_id
+    assert notice.repeats({"blocks": blocks})
+    token = json.loads(blocks[1]["elements"][0]["value"])["response"]
+    assert SlackRetry.parse(token) == SlackRetry(
+        channel_id="C1", thread_ts="123.45", user_id="U1", nonce="run-1"
     )
 
 
@@ -144,7 +77,7 @@ async def test_reviewer_error_preserves_pending_check_result(
         "review_check_pending_result": {
             "conclusion": "success",
             "title": "Found 1 potential issue",
-            "summary": "Alephat surfaced 1 potential issue.",
+            "summary": "Open SWE surfaced 1 potential issue.",
         },
         "pr": {"owner": "acme", "name": "widgets"},
         "source": "schedule",
@@ -152,10 +85,10 @@ async def test_reviewer_error_preserves_pending_check_result(
     client = _FakeClient(metadata)
     monkeypatch.setattr(completion, "langgraph_client", lambda: client)
     monkeypatch.setattr(
-        completion, "get_github_app_installation_token", AsyncMock(return_value="token")
+        run_failure, "get_github_app_installation_token", AsyncMock(return_value="token")
     )
     settle = AsyncMock()
-    monkeypatch.setattr(completion, "settle_review_check_run", settle)
+    monkeypatch.setattr(run_failure, "settle_review_check_run", settle)
 
     await completion.handle_run_completion(
         {"thread_id": "t1", "run_id": "run-1", "status": "error"}
@@ -168,66 +101,8 @@ async def test_reviewer_error_preserves_pending_check_result(
         token="token",
         conclusion="success",
         title="Found 1 potential issue",
-        summary="Alephat surfaced 1 potential issue.",
+        summary="Open SWE surfaced 1 potential issue.",
     )
-
-
-@pytest.mark.asyncio
-async def test_ordinary_agent_error_does_not_settle_review_check(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    metadata = _slack_metadata()
-    metadata["review_check_run_id"] = 42
-    client = _FakeClient(metadata)
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-    monkeypatch.setattr(completion, "post_slack_thread_reply", AsyncMock(return_value=True))
-    token = AsyncMock(return_value="token")
-    settle = AsyncMock()
-    monkeypatch.setattr(completion, "get_github_app_installation_token", token)
-    monkeypatch.setattr(completion, "settle_review_check_run", settle)
-
-    await completion.handle_run_completion(
-        {"thread_id": "t1", "run_id": "run-1", "status": "error"}
-    )
-
-    token.assert_not_awaited()
-    settle.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "metadata, token",
-    [
-        ({"kind": "reviewer", "pr": {"owner": "acme", "name": "widgets"}}, "token"),
-        ({"kind": "reviewer", "review_check_run_id": 42}, "token"),
-        (
-            {
-                "kind": "reviewer",
-                "review_check_run_id": 42,
-                "pr": {"owner": "acme", "name": "widgets"},
-            },
-            None,
-        ),
-    ],
-)
-async def test_reviewer_cleanup_skips_missing_metadata_or_token(
-    monkeypatch: pytest.MonkeyPatch,
-    metadata: dict[str, Any],
-    token: str | None,
-) -> None:
-    client = _FakeClient(metadata | {"source": "schedule"})
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-    monkeypatch.setattr(
-        completion, "get_github_app_installation_token", AsyncMock(return_value=token)
-    )
-    settle = AsyncMock()
-    monkeypatch.setattr(completion, "settle_review_check_run", settle)
-
-    await completion.handle_run_completion(
-        {"thread_id": "t1", "run_id": "run-1", "status": "timeout"}
-    )
-
-    settle.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -242,10 +117,10 @@ async def test_reviewer_cleanup_failure_does_not_block_failure_reply(
     client = _FakeClient(metadata)
     monkeypatch.setattr(completion, "langgraph_client", lambda: client)
     monkeypatch.setattr(
-        completion, "get_github_app_installation_token", AsyncMock(return_value="token")
+        run_failure, "get_github_app_installation_token", AsyncMock(return_value="token")
     )
     monkeypatch.setattr(
-        completion, "settle_review_check_run", AsyncMock(side_effect=RuntimeError("boom"))
+        run_failure, "settle_review_check_run", AsyncMock(side_effect=RuntimeError("boom"))
     )
     reply = AsyncMock(return_value=True)
     monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
@@ -258,80 +133,212 @@ async def test_reviewer_cleanup_failure_does_not_block_failure_reply(
     reply.assert_awaited_once()
 
 
+class _FakePull:
+    def __init__(self) -> None:
+        self.comments: list[str] = []
+        self.edits: list[tuple[int, str]] = []
+
+    @asynccontextmanager
+    async def as_app(self, owner: str, repo: str, number: int) -> AsyncIterator[_FakePull]:
+        yield self
+
+    async def comment(self, body: str) -> dict[str, int]:
+        self.comments.append(body)
+        return {"id": 900 + len(self.comments)}
+
+    async def edit_comment(self, comment_id: int, body: str) -> dict[str, int]:
+        self.edits.append((comment_id, body))
+        return {"id": comment_id}
+
+
+class _MergingThreads(_FakeThreads):
+    async def update(self, *, thread_id: str, metadata: dict[str, Any]) -> None:
+        await super().update(thread_id=thread_id, metadata=metadata)
+        self._metadata.update(metadata)
+
+
 @pytest.mark.asyncio
-async def test_schedule_source_with_slack_context_posts_failure_reply(
+async def test_interrupted_reviewer_leaves_one_status_comment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    metadata = _slack_metadata()
-    metadata["source"] = "schedule"
+    metadata: dict[str, Any] = {
+        "kind": "reviewer",
+        "review_check_run_id": 42,
+        "head_sha": "abc",
+        "pr": {"owner": "acme", "name": "widgets", "number": 7},
+    }
     client = _FakeClient(metadata)
+    client.threads = _MergingThreads(metadata)
     monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-    reply = AsyncMock(return_value=True)
-    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
 
+    async def set_metadata(thread_id: str, *, extra: dict[str, Any]) -> None:
+        metadata.update(extra)
+
+    async def settle(**kwargs: object) -> None:
+        metadata["review_check_run_id"] = None
+
+    settled = AsyncMock(side_effect=settle)
+    monkeypatch.setattr(run_failure, "set_reviewer_thread_metadata", set_metadata)
+    monkeypatch.setattr(run_failure, "settle_review_check_run", settled)
+    monkeypatch.setattr(
+        run_failure, "get_github_app_installation_token", AsyncMock(return_value="token")
+    )
+    pull = _FakePull()
+    monkeypatch.setattr(run_failure.PullRequestClient, "as_app", pull.as_app)
+
+    def failed(run_id: str) -> dict[str, Any]:
+        return {
+            "thread_id": "t1",
+            "run_id": run_id,
+            "status": "error",
+            "error": {"error": "BackendTimeoutError", "message": "prepare failed (ReadTimeout)"},
+        }
+
+    first = await completion.handle_run_completion(failed("run-1"))
+    replay = await completion.handle_run_completion(failed("run-1"))
+    metadata["current_reviewer_run_id"] = "run-2"
+    await completion.handle_run_completion(failed("run-2"))
+
+    assert first["status"] == "ok"
+    assert replay["status"] == "ignored"
+    assert settled.await_args is not None
+    assert settled.await_args.kwargs["conclusion"] == "neutral"
+    assert len(pull.comments) == 1
+    assert "backend was interrupted" in pull.comments[0]
+    assert pull.edits == [(901, pull.comments[0])]
+    # publish_review deletes the tracked status comment once a later run succeeds.
+    assert metadata["status_comment_id"] == 901
+
+
+@pytest.mark.asyncio
+async def test_a_github_channel_run_still_reports_its_failure_on_the_issue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = {
+        "source": "github",
+        "repo": {"owner": "acme", "name": "api"},
+        "source_context": {"github_issue": {"id": "101", "number": 7, "title": "Bug"}},
+    }
+    monkeypatch.setattr(completion, "langgraph_client", lambda: _FakeClient(metadata))
+    monkeypatch.setattr(
+        completion, "get_github_app_installation_token", AsyncMock(return_value="token")
+    )
+    comment = AsyncMock(return_value=True)
+    monkeypatch.setattr(completion, "post_github_comment", comment)
+
+    # MDA's GitHub channel posts no failure notice, so Open SWE's reply stays.
     result = await completion.handle_run_completion(
-        {"thread_id": "t1", "run_id": "run-1", "status": "error"}
+        {"thread_id": "t1", "run_id": "run-1", "status": "error", "metadata": {"channel": "github"}}
     )
 
     assert result["status"] == "ok"
-    reply.assert_awaited_once()
+    repo, number, _text = comment.await_args.args
+    assert (repo, number) == ({"owner": "acme", "name": "api"}, 7)
 
 
 @pytest.mark.asyncio
-async def test_success_status_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _FakeClient(_slack_metadata())
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-    reply = AsyncMock(return_value=True)
-    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
-
-    result = await completion.handle_run_completion(
-        {"thread_id": "t1", "run_id": "run-1", "status": "success"}
-    )
-
-    assert result["status"] == "ignored"
-    reply.assert_not_called()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("feedback_error", [None, RuntimeError("Feedback unavailable")])
-async def test_success_status_schedules_session_cost_refresh(
-    monkeypatch: pytest.MonkeyPatch, feedback_error: Exception | None
+async def test_a_channel_run_leaves_its_failure_to_the_channel(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = _FakeClient(_slack_metadata())
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-    monkeypatch.setattr(
-        completion, "schedule_answer_feedback", AsyncMock(side_effect=feedback_error)
-    )
-    schedule = AsyncMock(return_value=True)
-    monkeypatch.setattr(completion, "schedule_session_cost_refresh", schedule)
+    metadata = {
+        "source": "linear",
+        "source_context": {"linear_issue": {"id": "issue-1", "title": "Bug"}},
+    }
+    monkeypatch.setattr(completion, "langgraph_client", lambda: _FakeClient(metadata))
+    notify = AsyncMock(return_value=True)
+    monkeypatch.setattr(completion, "post_linear_notification", notify)
+    task_messages, wakes = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(completion.TaskMessage, "deliver_to", task_messages)
+    monkeypatch.setattr(completion.EventSubscription, "deliver_to", wakes)
 
+    # MDA's Linear channel started this run; it reports the failure in the session.
     result = await completion.handle_run_completion(
-        {
-            "thread_id": "t1",
-            "run_id": "run-1",
-            "status": "success",
-            "metadata": {"prepare_run_id": "prepare-1"},
-        }
+        {"thread_id": "t1", "run_id": "run-1", "status": "error", "metadata": {"channel": "linear"}}
+    )
+    assert result == {"status": "ignored", "reason": "the channel reports the failure"}
+    notify.assert_not_awaited()
+    # What arrived for the thread during the run doesn't wait for some later run.
+    task_messages.assert_awaited_once_with("t1")
+    wakes.assert_awaited_once_with("t1", "enqueue")
+
+    # A run the backend started on the same thread still gets its notice.
+    await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-2", "status": "error"}
+    )
+    notify.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "metadata", "worker", "cancelled", "picks_up"),
+    [
+        ("success", {}, False, False, True),
+        ("error", {}, False, False, False),
+        ("success", {"kind": "follow_up_pickup"}, False, False, False),
+        ("success", {}, True, False, True),
+        ("success", {}, True, True, False),
+        # The backend starts the pickup on an MDA channel's thread through its ingress.
+        ("success", {"channel": "linear"}, False, False, True),
+        ("success", {"channel": "linear", "kind": "follow_up_pickup"}, False, False, False),
+    ],
+)
+async def test_leftover_follow_ups_get_one_pickup_run(
+    monkeypatch: pytest.MonkeyPatch,
+    registry_db: None,
+    status: str,
+    metadata: dict[str, object],
+    worker: bool,
+    cancelled: bool,
+    picks_up: bool,
+) -> None:
+    pending = {"text": "Check logout too", "source": "dashboard"}
+    await QueuedMessage.put("t1", pending)
+    client = SimpleNamespace(
+        threads=_FakeThreads({"source": "dashboard", "owner_login": "owner"}),
+        runs=SimpleNamespace(list=AsyncMock(return_value=[])),
+    )
+    dispatched: list[dict[str, object]] = []
+
+    async def dispatch(
+        thread_id: str, content: object, configurable: dict[str, object], **kwargs: object
+    ) -> dict[str, str]:
+        dispatched.append(
+            {
+                "thread_id": thread_id,
+                "input": kwargs["input"],
+                "metadata": kwargs["metadata"],
+                "strategy": kwargs["multitask_strategy"],
+            }
+        )
+        return {"run_id": "pickup-run"}
+
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    monkeypatch.setattr(events, "worker_finished", AsyncMock(return_value=worker))
+    monkeypatch.setattr(
+        store.TaskDelegation, "get", AsyncMock(return_value=SimpleNamespace(cancelled=cancelled))
+    )
+    monkeypatch.setattr(
+        runs, "_build_dashboard_configurable", AsyncMock(return_value={"github_login": "owner"})
+    )
+    monkeypatch.setattr(runs, "dispatch_agent_run", dispatch)
+
+    await completion.handle_run_completion(
+        {"thread_id": "t1", "run_id": "run-1", "status": status, "metadata": metadata}
     )
 
-    assert result == {"status": "ok", "reason": "cost refresh scheduled"}
-    schedule.assert_awaited_once_with(
-        {
-            "agent_thread_id": "t1",
-            "run_id": "run-1",
-            "invocation_id": "prepare-1",
-            "prepare_run_id": "prepare-1",
-            "channel_id": "C1",
-            "thread_ts": "123.45",
-        },
-        client=client,
+    assert dispatched == (
+        [
+            {
+                "thread_id": "t1",
+                "input": {"messages": []},
+                "metadata": {"kind": completion.FOLLOW_UP_PICKUP_KIND},
+                "strategy": "reject",
+            }
+        ]
+        if picks_up
+        else []
     )
-    assert client.threads.updates == [
-        {
-            "session_cost_refresh_scheduled_run_id": "run-1",
-            "session_cost_refresh_scheduled_run_ids": ["run-1"],
-        }
-    ]
+    assert [message.content for message in await QueuedMessage.for_thread("t1")] == [pending]
 
 
 @pytest.mark.asyncio
@@ -359,26 +366,18 @@ async def test_success_status_deduplicates_cost_refresh(
 
 
 @pytest.mark.asyncio
-async def test_idempotent_when_already_replied(monkeypatch: pytest.MonkeyPatch) -> None:
-    metadata = _slack_metadata()
-    metadata["failure_reply_posted_run_ids"] = ["run-1"]
-    client = _FakeClient(metadata)
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-    reply = AsyncMock(return_value=True)
-    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
-
-    result = await completion.handle_run_completion(
-        {"thread_id": "t1", "run_id": "run-1", "status": "timeout"}
-    )
-
-    assert result["status"] == "ignored"
-    reply.assert_not_called()
-    assert client.threads.updates == []
-
-
-@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "error_type", "error_message"),
+    [
+        ("timeout", "TimeoutError", "model timed out"),
+        ("error", "BackendUnavailableError", "after_model failed (HTTPStatusError)"),
+    ],
+)
 async def test_later_failed_run_posts_even_if_prior_run_replied(
     monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    error_type: str,
+    error_message: str,
 ) -> None:
     metadata = _slack_metadata()
     metadata["failure_reply_posted_run_ids"] = ["run-1"]
@@ -387,12 +386,30 @@ async def test_later_failed_run_posts_even_if_prior_run_replied(
     reply = AsyncMock(return_value=True)
     monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
 
+    error_url = "https://smith.example/o/tenant/projects/p/project/r/failed-span"
+    trace = AsyncMock(return_value=error_url)
+    monkeypatch.setattr(completion, "get_langsmith_error_url", trace)
+
     result = await completion.handle_run_completion(
-        {"thread_id": "t1", "run_id": "run-2", "status": "timeout"}
+        {
+            "thread_id": "t1",
+            "run_id": "run-2",
+            "status": status,
+            "error": {"error": error_type, "message": error_message},
+            "metadata": {"invocation_id": "invocation-2"},
+        }
     )
 
     assert result["status"] == "ok"
+    trace.assert_awaited_once_with("t1", "invocation-2", error_message)
     reply.assert_awaited_once()
+    assert reply.await_args is not None
+    assert reply.await_args.args[:2] == ("C1", "123.45")
+    text = reply.await_args.args[2]
+    assert f"<{error_url}|LangSmith>" in text
+    if error_type == "BackendUnavailableError":
+        assert "backend was interrupted" in text
+        assert "Re-trigger the run" in text
     assert client.threads.updates == [
         {
             "failure_reply_posted_run_id": "run-2",
@@ -401,111 +418,25 @@ async def test_later_failed_run_posts_even_if_prior_run_replied(
     ]
 
 
-@pytest.mark.asyncio
-async def test_linear_source_without_mcp_cannot_post(
-    monkeypatch: pytest.MonkeyPatch, fake_store
-) -> None:
-    client = _FakeClient({"source": "linear", "source_context": {"linear_issue": {"id": "iss_1"}}})
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+class _FakeRuns:
+    def __init__(self, active: bool) -> None:
+        self._active = active
 
-    result = await completion.handle_run_completion(
-        {"thread_id": "t1", "run_id": "run-1", "status": "timeout"}
-    )
-
-    assert result == {"status": "ignored", "reason": "no reply posted"}
+    async def list(self, thread_id: str, status: str, limit: int) -> list[dict[str, Any]]:
+        return [{"run_id": "run-2"}] if self._active else []
 
 
-@pytest.mark.asyncio
-async def test_missing_thread_id_is_ignored() -> None:
-    result = await completion.handle_run_completion({"run_id": "run-1", "status": "error"})
-    assert result["status"] == "ignored"
+class _FakeActiveRunClient(_FakeClient):
+    def __init__(self, metadata: dict[str, Any], active: bool) -> None:
+        super().__init__(metadata)
+        self.runs = _FakeRuns(active)
 
 
-@pytest.mark.asyncio
-async def test_missing_run_id_falls_back_to_thread_level_dedupe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client = _FakeClient(_slack_metadata())
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-    reply = AsyncMock(return_value=True)
-    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
-
-    result = await completion.handle_run_completion({"thread_id": "t1", "status": "error"})
-
-    assert result["status"] == "ok"
-    reply.assert_awaited_once()
-    assert client.threads.updates == [{"failure_reply_posted": True}]
-
-
-@pytest.mark.asyncio
-async def test_missing_run_id_respects_thread_level_dedupe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    metadata = _slack_metadata()
-    metadata["failure_reply_posted"] = True
-    client = _FakeClient(metadata)
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-    reply = AsyncMock(return_value=True)
-    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
-
-    result = await completion.handle_run_completion({"thread_id": "t1", "status": "error"})
-
-    assert result["status"] == "ignored"
-    reply.assert_not_called()
-    assert client.threads.updates == []
-
-
-@pytest.mark.asyncio
-async def test_no_reply_channel_does_not_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _FakeClient({"source": "schedule"})
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-
-    result = await completion.handle_run_completion(
-        {"thread_id": "t1", "run_id": "run-1", "status": "error"}
-    )
-
-    assert result["status"] == "ignored"
-    assert client.threads.updates == []
-
-
-@pytest.mark.asyncio
-async def test_automated_wakeup_failure_preserves_prior_silent_behavior(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client = _FakeClient(_slack_metadata())
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-    reply = AsyncMock(return_value=True)
-    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
-
-    result = await completion.handle_run_completion(
-        {
-            "thread_id": "t1",
-            "run_id": "run-1",
-            "status": "error",
-            "metadata": {"kind": "thread_wakeup", "prepare_run_id": "prepare-1"},
-        }
-    )
-
-    assert result == {"status": "ignored", "reason": "automated wakeup failure"}
-    reply.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_interrupted_status_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Follow-ups use multitask_strategy="interrupt", so an interrupted run is a
-    # healthy hand-off, not a failure to report.
-    client = _FakeClient(_slack_metadata())
-    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
-    reply = AsyncMock(return_value=True)
-    monkeypatch.setattr(completion, "post_slack_thread_reply", reply)
-
-    result = await completion.handle_run_completion(
-        {"thread_id": "t1", "run_id": "run-1", "status": "interrupted"}
-    )
-
-    assert result["status"] == "ignored"
-    reply.assert_not_called()
-    assert client.threads.updates == []
+def _slack_metadata() -> dict[str, Any]:
+    return {
+        "source": "slack",
+        "source_context": {"slack_thread": {"channel_id": "C1", "thread_ts": "123.45"}},
+    }
 
 
 def test_verify_run_complete_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -519,3 +450,15 @@ def test_verify_run_complete_token(monkeypatch: pytest.MonkeyPatch) -> None:
     assert completion.verify_run_complete_token("s3cret") is True
     assert completion.verify_run_complete_token("wrong") is False
     assert completion.verify_run_complete_token(None) is False
+
+
+@pytest.mark.parametrize("status", ["success", "error"])
+async def test_completion_waits_for_running_background_tasks(monkeypatch, status: str) -> None:
+    metadata = {**_slack_metadata(), "running_background_tasks": ["cmd-1"]}
+    client = _FakeActiveRunClient(metadata, active=False)
+    monkeypatch.setattr(completion, "langgraph_client", lambda: client)
+    monkeypatch.setattr(completion, "post_slack_thread_reply", AsyncMock(return_value=True))
+    set_status = AsyncMock(return_value=True)
+    monkeypatch.setattr(slack_thinking, "set_slack_thread_status", set_status)
+    await completion.handle_run_completion({"thread_id": "t1", "run_id": "run-1", "status": status})
+    assert set_status.await_args.args == ("C1", "123.45", "Waiting for background tasks…")

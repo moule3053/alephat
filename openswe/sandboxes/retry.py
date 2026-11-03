@@ -1,0 +1,82 @@
+"""Bounded retry for the sandbox failures the SDK marks as transient."""
+
+import asyncio
+import logging
+import random
+import time
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
+
+from langsmith.sandbox import SandboxRetryableConnectionError
+
+logger = logging.getLogger(__name__)
+
+MAX_TRANSIENT_ATTEMPTS = 4
+SANDBOX_ATTACH_MAX_ELAPSED = 10 * 60
+_BASE_BACKOFF = 0.5
+_MAX_BACKOFF = 8.0
+_JITTER_FACTOR = 0.2
+
+T = TypeVar("T")
+
+
+def is_transient_sandbox_error(exc: BaseException) -> bool:
+    """Whether the SDK guarantees this failure happened before the command started.
+
+    ``SandboxRetryableConnectionError`` covers a WebSocket upgrade rejected with a
+    gateway status (500/502/503/504): the execute frame never went out, so no
+    attempt can have run the command, and re-issuing it cannot double-run it.
+    """
+    return isinstance(exc, SandboxRetryableConnectionError)
+
+
+def _compute_backoff(attempt: int) -> float:
+    base = min(_BASE_BACKOFF * (2 ** (attempt - 1)), _MAX_BACKOFF)
+    jitter = base * random.uniform(-_JITTER_FACTOR, _JITTER_FACTOR)
+    return min(base + jitter, _MAX_BACKOFF)
+
+
+async def retry_transient_sandbox_errors[T](
+    operation: Callable[[], Awaitable[T]],
+    *,
+    description: str,
+    max_attempts: int = MAX_TRANSIENT_ATTEMPTS,
+    max_elapsed: float | None = None,
+    retryable: Callable[[BaseException], bool] = is_transient_sandbox_error,
+    retry_after: Callable[[BaseException], float | None] | None = None,
+) -> T:
+    """Run ``operation``, retrying it with backoff while it fails transiently.
+
+    ``retry_after`` returns the delay a failure asks for (e.g. a Retry-After
+    header), used in place of the backoff when it is positive.
+    """
+    attempt = 0
+    deadline = time.monotonic() + max_elapsed if max_elapsed is not None else None
+    while True:
+        attempt += 1
+        try:
+            return await operation()
+        except Exception as exc:
+            if not retryable(exc):
+                raise
+            if deadline is None and attempt >= max_attempts:
+                raise
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+            else:
+                remaining = None
+            requested = retry_after(exc) if retry_after is not None else None
+            delay = requested or _compute_backoff(attempt)
+            if remaining is not None:
+                delay = min(delay, remaining)
+            logger.warning(
+                "%s hit a transient sandbox error (%s), retrying in %.1fs (attempt %d%s)",
+                description,
+                exc,
+                delay,
+                attempt,
+                f"/{max_attempts}" if deadline is None else "",
+            )
+            await asyncio.sleep(delay)

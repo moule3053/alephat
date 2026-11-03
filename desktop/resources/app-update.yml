@@ -1,4 +1,4 @@
 provider: github
 owner: langchain-ai
-repo: alephat
-updaterCacheDirName: alephat-desktop-updater
+repo: open-swe
+updaterCacheDirName: open-swe-desktop-updater

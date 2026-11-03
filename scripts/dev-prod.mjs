@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Vite dev server, hot reload and all, against a deployed backend.
 //
-// The deployment sets `alephat_session` on its own origin and rejects mutations
+// The deployment sets `osw_session` on its own origin and rejects mutations
 // carrying any other Origin, so a dev server on localhost can neither read a
 // session nor obtain one through the browser. This mints one out of band with
 // the same PKCE loopback handoff the desktop app uses: the GitHub leg still
@@ -18,12 +18,17 @@ import { fileURLToPath } from "node:url"
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const ENV_FILE = path.join(ROOT, ".env")
-const CACHE_FILE = path.join(homedir(), ".cache", "alephat", "dev-session.json")
+const CACHE_FILE = path.join(
+  homedir(),
+  ".cache",
+  "open-swe",
+  "dev-session.json"
+)
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000
 // The origin the backend allows a native client to redeem a handoff from; the
 // desktop app sends the same one. Node sends no Origin of its own, and the
 // exchange is a POST, so without this the CSRF check rejects it.
-const HANDOFF_ORIGIN = "alephat://app"
+const HANDOFF_ORIGIN = "open-swe://app"
 // Re-login rather than hand Vite a session that dies mid-afternoon.
 const MIN_REMAINING_MS = 60 * 60 * 1000
 
@@ -137,7 +142,7 @@ function page(heading, detail, script = "") {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Alephat</title>
+<title>Open SWE</title>
 <style>
   :root { color-scheme: light dark }
   body {
@@ -292,7 +297,7 @@ async function main() {
     env: {
       ...process.env,
       DASHBOARD_API_URL: backendUrl,
-      ALEPHAT_DEV_SESSION: session,
+      OPEN_SWE_DEV_SESSION: session,
     },
   })
   child.on("exit", (codeValue, signal) => {

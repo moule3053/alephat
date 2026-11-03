@@ -1,25 +1,68 @@
+import { experienceStore } from "@/lib/experience"
 /** @vitest-environment jsdom */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import {
+  QueryClient,
+  QueryClientProvider,
+  focusManager,
+  onlineManager,
+} from "@tanstack/react-query"
 import { act, render, renderHook, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { agentsApi } from "./api"
 import {
   SIDEBAR_PAGE_SIZE,
+  agentScheduleKeys,
   agentThreadKeys,
   markAgentThreadViewed,
+  optimisticThread,
   setAgentThreadStatus,
+  setAgentThreadResolved,
+  useAgentThread,
+  useInfiniteThreadsPages,
+  useAgentThreadBrowser,
   useAgentThreadWorkingTreeDiff,
+  usePinAgentThread,
+  useRenameAgentThread,
   useResolveAgentThread,
+  useSeedAgentThreadDetails,
   useSidebarActiveThread,
-  useSidebarProjectThreads,
+  useSidebarPinnedThreads,
+  useSidebarRepoThreads,
   useSidebarRecents,
   useThreadsPage,
+  useUpdateAgentSchedule,
+  useWorkflowApprovalDecision,
+  useWorkflowApprovals,
 } from "./queries"
 import type { InfiniteData } from "@tanstack/react-query"
-import type { ThreadTurnDiff, ThreadsPage, ThreadsPageParams } from "./api"
-import type { AgentThread } from "./types"
+import type {
+  ThreadBrowser,
+  ThreadTurnDiff,
+  ThreadsPage,
+  ThreadsPageParams,
+} from "./api"
+import type {
+  AgentSchedule,
+  AgentThread,
+  WorkflowPushApproval,
+  WorkflowPushApprovalsResponse,
+} from "./types"
+
+vi.mock("@/lib/experience", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/experience")>()
+  return {
+    ...actual,
+    useExperience: () => {
+      const state = actual.useExperience()
+      return {
+        ...state,
+        experience: window.openSweDesktop ? state.experience : undefined,
+      }
+    },
+  }
+})
 
 const params: ThreadsPageParams = {
   limit: 100,
@@ -35,12 +78,13 @@ const page: ThreadsPage = {
 }
 
 const clients: Array<QueryClient> = []
-
 afterEach(() => {
   vi.useRealTimers()
   for (const client of clients) client.clear()
   clients.length = 0
   vi.restoreAllMocks()
+  Reflect.deleteProperty(window, "openSweDesktop")
+  localStorage.clear()
 })
 
 function testClient() {
@@ -50,6 +94,70 @@ function testClient() {
   clients.push(client)
   return client
 }
+
+describe("useAgentThreadBrowser", () => {
+  const hour = 60 * 60_000
+  function browser(
+    window: string,
+    token: string,
+    expiresIn: number,
+    title = "current"
+  ): ThreadBrowser {
+    return {
+      tabs: [{ id: "t1", title, url: "https://example.com" }],
+      act_url: `https://${window}.browsers.test/auth?token=${token}`,
+      expires_at: new Date(Date.now() + expiresIn).toISOString(),
+    }
+  }
+
+  async function refetchedLink(current: ThreadBrowser, fetched: ThreadBrowser) {
+    const client = testClient()
+    const getThreadBrowser = vi
+      .spyOn(agentsApi, "getThreadBrowser")
+      .mockResolvedValueOnce(current)
+      .mockResolvedValue(fetched)
+    const { result } = renderHook(
+      () => useAgentThreadBrowser("thread-1", true),
+      {
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      }
+    )
+    await waitFor(() => expect(result.current.data).toBeDefined())
+    await act(() =>
+      client.invalidateQueries({
+        queryKey: agentThreadKeys.browser("thread-1"),
+      })
+    )
+    await waitFor(() =>
+      expect(result.current.data?.tabs[0]?.title).toBe("next")
+    )
+    getThreadBrowser.mockRestore()
+    return result.current.data
+  }
+
+  it("keeps the framed link when an invalidation mints a new one", async () => {
+    const current = browser("b-window", "first", 24 * hour)
+    const data = await refetchedLink(
+      current,
+      browser("b-window", "second", 24 * hour, "next")
+    )
+    expect(data?.act_url).toBe(current.act_url)
+    expect(data?.expires_at).toBe(current.expires_at)
+  })
+
+  it("takes the new link for another window or near expiry", async () => {
+    const otherWindow = browser("b-other", "second", 24 * hour, "next")
+    expect(
+      await refetchedLink(browser("b-window", "first", 24 * hour), otherWindow)
+    ).toEqual(otherWindow)
+    const fresh = browser("b-window", "second", 24 * hour, "next")
+    expect(
+      await refetchedLink(browser("b-window", "first", 60_000), fresh)
+    ).toEqual(fresh)
+  })
+})
 
 describe("useAgentThreadWorkingTreeDiff", () => {
   const diff: ThreadTurnDiff = {
@@ -249,6 +357,7 @@ describe("setAgentThreadStatus", () => {
         {
           items: [thread],
           limit: SIDEBAR_PAGE_SIZE,
+          hierarchy: true,
           offset: 0,
           hasMore: false,
         },
@@ -256,8 +365,14 @@ describe("setAgentThreadStatus", () => {
       pageParams: [0],
     })
     client.setQueryData(agentThreadKeys.sidebarActive(thread.id), thread)
+    const pageKey = agentThreadKeys.page(params)
+    client.setQueryData(pageKey, { ...page, items: [thread] })
 
     setAgentThreadStatus(client, thread.id, "running")
+
+    expect(client.getQueryData<ThreadsPage>(pageKey)?.items[0]).toMatchObject({
+      status: "running",
+    })
 
     expect(
       client.getQueryData<InfiniteData<ThreadsPage>>(key)?.pages[0]?.items[0]
@@ -269,7 +384,86 @@ describe("setAgentThreadStatus", () => {
 })
 
 describe("sidebar queries", () => {
-  it("scopes Recents to ownerless threads only in project mode", async () => {
+  it("polls independent pins, detects external starts, and stops when all finish", async () => {
+    vi.useFakeTimers()
+    const idle = {
+      ...optimisticThread("outside-page", { prompt: "Old resolved pin" }),
+      status: "finished" as const,
+      resolved: true,
+    }
+    const running = optimisticThread("running-pin", { prompt: "Running pin" })
+    const listPins = vi
+      .spyOn(agentsApi, "listPinnedThreads")
+      .mockResolvedValueOnce([idle, running])
+      .mockResolvedValueOnce([
+        { ...idle, status: "running" },
+        { ...running, status: "finished" },
+      ])
+      .mockResolvedValue([idle, { ...running, status: "finished" }])
+    const client = testClient()
+    client.setQueryData(agentThreadKeys.page(params), page)
+    const { result } = renderHook(() => useSidebarPinnedThreads(), {
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    })
+    await vi.waitFor(() => expect(result.current.data?.[0]).toEqual(idle))
+    await act(() => vi.advanceTimersByTimeAsync(2000))
+    await vi.waitFor(() =>
+      expect(result.current.data?.map((thread) => thread.status)).toEqual([
+        "running",
+        "finished",
+      ])
+    )
+    await act(() => vi.advanceTimersByTimeAsync(2000))
+    await vi.waitFor(() =>
+      expect(
+        result.current.data?.every((thread) => thread.status === "finished")
+      ).toBe(true)
+    )
+    const calls = listPins.mock.calls.length
+    await act(() => vi.advanceTimersByTimeAsync(6000))
+    expect(listPins).toHaveBeenCalledTimes(calls)
+    expect(result.current.data?.map((thread) => thread.id)).toEqual([
+      "outside-page",
+      "running-pin",
+    ])
+  })
+
+  it("refreshes idle pins after pin and unpin mutations", async () => {
+    const pin = {
+      ...optimisticThread("outside-page", { prompt: "Pinned thread" }),
+      status: "finished" as const,
+    }
+    vi.spyOn(agentsApi, "listPinnedThreads")
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([pin])
+      .mockResolvedValue([])
+    vi.spyOn(agentsApi, "pinThread").mockResolvedValue(undefined)
+    const client = testClient()
+    const { result } = renderHook(
+      () => ({
+        pins: useSidebarPinnedThreads(),
+        mutation: usePinAgentThread(),
+      }),
+      {
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      }
+    )
+    await waitFor(() => expect(result.current.pins.data).toEqual([]))
+    await act(() =>
+      result.current.mutation.mutateAsync({ threadId: pin.id, pinned: true })
+    )
+    await waitFor(() => expect(result.current.pins.data).toEqual([pin]))
+    await act(() =>
+      result.current.mutation.mutateAsync({ threadId: pin.id, pinned: false })
+    )
+    await waitFor(() => expect(result.current.pins.data).toEqual([]))
+  })
+
+  it("scopes Recents to ownerless threads only in repository mode", async () => {
     const listThreads = vi
       .spyOn(agentsApi, "listThreadsPage")
       .mockResolvedValue(page)
@@ -278,13 +472,14 @@ describe("sidebar queries", () => {
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     )
     const { rerender } = renderHook(
-      ({ projectMode }) => useSidebarRecents({ projectMode }),
-      { wrapper, initialProps: { projectMode: true } }
+      ({ repoMode }) => useSidebarRecents({ repoMode }),
+      { wrapper, initialProps: { repoMode: true } }
     )
 
     await waitFor(() =>
       expect(listThreads).toHaveBeenCalledWith({
         limit: SIDEBAR_PAGE_SIZE,
+        hierarchy: true,
         offset: 0,
         resolved: false,
         scope: "interactive",
@@ -293,11 +488,12 @@ describe("sidebar queries", () => {
       })
     )
 
-    rerender({ projectMode: false })
+    rerender({ repoMode: false })
 
     await waitFor(() =>
       expect(listThreads).toHaveBeenCalledWith({
         limit: SIDEBAR_PAGE_SIZE,
+        hierarchy: true,
         offset: 0,
         resolved: false,
         scope: "interactive",
@@ -306,7 +502,7 @@ describe("sidebar queries", () => {
     )
   })
 
-  it("paginates each project through an independent query", async () => {
+  it("paginates each repository through an independent query", async () => {
     const listThreads = vi
       .spyOn(agentsApi, "listThreadsPage")
       .mockImplementation(async (request) => {
@@ -327,10 +523,10 @@ describe("sidebar queries", () => {
     const client = testClient()
     const { result } = renderHook(
       () => ({
-        first: useSidebarProjectThreads({
+        first: useSidebarRepoThreads({
           repoFullName: "langchain-ai/first",
         }),
-        second: useSidebarProjectThreads({
+        second: useSidebarRepoThreads({
           repoFullName: "langchain-ai/second",
         }),
       }),
@@ -364,10 +560,52 @@ describe("sidebar queries", () => {
     )
   })
 
-  it("fetches the active thread when it is outside the loaded pages", async () => {
-    const opened = { id: "opened-thread", resolved: false } as AgentThread
-    const getThread = vi.spyOn(agentsApi, "getThread").mockResolvedValue(opened)
+  it.each([true, false])(
+    "reactively uses onscreen detail while the sidebar request stalls (preloaded: %s)",
+    async (preloaded) => {
+      const opened = {
+        id: "opened-thread",
+        title: "Onscreen thread",
+        resolved: false,
+      } as AgentThread
+      const getThread = vi
+        .spyOn(agentsApi, "getThread")
+        .mockReturnValue(new Promise<AgentThread>(() => {}))
+      const client = testClient()
+      const key = agentThreadKeys.detail(opened.id)
+      if (preloaded) client.setQueryData(key, opened)
+      const { result } = renderHook(
+        () =>
+          useSidebarActiveThread({
+            activeThreadId: opened.id,
+            loadedThreads: [],
+          }),
+        {
+          wrapper: ({ children }) => (
+            <QueryClientProvider client={client}>
+              {children}
+            </QueryClientProvider>
+          ),
+        }
+      )
+
+      expect(getThread).toHaveBeenCalledTimes(preloaded ? 0 : 1)
+      if (!preloaded) act(() => client.setQueryData(key, opened))
+      await waitFor(() => expect(result.current).toEqual(opened))
+
+      const updated = { ...opened, title: "Updated onscreen title" }
+      act(() => client.setQueryData(key, updated))
+      await waitFor(() => expect(result.current).toEqual(updated))
+    }
+  )
+
+  it("does not reinsert an open concierge conversation into the sidebar", () => {
+    const opened = {
+      id: "concierge-thread",
+      concierge: true,
+    } as AgentThread
     const client = testClient()
+    client.setQueryData(agentThreadKeys.detail(opened.id), opened)
     const { result } = renderHook(
       () =>
         useSidebarActiveThread({
@@ -381,8 +619,195 @@ describe("sidebar queries", () => {
       }
     )
 
+    expect(result.current).toBeUndefined()
+    expect(client.getQueryData(agentThreadKeys.detail(opened.id))).toEqual(
+      opened
+    )
+  })
+
+  it("refetches detail after sidebar rerenders", async () => {
+    const opened = { id: "opened-thread", status: "idle" } as AgentThread
+    const updated = { ...opened, title: "Refreshed title" }
+    vi.spyOn(agentsApi, "getThread")
+      .mockResolvedValueOnce(opened)
+      .mockResolvedValue(updated)
+    const client = testClient()
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    )
+    renderHook(() => useAgentThread(opened.id), { wrapper })
+    const { result, rerender } = renderHook(
+      () =>
+        useSidebarActiveThread({
+          activeThreadId: opened.id,
+          loadedThreads: [],
+        }),
+      { wrapper }
+    )
+    await waitFor(() => expect(result.current?.id).toBe(opened.id))
+    rerender()
+    await act(() =>
+      client.invalidateQueries({ queryKey: agentThreadKeys.detail(opened.id) })
+    )
+    await waitFor(() => expect(result.current?.title).toBe(updated.title))
+    expect(
+      client.getQueryState(agentThreadKeys.detail(opened.id))?.status
+    ).toBe("success")
+  })
+
+  it("refreshes an active coordinator's workers from sidebar pages without opening them", () => {
+    const worker = {
+      id: "worker-thread",
+      status: "running",
+      updatedAt: 1,
+    } as AgentThread
+    const coordinator = {
+      id: "coordinator-thread",
+      title: "Onscreen coordinator",
+      status: "finished",
+      updatedAt: 2,
+      taskMembership: { role: "coordinator" },
+      taskWorkers: [worker],
+    } as AgentThread
+    const client = testClient()
+    client.setQueryData(agentThreadKeys.detail(coordinator.id), coordinator)
+    const { result, rerender } = renderHook(
+      ({ loaded }: { loaded: AgentThread }) =>
+        useSidebarActiveThread({
+          activeThreadId: coordinator.id,
+          loadedThreads: [loaded],
+        }),
+      {
+        initialProps: { loaded: coordinator },
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      }
+    )
+
+    expect(result.current?.taskWorkers?.[0]?.status).toBe("running")
+    rerender({
+      loaded: {
+        ...coordinator,
+        title: "Older sidebar title",
+        updatedAt: 1,
+        taskWorkers: [{ ...worker, status: "finished", updatedAt: 2 }],
+      },
+    })
+
+    expect(result.current?.taskWorkers?.[0]?.status).toBe("finished")
+    expect(result.current?.title).toBe(coordinator.title)
+    expect(
+      client.getQueryData(agentThreadKeys.detail(worker.id))
+    ).toBeUndefined()
+  })
+
+  it("returns the loaded coordinator when the active thread is one of its workers", () => {
+    const worker = { id: "worker-thread", title: "Worker" } as AgentThread
+    const coordinator = {
+      id: "coordinator-thread",
+      title: "Coordinator",
+      taskMembership: { role: "coordinator" },
+      taskWorkers: [worker],
+    } as AgentThread
+    const client = testClient()
+    client.setQueryData(agentThreadKeys.detail(worker.id), worker)
+    const { result } = renderHook(
+      () =>
+        useSidebarActiveThread({
+          activeThreadId: worker.id,
+          loadedThreads: [coordinator],
+        }),
+      {
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      }
+    )
+
+    expect(result.current).toEqual(coordinator)
+  })
+
+  it("nests an open worker the sidebar page has not listed yet under its coordinator", () => {
+    const listedWorker = {
+      id: "listed-worker",
+      status: "finished",
+      updatedAt: 1,
+    } as AgentThread
+    const coordinator = {
+      id: "coordinator-thread",
+      status: "finished",
+      updatedAt: 1,
+      taskMembership: { role: "coordinator", taskId: "task" },
+      taskWorkers: [listedWorker],
+    } as AgentThread
+    const started = {
+      id: "started-worker",
+      status: "running",
+      updatedAt: 2,
+      taskMembership: {
+        role: "worker",
+        taskId: "task",
+        coordinatorThreadId: coordinator.id,
+      },
+    } as AgentThread
+    const client = testClient()
+    client.setQueryData(agentThreadKeys.detail(started.id), started)
+    const { result } = renderHook(
+      () =>
+        useSidebarActiveThread({
+          activeThreadId: started.id,
+          loadedThreads: [coordinator],
+        }),
+      {
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      }
+    )
+
+    expect(result.current?.id).toBe(coordinator.id)
+    expect(result.current?.taskWorkers?.map((worker) => worker.id)).toEqual([
+      listedWorker.id,
+      started.id,
+    ])
+  })
+
+  it("keeps the deep-linked active thread available as cached pages catch up", async () => {
+    const opened = {
+      id: "opened-thread",
+      source: "slack",
+      repoFullName: "langchain-ai/deepagents",
+      status: "finished",
+      resolved: false,
+    } as AgentThread
+    const getThread = vi.spyOn(agentsApi, "getThread").mockResolvedValue(opened)
+    const client = testClient()
+    const { result, rerender } = renderHook(
+      ({ loadedThreads }: { loadedThreads: Array<AgentThread> }) =>
+        useSidebarActiveThread({
+          activeThreadId: opened.id,
+          loadedThreads,
+        }),
+      {
+        initialProps: { loadedThreads: [] as Array<AgentThread> },
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      }
+    )
+
     await waitFor(() => expect(result.current).toEqual(opened))
     expect(getThread).toHaveBeenCalledWith(opened.id, { markViewed: false })
+
+    const cached = { ...opened, title: "Updated title" }
+    rerender({ loadedThreads: [cached] })
+    expect(result.current).toEqual(cached)
+
+    const archived = { ...cached, resolved: true }
+    getThread.mockResolvedValue(archived)
+    rerender({ loadedThreads: [] })
+    await waitFor(() => expect(result.current).toEqual(archived))
   })
 })
 
@@ -446,6 +871,273 @@ describe("useResolveAgentThread", () => {
   })
 })
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: Error) => void
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done
+    reject = fail
+  })
+  return { promise, resolve, reject }
+}
+
+function wrapperFor(client: QueryClient) {
+  return ({ children }: { children: React.ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  )
+}
+
+describe("active thread menu metadata", () => {
+  it("refreshes menu actions from the sidebar without replacing live detail", () => {
+    const client = testClient()
+    const detail = optimisticThread("thread-1", { prompt: "Pending prompt" })
+    client.setQueryData(agentThreadKeys.detail(detail.id), detail)
+    const summary: AgentThread = {
+      ...detail,
+      updatedAt: detail.updatedAt + 1,
+      traceUrl: "https://smith.langchain.com/trace/thread-1",
+      sandboxId: "sandbox-1",
+      messages: [],
+      pendingMessages: [],
+    }
+    const { rerender } = renderHook(
+      ({ threads }) => useSeedAgentThreadDetails(threads, detail.id),
+      { initialProps: { threads: [summary] }, wrapper: wrapperFor(client) }
+    )
+    expect(client.getQueryData(agentThreadKeys.detail(detail.id))).toEqual({
+      ...detail,
+      updatedAt: summary.updatedAt,
+      traceUrl: summary.traceUrl,
+      sandboxId: summary.sandboxId,
+      sourceUrl: summary.sourceUrl,
+      sourceAppUrl: summary.sourceAppUrl,
+      automationId: summary.automationId,
+    })
+    const refreshed = client.getQueryData<AgentThread>(
+      agentThreadKeys.detail(detail.id)
+    )
+    const refreshedAt = client.getQueryState(
+      agentThreadKeys.detail(detail.id)
+    )?.dataUpdatedAt
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 1000)
+    for (const updatedAt of [detail.updatedAt, summary.updatedAt]) {
+      rerender({ threads: [{ ...summary, updatedAt, sandboxId: null }] })
+      expect(
+        client.getQueryState(agentThreadKeys.detail(detail.id))?.dataUpdatedAt
+      ).toBe(refreshedAt)
+      expect(client.getQueryData(agentThreadKeys.detail(detail.id))).toEqual(
+        refreshed
+      )
+    }
+    rerender({
+      threads: [
+        { ...summary, updatedAt: summary.updatedAt + 1, sandboxId: null },
+      ],
+    })
+    expect(
+      client.getQueryData<AgentThread>(agentThreadKeys.detail(detail.id))
+        ?.sandboxId
+    ).toBeNull()
+  })
+})
+
+describe("optimistic thread mutations", () => {
+  const thread = {
+    id: "thread-1",
+    title: "Before",
+    status: "idle",
+    resolved: false,
+  } as AgentThread
+  const pageKey = agentThreadKeys.page({ resolved: false })
+  const pageOf = (items: Array<AgentThread>): ThreadsPage => ({
+    items,
+    limit: 25,
+    offset: 0,
+    hasMore: false,
+  })
+
+  it("appends a new pin without reordering after the server refresh", async () => {
+    const existing = { ...thread, id: "existing-pin" }
+    const request = deferred<void>()
+    vi.spyOn(agentsApi, "pinThread").mockReturnValue(request.promise)
+    const listPins = vi
+      .spyOn(agentsApi, "listPinnedThreads")
+      .mockResolvedValueOnce([existing])
+      .mockResolvedValue([existing, thread])
+    const client = testClient()
+    client.setQueryData(agentThreadKeys.detail(thread.id), thread)
+    const { result } = renderHook(
+      () => ({
+        pins: useSidebarPinnedThreads(),
+        mutation: usePinAgentThread(),
+      }),
+      { wrapper: wrapperFor(client) }
+    )
+    await waitFor(() => expect(result.current.pins.data).toEqual([existing]))
+
+    act(() =>
+      result.current.mutation.mutate({ threadId: thread.id, pinned: true })
+    )
+    await waitFor(() =>
+      expect(result.current.pins.data).toEqual([existing, thread])
+    )
+    await act(async () => request.resolve(undefined))
+    await waitFor(() => expect(listPins).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(result.current.pins.isFetching).toBe(false))
+    expect(result.current.pins.data).toEqual([existing, thread])
+  })
+
+  it("renames across detail, pinned, and page caches and rolls back on failure", async () => {
+    const request = deferred<AgentThread>()
+    vi.spyOn(agentsApi, "renameThread").mockReturnValue(request.promise)
+    const client = testClient()
+    client.setQueryData(agentThreadKeys.detail(thread.id), thread)
+    client.setQueryData(agentThreadKeys.pinned, [thread])
+    client.setQueryData(pageKey, pageOf([thread]))
+    const { result } = renderHook(() => useRenameAgentThread(), {
+      wrapper: wrapperFor(client),
+    })
+    const titles = () => [
+      client.getQueryData<AgentThread>(agentThreadKeys.detail(thread.id))
+        ?.title,
+      client.getQueryData<Array<AgentThread>>(agentThreadKeys.pinned)?.[0]
+        ?.title,
+      client.getQueryData<ThreadsPage>(pageKey)?.items[0]?.title,
+    ]
+
+    act(() => result.current.mutate({ threadId: thread.id, title: "After" }))
+    await waitFor(() => expect(titles()).toEqual(["After", "After", "After"]))
+
+    act(() => request.reject(new Error("request failed")))
+    await waitFor(() =>
+      expect(titles()).toEqual(["Before", "Before", "Before"])
+    )
+  })
+
+  it("keeps an optimistic resolution when a pinned fetch was already in flight", async () => {
+    const stalePins = deferred<Array<AgentThread>>()
+    vi.spyOn(agentsApi, "resolveThread").mockReturnValue(
+      new Promise<AgentThread>(() => {})
+    )
+    const client = testClient()
+    client.setQueryData(agentThreadKeys.pinned, [thread])
+    void client.prefetchQuery({
+      queryKey: agentThreadKeys.pinned,
+      queryFn: () => stalePins.promise,
+    })
+    const { result } = renderHook(() => useResolveAgentThread(), {
+      wrapper: wrapperFor(client),
+    })
+
+    act(() => result.current.mutate({ threadId: thread.id, resolved: true }))
+    await waitFor(() =>
+      expect(
+        client.getQueryData<Array<AgentThread>>(agentThreadKeys.pinned)?.[0]
+      ).toMatchObject({ resolved: true })
+    )
+    await act(async () => stalePins.resolve([thread]))
+
+    expect(
+      client.getQueryData<Array<AgentThread>>(agentThreadKeys.pinned)?.[0]
+    ).toMatchObject({ resolved: true })
+  })
+})
+
+describe("useUpdateAgentSchedule", () => {
+  it("flips enabled before the request resolves and rolls back on failure", async () => {
+    const schedule = { id: "schedule-1", enabled: true } as AgentSchedule
+    const other = { id: "schedule-2", enabled: true } as AgentSchedule
+    const request = deferred<AgentSchedule>()
+    vi.spyOn(agentsApi, "updateSchedule").mockReturnValue(request.promise)
+    vi.spyOn(agentsApi, "listSchedules").mockResolvedValue([schedule, other])
+    const client = testClient()
+    client.setQueryData(agentScheduleKeys.all, [schedule, other])
+    const { result } = renderHook(() => useUpdateAgentSchedule(), {
+      wrapper: wrapperFor(client),
+    })
+    const enabled = () =>
+      client
+        .getQueryData<Array<AgentSchedule>>(agentScheduleKeys.all)
+        ?.map((entry) => entry.enabled)
+
+    act(() =>
+      result.current.mutate({
+        scheduleId: schedule.id,
+        body: { enabled: false },
+      })
+    )
+    await waitFor(() => expect(enabled()).toEqual([false, true]))
+
+    act(() => request.reject(new Error("request failed")))
+    await waitFor(() => expect(enabled()).toEqual([true, true]))
+  })
+})
+
+describe("useWorkflowApprovals", () => {
+  it("fetches approvals created after the last poll when the run stops", async () => {
+    const client = testClient()
+    const approval = {
+      fingerprint: "late-approval",
+      status: "pending",
+    } as WorkflowPushApproval
+    vi.spyOn(agentsApi, "listWorkflowApprovals")
+      .mockResolvedValueOnce({ threadId: "thread-1", approvals: [] })
+      .mockResolvedValue({ threadId: "thread-1", approvals: [approval] })
+    const { result, rerender } = renderHook(
+      ({ active }) =>
+        useWorkflowApprovals("thread-1", { pollWhileActive: active }),
+      {
+        initialProps: { active: true },
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      }
+    )
+    await waitFor(() => expect(result.current.data?.approvals).toEqual([]))
+
+    rerender({ active: false })
+
+    await waitFor(() =>
+      expect(result.current.data?.approvals).toEqual([approval])
+    )
+  })
+})
+
+describe("useWorkflowApprovalDecision", () => {
+  it("marks the approval decided at once and restores it on failure", async () => {
+    const approval = {
+      fingerprint: "fingerprint-1",
+      status: "pending",
+    } as WorkflowPushApproval
+    const request = deferred<{ status: string; fingerprint: string }>()
+    vi.spyOn(agentsApi, "approveWorkflowPush").mockReturnValue(request.promise)
+    const client = testClient()
+    const key = agentThreadKeys.workflowApprovals("thread-1")
+    client.setQueryData<WorkflowPushApprovalsResponse>(key, {
+      threadId: "thread-1",
+      approvals: [approval],
+    })
+    const { result } = renderHook(
+      () => useWorkflowApprovalDecision("thread-1"),
+      { wrapper: wrapperFor(client) }
+    )
+    const status = () =>
+      client.getQueryData<WorkflowPushApprovalsResponse>(key)?.approvals[0]
+        ?.status
+
+    act(() =>
+      result.current.mutate({
+        fingerprint: approval.fingerprint,
+        decision: "approve",
+      })
+    )
+    await waitFor(() => expect(status()).toBe("approved"))
+
+    act(() => request.reject(new Error("request failed")))
+    await waitFor(() => expect(status()).toBe("pending"))
+  })
+})
+
 describe("markAgentThreadViewed", () => {
   const unread = { id: "thread-1", viewed: false } as AgentThread
 
@@ -485,4 +1177,353 @@ describe("markAgentThreadViewed", () => {
       client.getQueryState(agentThreadKeys.detail("thread-1"))?.dataUpdatedAt
     ).toBe(0)
   })
+})
+
+describe("sidebar task families", () => {
+  const worker = {
+    id: "worker",
+    title: "Implementation",
+    status: "running",
+    viewed: false,
+  } as AgentThread
+  const coordinator = {
+    id: "coordinator",
+    status: "idle",
+    taskMembership: { role: "coordinator", taskId: "task" },
+    taskWorkers: [worker],
+  } as AgentThread
+
+  it("updates nested worker caches for navigation and optimistic edits", () => {
+    const client = testClient()
+    const key = agentThreadKeys.page({ hierarchy: true, resolved: false })
+    client.setQueryData(key, { ...page, items: [coordinator] })
+    markAgentThreadViewed(client, worker.id)
+    setAgentThreadStatus(client, worker.id, "finished")
+    expect(
+      client.getQueryData<ThreadsPage>(key)?.items[0]?.taskWorkers?.[0]
+    ).toMatchObject({ viewed: true, status: "finished" })
+    setAgentThreadResolved(client, worker.id, true)
+    expect(
+      client.getQueryData<ThreadsPage>(key)?.items[0]?.taskWorkers
+    ).toEqual([])
+  })
+
+  it("keeps the existing page poll alive for idle coordinators and discovers new workers", async () => {
+    vi.useFakeTimers()
+    let workers: Array<AgentThread> = [{ ...worker, status: "finished" }]
+    vi.spyOn(agentsApi, "listThreadsPage").mockImplementation(async () => ({
+      ...page,
+      items: [{ ...coordinator, taskWorkers: workers }],
+    }))
+    const client = testClient()
+    const { result } = renderHook(
+      () => useSidebarRecents({ repoMode: false }),
+      { wrapper: wrapperFor(client) }
+    )
+    await vi.waitFor(() =>
+      expect(result.current.items[0]?.taskWorkers).toHaveLength(1)
+    )
+    workers = [...workers, { ...worker, id: "new-worker", status: "running" }]
+    await act(() => vi.advanceTimersByTimeAsync(2100))
+    expect(result.current.items[0]?.taskWorkers).toHaveLength(1)
+    await act(() => vi.advanceTimersByTimeAsync(30_000))
+    await vi.waitFor(() =>
+      expect(result.current.items[0]?.taskWorkers).toHaveLength(2)
+    )
+    workers = workers.map((thread) => ({ ...thread, status: "finished" }))
+    await act(() => vi.advanceTimersByTimeAsync(2100))
+    await vi.waitFor(() =>
+      expect(result.current.items[0]?.taskWorkers?.[1]?.status).toBe("finished")
+    )
+  })
+})
+
+describe("desktop experience segregation", () => {
+  it("scopes list requests before paging and keeps pins, active injection and workers isolated across switches", async () => {
+    Object.defineProperty(window, "openSweDesktop", {
+      configurable: true,
+      value: {},
+    })
+    const coding = optimisticThread("legacy-coding", {
+      prompt: "Legacy coding",
+    })
+    const work = {
+      ...optimisticThread("work", { prompt: "Work" }),
+      experience: "agent_workspace" as const,
+      taskWorkers: [coding],
+    }
+    const listPages = vi
+      .spyOn(agentsApi, "listThreadsPage")
+      .mockImplementation(async (request) => ({
+        ...page,
+        items: request?.experience === "agent_workspace" ? [work] : [coding],
+      }))
+    const listPins = vi
+      .spyOn(agentsApi, "listPinnedThreads")
+      .mockResolvedValue([coding, work])
+    const client = testClient()
+    client.setQueryData(["session"], { login: "mode-test" })
+    client.setQueryData(agentThreadKeys.detail(coding.id), coding)
+    const { result } = renderHook(
+      () => ({
+        recents: useSidebarRecents({ repoMode: false }),
+        pins: useSidebarPinnedThreads(),
+        active: useSidebarActiveThread({
+          activeThreadId: coding.id,
+          loadedThreads: [],
+        }),
+      }),
+      { wrapper: wrapperFor(client) }
+    )
+    await waitFor(() =>
+      expect(result.current.recents.items.map((thread) => thread.id)).toEqual([
+        work.id,
+      ])
+    )
+    expect(listPages).toHaveBeenCalledWith(
+      expect.objectContaining({ experience: "agent_workspace", offset: 0 })
+    )
+    expect(listPins).toHaveBeenCalledWith("agent_workspace")
+    expect(result.current.pins.data?.map((thread) => thread.id)).toEqual([
+      work.id,
+    ])
+    expect(result.current.pins.data?.[0]?.taskWorkers).toEqual([])
+    expect(result.current.active).toBeUndefined()
+    act(() => experienceStore.write("mode-test", "coding"))
+    expect(result.current.recents.items).toEqual([])
+    expect(result.current.pins.data).toBeUndefined()
+    await waitFor(() =>
+      expect(result.current.recents.items.map((thread) => thread.id)).toEqual([
+        coding.id,
+      ])
+    )
+    expect(listPages).toHaveBeenCalledWith(
+      expect.objectContaining({ experience: "coding", offset: 0 })
+    )
+    expect(result.current.pins.data?.map((thread) => thread.id)).toEqual([
+      coding.id,
+    ])
+    expect(result.current.active?.id).toBe(coding.id)
+  })
+})
+
+describe("Work freshness", () => {
+  it("discovers external runs from all-idle pins and every loaded page, then settles at running cadence", async () => {
+    vi.useFakeTimers()
+    Object.defineProperty(window, "openSweDesktop", {
+      configurable: true,
+      value: {},
+    })
+    let status: AgentThread["status"] = "finished"
+    const work = {
+      ...optimisticThread("work", { prompt: "Work" }),
+      experience: "agent_workspace" as const,
+    }
+    vi.spyOn(agentsApi, "listPinnedThreads").mockImplementation(async () => [
+      { ...work, status },
+    ])
+    vi.spyOn(agentsApi, "listThreadsPage").mockImplementation(
+      async (request) => ({
+        ...page,
+        offset: request?.offset ?? 0,
+        limit: 10,
+        hasMore: request?.offset === 0,
+        items: [
+          {
+            ...work,
+            id: `work-${request?.offset ?? 0}`,
+            status: request?.offset === 0 ? "finished" : status,
+          },
+        ],
+      })
+    )
+    const client = testClient()
+    const { result } = renderHook(
+      () => ({
+        pins: useSidebarPinnedThreads(),
+        pages: useInfiniteThreadsPages(
+          { experience: "agent_workspace", limit: 10 },
+          { pollWhileRunning: true }
+        ),
+        page: useThreadsPage(
+          { experience: "agent_workspace", offset: 1 },
+          { pollWhileRunning: true }
+        ),
+      }),
+      { wrapper: wrapperFor(client) }
+    )
+    await vi.waitFor(() =>
+      expect(result.current.pages.data?.pages).toHaveLength(1)
+    )
+    await act(() => result.current.pages.fetchNextPage())
+    await vi.waitFor(() =>
+      expect(result.current.pages.data?.pages).toHaveLength(2)
+    )
+    status = "running"
+    await act(() => vi.advanceTimersByTimeAsync(10_000))
+    await vi.waitFor(() => {
+      expect(result.current.pins.data?.[0]?.status).toBe("running")
+      expect(result.current.pages.data?.pages[1]?.items[0]?.status).toBe(
+        "running"
+      )
+      expect(result.current.page.data?.items[0]?.status).toBe("running")
+    })
+    status = "finished"
+    await act(() => vi.advanceTimersByTimeAsync(2000))
+    await vi.waitFor(() => {
+      expect(result.current.pins.data?.[0]?.status).toBe("finished")
+      expect(result.current.pages.data?.pages[1]?.items[0]?.status).toBe(
+        "finished"
+      )
+      expect(result.current.page.data?.items[0]?.status).toBe("finished")
+    })
+  })
+
+  it("recovers Work pins, loaded offsets and detail on focus and reconnect despite production freshness defaults", async () => {
+    Object.defineProperty(window, "openSweDesktop", {
+      configurable: true,
+      value: {},
+    })
+    const client = testClient()
+    client.setDefaultOptions({
+      queries: {
+        retry: false,
+        staleTime: Infinity,
+        refetchOnWindowFocus: false,
+        refetchOnReconnect: false,
+      },
+    })
+    let title = "initial"
+    const work = {
+      ...optimisticThread("work", { prompt: "Work" }),
+      experience: "agent_workspace" as const,
+      status: "finished" as const,
+    }
+    vi.spyOn(agentsApi, "listPinnedThreads").mockImplementation(async () => [
+      { ...work, title },
+    ])
+    vi.spyOn(agentsApi, "getThread").mockImplementation(async () => ({
+      ...work,
+      title,
+    }))
+    vi.spyOn(agentsApi, "listThreadsPage").mockImplementation(
+      async (request) => ({
+        ...page,
+        offset: request?.offset ?? 0,
+        hasMore: request?.offset === 0,
+        items: [{ ...work, id: `work-${request?.offset ?? 0}`, title }],
+      })
+    )
+    const view = renderHook(
+      () => ({
+        pins: useSidebarPinnedThreads(),
+        detail: useAgentThread(work.id),
+        pages: useInfiniteThreadsPages(
+          { experience: "agent_workspace", limit: 10 },
+          { pollWhileRunning: true }
+        ),
+      }),
+      { wrapper: wrapperFor(client) }
+    )
+    await waitFor(() =>
+      expect(view.result.current.detail.data?.title).toBe("initial")
+    )
+    await act(() => view.result.current.pages.fetchNextPage())
+    await waitFor(() =>
+      expect(view.result.current.pages.data?.pages).toHaveLength(2)
+    )
+    title = "focused"
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await waitFor(() => {
+      expect(view.result.current.pins.data?.[0]?.title).toBe(title)
+      expect(view.result.current.detail.data?.title).toBe(title)
+      expect(view.result.current.pages.data?.pages[1]?.items[0]?.title).toBe(
+        title
+      )
+    })
+    title = "reconnected"
+    act(() => {
+      onlineManager.setOnline(false)
+      onlineManager.setOnline(true)
+    })
+    await waitFor(() => {
+      expect(view.result.current.pins.data?.[0]?.title).toBe(title)
+      expect(view.result.current.detail.data?.title).toBe(title)
+      expect(view.result.current.pages.data?.pages[1]?.items[0]?.title).toBe(
+        title
+      )
+    })
+    focusManager.setFocused(undefined)
+  })
+})
+
+it("keeps Work unread through optimistic row navigation", () => {
+  const client = testClient()
+  const work = {
+    ...optimisticThread("work", { prompt: "Work" }),
+    experience: "agent_workspace" as const,
+    viewed: false,
+  }
+  client.setQueryData(agentThreadKeys.detail(work.id), work)
+  client.setQueryData(agentThreadKeys.pinned, [work])
+  client.setQueryData(agentThreadKeys.page({ hierarchy: true }), {
+    ...page,
+    items: [{ ...work, id: "parent", taskWorkers: [work] }],
+  })
+  markAgentThreadViewed(client, work.id)
+  expect(
+    client.getQueryData<AgentThread>(agentThreadKeys.detail(work.id))?.viewed
+  ).toBe(false)
+  expect(
+    client.getQueryData<Array<AgentThread>>(agentThreadKeys.pinned)?.[0]?.viewed
+  ).toBe(false)
+  expect(
+    client.getQueryData<ThreadsPage>(agentThreadKeys.page({ hierarchy: true }))
+      ?.items[0]?.taskWorkers?.[0]?.viewed
+  ).toBe(false)
+})
+
+it("polls idle Work detail at ten seconds and running detail at two without changing Coding idle or focus defaults", async () => {
+  vi.useFakeTimers()
+  const client = testClient()
+  client.setDefaultOptions({
+    queries: { retry: false, refetchOnWindowFocus: false },
+  })
+  let workStatus: AgentThread["status"] = "finished"
+  let codingTitle = "before"
+  vi.spyOn(agentsApi, "getThread").mockImplementation(async (id) => ({
+    ...optimisticThread(id, { prompt: "Thread" }),
+    experience: id === "work" ? "agent_workspace" : "coding",
+    title: id === "work" ? workStatus : codingTitle,
+    status: id === "work" ? workStatus : "finished",
+  }))
+  const view = renderHook(
+    () => ({ work: useAgentThread("work"), coding: useAgentThread("coding") }),
+    { wrapper: wrapperFor(client) }
+  )
+  await vi.waitFor(() =>
+    expect(view.result.current.work.data?.status).toBe("finished")
+  )
+  workStatus = "running"
+  codingTitle = "after"
+  await act(() => vi.advanceTimersByTimeAsync(10_000))
+  await vi.waitFor(() =>
+    expect(view.result.current.work.data?.status).toBe("running")
+  )
+  expect(view.result.current.coding.data?.title).toBe("before")
+  workStatus = "finished"
+  await act(() => vi.advanceTimersByTimeAsync(2000))
+  await vi.waitFor(() =>
+    expect(view.result.current.work.data?.status).toBe("finished")
+  )
+  act(() => {
+    focusManager.setFocused(false)
+    focusManager.setFocused(true)
+  })
+  await act(() => vi.advanceTimersByTimeAsync(10))
+  expect(view.result.current.coding.data?.title).toBe("before")
+  focusManager.setFocused(undefined)
 })

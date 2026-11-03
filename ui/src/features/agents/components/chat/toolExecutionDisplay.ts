@@ -30,6 +30,52 @@ function firstStringArg(
   return undefined
 }
 
+const TEXT_ARGUMENTS = [
+  "reason",
+  "problem_description",
+  "keep_approval_reason",
+  "inline_summary",
+  "summary",
+  "description",
+  "message",
+  "comment",
+  "note",
+  "evidence",
+  "details",
+  "suggestion",
+  "instructions",
+  "prompt",
+  "custom_prompt",
+  "analysis_summary",
+  "body",
+  "content",
+  "text",
+  "query",
+  "title",
+]
+
+function toolTextArguments(
+  input: Record<string, unknown> | undefined
+): Array<[string, string]> {
+  return TEXT_ARGUMENTS.flatMap((key) => {
+    const value = input?.[key]
+    return typeof value === "string" && value.trim()
+      ? [[key, value] as [string, string]]
+      : []
+  })
+}
+
+export function formatShellCommand(command: string): string {
+  let display = command.trim()
+  const leadingCd =
+    /^cd[\t ]+(?:--[\t ]+)?(?:'[^']*'|"(?:\\[^\r\n]|[^"\\$`])*"|\\[^\r\n]|[^\s'"\\;&|<>()$`])+[\t ]*(?:&&|;(?![;&])|\r?\n)\s*/
+  while (true) {
+    const rest = display.replace(leadingCd, "")
+    if (!rest || rest === display) return display
+    display = rest
+  }
+}
+
 function truncateMiddle(value: string, maxLength: number): string {
   return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value
 }
@@ -62,11 +108,30 @@ export interface ToolDisplayParts {
   previewTooltip?: string
 }
 
+const DISPLAY_DESCRIPTION = "display_description"
+
+/** A described call reads as its description; what it would have shown moves to the tooltip. */
 export function formatToolDisplayParts(
   title: string,
   toolKind: AcpToolKind,
   input: Record<string, unknown> | undefined,
-  _projectPath?: string
+  repoPath?: string
+): ToolDisplayParts {
+  const parts = toolDisplayParts(title, toolKind, input, repoPath)
+  const description = firstStringArg(input, [DISPLAY_DESCRIPTION])
+  if (!description) return parts
+  return {
+    heading: parts.heading,
+    preview: truncateMiddle(description, 80),
+    previewTooltip: parts.previewTooltip ?? parts.preview ?? description,
+  }
+}
+
+function toolDisplayParts(
+  title: string,
+  toolKind: AcpToolKind,
+  input: Record<string, unknown> | undefined,
+  _repoPath?: string
 ): ToolDisplayParts {
   const toolName = normalizedToolName(title)
   const path = firstStringArg(input, ["path", "file_path", "target_file"])
@@ -74,9 +139,11 @@ export function formatToolDisplayParts(
   const query = firstStringArg(input, ["query"])
   const url = firstStringArg(input, ["url"])
   const command = firstStringArg(input, ["command"])
+  const text = toolTextArguments(input)[0]?.[1]
   const plain = (heading: string): ToolDisplayParts => ({
     heading,
-    preview: null,
+    preview: text ? truncateMiddle(text.trim(), 80) : null,
+    ...(text ? { previewTooltip: text } : {}),
   })
 
   switch (toolKind) {
@@ -103,9 +170,17 @@ export function formatToolDisplayParts(
     }
     case "execute": {
       if (command)
-        return { heading: "Shell", preview: truncateMiddle(command, 60) }
+        return {
+          heading: "Shell",
+          preview: truncateMiddle(formatShellCommand(command), 60),
+        }
       return plain(humanizeToolTitle(title))
     }
+    case "sql":
+      return {
+        heading: "SQL query",
+        preview: query ? truncateMiddle(query, 60) : null,
+      }
     case "edit":
       if (path) return formatPathDisplayParts("Edit", path)
       return plain(humanizeToolTitle(title))
@@ -130,13 +205,13 @@ export function formatToolDisplay(
   title: string,
   toolKind: AcpToolKind,
   input: Record<string, unknown> | undefined,
-  projectPath?: string
+  repoPath?: string
 ): string {
   const { heading, preview } = formatToolDisplayParts(
     title,
     toolKind,
     input,
-    projectPath
+    repoPath
   )
   return preview ? `${heading} ${preview}` : heading
 }

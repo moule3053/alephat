@@ -3,10 +3,13 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
+from langsmith.utils import LangSmithError
 
-from agent import session_cost
-from agent.utils import langsmith as ls_utils
+from openswe import session_cost
+from openswe.slack.records import SlackRun
+from openswe.utils import langsmith as ls_utils
 
 
 class _LangSmithThreads:
@@ -19,16 +22,27 @@ class _LangSmithThreads:
         return self._stats
 
 
-class _LangSmithClient:
-    def __init__(self, roots: list[Any], stats: Any) -> None:
+class _LangSmithRuns:
+    def __init__(self, roots: list[Any] | dict[str, list[Any]]) -> None:
         self._roots = roots
-        self.threads = _LangSmithThreads(stats)
-        self.list_kwargs: dict[str, Any] = {}
+        self.calls: list[dict[str, Any]] = []
 
-    async def list_runs(self, **kwargs: Any):
-        self.list_kwargs = kwargs
-        for root in self._roots:
+    async def query(self, **kwargs: Any):
+        self.calls.append(kwargs)
+        field = "invocation_id" if '"invocation_id"' in kwargs["filter"] else "prepare_run_id"
+        roots = self._roots.get(field, []) if isinstance(self._roots, dict) else self._roots
+        for root in roots:
             yield root
+
+
+class _LangSmithClient:
+    def __init__(self, roots: list[Any] | dict[str, list[Any]], stats: Any) -> None:
+        self.runs = _LangSmithRuns(roots)
+        self.threads = _LangSmithThreads(stats)
+        self.project = SimpleNamespace(start_time=datetime(2025, 1, 1, tzinfo=UTC))
+
+    async def read_project(self, **kwargs: Any) -> Any:
+        return self.project
 
 
 async def test_langsmith_cost_requires_correlated_fresh_aggregate(
@@ -48,11 +62,11 @@ async def test_langsmith_cost_requires_correlated_fresh_aggregate(
 
     assert result is not None
     assert result.total_cost == 1.234
-    assert client.list_kwargs["is_root"] is True
-    assert "invocation_id" in client.list_kwargs["filter"]
-    assert "prepare_run_id" in client.list_kwargs["filter"]
-    assert client.list_kwargs["select"] == ["id", "end_time"]
-    assert "limit" not in client.list_kwargs
+    assert len(client.runs.calls) == 1
+    assert '"invocation_id"' in client.runs.calls[0]["filter"]
+    assert client.runs.calls[0]["project_ids"] == ["project-id"]
+    assert client.runs.calls[0]["selects"] == ["ID", "END_TIME"]
+    assert client.runs.calls[0]["min_start_time"] == client.project.start_time
     assert client.threads.calls == [
         {
             "thread_id": "thread-1",
@@ -62,45 +76,23 @@ async def test_langsmith_cost_requires_correlated_fresh_aggregate(
     ]
 
 
-async def test_langsmith_run_cost_filters_thread_stats(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_cost_lookup_combines_legacy_metadata_matches(monkeypatch):
     root_end = datetime(2026, 8, 18, 22, 0, tzinfo=UTC)
+    earlier = SimpleNamespace(id="trace-1", end_time=root_end)
+    later = SimpleNamespace(id="trace-2", end_time=root_end + timedelta(seconds=1))
     client = _LangSmithClient(
-        [SimpleNamespace(id="trace-1", end_time=root_end)],
-        SimpleNamespace(total_cost=0.25, last_end_time=root_end),
+        {"prepare_run_id": [earlier, later]},
+        SimpleNamespace(total_cost=0.5, last_end_time=later.end_time),
     )
     monkeypatch.setattr(ls_utils, "_build_langsmith_client", lambda: client)
     monkeypatch.setattr(
         ls_utils, "_resolve_project_id_by_name", AsyncMock(return_value="project-id")
     )
-
     result = await ls_utils.get_langsmith_thread_cost("thread-1", "prepare-1", run_only=True)
-
     assert result is not None
-    assert result.total_cost == 0.25
-    assert client.threads.calls[0]["filter"] == 'eq(trace_id, "trace-1")'
-
-
-async def test_langsmith_run_cost_filters_multiple_traces(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root_end = datetime(2026, 8, 18, 22, 0, tzinfo=UTC)
-    client = _LangSmithClient(
-        [
-            SimpleNamespace(id="trace-1", end_time=root_end),
-            SimpleNamespace(id="trace-2", end_time=root_end),
-        ],
-        SimpleNamespace(total_cost=0.5, last_end_time=root_end),
-    )
-    monkeypatch.setattr(ls_utils, "_build_langsmith_client", lambda: client)
-    monkeypatch.setattr(
-        ls_utils, "_resolve_project_id_by_name", AsyncMock(return_value="project-id")
-    )
-
-    result = await ls_utils.get_langsmith_thread_cost("thread-1", "prepare-1", run_only=True)
-
-    assert result is not None
+    assert result.total_cost == 0.5
+    assert result.target_end_time == later.end_time
+    assert len(client.runs.calls) == 2
     assert client.threads.calls[0]["filter"] == (
         'or(eq(trace_id, "trace-1"), eq(trace_id, "trace-2"))'
     )
@@ -122,22 +114,41 @@ async def test_langsmith_cost_waits_for_thread_stats_freshness(
     assert await ls_utils.get_langsmith_thread_cost("thread-1", "prepare-1") is None
 
 
+@pytest.mark.parametrize("status", [400, 401, 403, 408, 429, 500])
+async def test_cost_lookup_distinguishes_rejected_requests_from_retryable_failures(
+    monkeypatch, status
+):
+    root_end = datetime(2026, 8, 18, 22, 0, tzinfo=UTC)
+    client = _LangSmithClient([SimpleNamespace(id="trace-1", end_time=root_end)], None)
+    cause = httpx.HTTPStatusError(
+        "HTTP request failed",
+        request=httpx.Request("GET", "https://example.test"),
+        response=httpx.Response(status),
+    )
+    error = LangSmithError("SDK wrapped HTTP failure")
+    error.__cause__ = cause
+    client.threads.stats = AsyncMock(side_effect=error)
+    monkeypatch.setattr(ls_utils, "_build_langsmith_client", lambda: client)
+    monkeypatch.setattr(
+        ls_utils, "_resolve_project_id_by_name", AsyncMock(return_value="project-id")
+    )
+
+    if status in {400, 401, 403}:
+        with pytest.raises(ls_utils.LangSmithCostUnavailable, match=f"HTTP {status}"):
+            await ls_utils.get_langsmith_thread_cost("thread-1", "prepare-1")
+    else:
+        assert await ls_utils.get_langsmith_thread_cost("thread-1", "prepare-1") is None
+
+
+@pytest.mark.parametrize("run_cost", [3.25, None])
 async def test_refresh_updates_exact_mapped_slack_message_in_place(
     monkeypatch: pytest.MonkeyPatch,
+    run_cost: float | None,
 ) -> None:
-    class _Store:
-        async def get_item(self, namespace: Any, key: str) -> dict[str, Any] | None:
-            if key == "run:run-1":
-                return {
-                    "value": {
-                        "run_id": "run-1",
-                        "thread_ts": "1.0",
-                        "message_ts": "1.1",
-                    }
-                }
-            return None
-
-    client: Any = SimpleNamespace(store=_Store())
+    mapping = SlackRun(channel_id="C1", run_id="run-1", thread_ts="1.0", message_ts="1.1")
+    monkeypatch.setattr(
+        session_cost, "lookup_slack_run_message_mapping", AsyncMock(return_value=mapping)
+    )
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": "Done"}},
         {"type": "actions", "elements": [{"type": "button", "action_id": "approve"}]},
@@ -146,37 +157,50 @@ async def test_refresh_updates_exact_mapped_slack_message_in_place(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": "<https://app/agents/t1|Open in Web> • model-a • 10 main-agent tokens",
+                    "text": "<https://app/agents/t1|Open in Web> • model-a • calculating cost...",
                 }
             ],
         },
     ]
-    monkeypatch.setattr(
-        session_cost,
-        "get_langsmith_thread_cost",
-        AsyncMock(return_value=SimpleNamespace(total_cost=0.42)),
-    )
+
+    async def get_cost(
+        thread_id: str,
+        invocation_id: str,
+        *,
+        run_only: bool = False,
+        lookup_start: str | None = None,
+    ) -> SimpleNamespace | None:
+        if run_only:
+            return SimpleNamespace(total_cost=run_cost) if run_cost is not None else None
+        return SimpleNamespace(total_cost=12.50)
+
+    monkeypatch.setattr(session_cost, "get_langsmith_thread_cost", get_cost)
     monkeypatch.setattr(
         session_cost,
         "fetch_slack_thread_message_by_ts",
         AsyncMock(
             return_value={
-                "text": "Done <https://app/agents/t1|Open in Web> • model-a • 10 main-agent tokens",
+                "text": "Done <https://app/agents/t1|Open in Web> • model-a • calculating cost...",
                 "blocks": blocks,
             }
         ),
     )
-    update = AsyncMock(return_value=(True, None))
+    update = AsyncMock(return_value=None)
     monkeypatch.setattr(session_cost, "update_slack_message", update)
 
-    status, reason = await session_cost._refresh_once(_state(0), client)
+    status, reason = await session_cost._refresh_once(_state(0))
 
+    if run_cost is None:
+        assert status == "pending"
+        update.assert_not_awaited()
+        return
     assert (status, reason) == ("updated", "Slack footer updated")
     update.assert_awaited_once()
     args = update.await_args
     assert args is not None
     assert args.args[:2] == ("C1", "1.1")
-    assert args.args[2].endswith("model-a • $0.42")
+    assert args.args[2].endswith("model-a • $3.25 ($12.50)")
+    assert args.kwargs["blocks"][-1]["elements"][0]["text"].endswith("$3.25 ($12.50)")
     assert "main-agent tokens" not in args.args[2]
     assert args.kwargs["blocks"][1] == blocks[1]
 
@@ -204,29 +228,6 @@ def _state(attempt: int) -> dict[str, Any]:
         "thread_ts": "1.0",
         "attempt": attempt,
     }
-
-
-async def test_refresh_schedules_bounded_stateless_retry(monkeypatch: pytest.MonkeyPatch) -> None:
-    client: Any = _Client()
-    monkeypatch.setattr(
-        session_cost,
-        "_refresh_once",
-        AsyncMock(return_value=("pending", "LangSmith not ready")),
-    )
-
-    result = await session_cost.run_session_cost_refresh(_state(0), client=client)
-
-    assert result == {
-        "status": "retry_scheduled",
-        "reason": "LangSmith not ready",
-        "attempt": 1,
-    }
-    created = client.runs.created[0]
-    assert created["thread_id"] is None
-    assert created["assistant_id"] == "scheduler"
-    assert created["after_seconds"] == 30
-    assert created["on_completion"] == "delete"
-    assert "webhook" not in created
 
 
 async def test_refresh_stops_after_final_attempt(monkeypatch: pytest.MonkeyPatch) -> None:

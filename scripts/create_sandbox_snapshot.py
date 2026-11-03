@@ -1,19 +1,19 @@
-"""Create a LangSmith sandbox snapshot for alephat."""
+"""Create a LangSmith sandbox snapshot for open-swe."""
 
 import argparse
 
 from langsmith.sandbox import SandboxClient
 
-from agent.config import ENV
+from openswe.config import ENV
 
-DEFAULT_IMAGE = "johanneslangchain/alephat-sandbox:gh-cli-amd64"
+DEFAULT_IMAGE = "johanneslangchain/open-swe-sandbox:gh-cli-amd64"
 DEFAULT_FS_CAPACITY = 32 * 1024**3  # 32 GiB
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create a LangSmith sandbox snapshot")
     parser.add_argument(
-        "--name", default="alephat-gh-amd64", help="Snapshot name (default: alephat-gh-amd64)"
+        "--name", default="open-swe-gh-amd64", help="Snapshot name (default: open-swe-gh-amd64)"
     )
     parser.add_argument(
         "--image", default=DEFAULT_IMAGE, help=f"Docker image (default: {DEFAULT_IMAGE})"
@@ -41,7 +41,7 @@ def main() -> None:
         fs_capacity_bytes=args.fs_capacity,
     )
     print(f"Snapshot created: {snapshot.id}")
-    print(f"\nAdd to your .env:\n  DEFAULT_SANDBOX_SNAPSHOT_ID={snapshot.id}")
+    print("\nSet it as a workspace's base snapshot from the dashboard Workspaces page.")
 
 
 if __name__ == "__main__":

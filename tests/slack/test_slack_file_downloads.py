@@ -1,15 +1,14 @@
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlparse
 
 import httpx2
 import pytest
 
-from agent.slack import client as slack_client
-from agent.slack import webhook as slack_webhook
-from agent.utils import url_safety
+from openswe.slack import client as slack_client
+from openswe.slack import staged_files
+from openswe.utils import url_safety
 
 
 class DownloadStream(httpx2.AsyncByteStream):
@@ -42,134 +41,20 @@ def download_http(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         httpx2,
         "AsyncClient",
-        lambda **kwargs: async_client(**kwargs, transport=httpx2.MockTransport(handle)),
+        lambda **kwargs: async_client(**{**kwargs, "transport": httpx2.MockTransport(handle)}),
     )
     monkeypatch.setattr(
         url_safety,
         "resolve_and_validate",
-        lambda url: (True, "", urlparse(url).hostname, [(None, None, None, None, ("1.1.1.1", 0))]),
+        lambda url: (urlparse(url).hostname, ["1.1.1.1"]),
     )
-    monkeypatch.setattr(slack_client, "SLACK_BOT_TOKEN", "test-slack-token")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "test-slack-token")
     monkeypatch.setattr(slack_client, "SLACK_FILE_DOWNLOAD_MAX_BYTES", 3)
     return responses, requests
 
 
-def _file(name: str, url: str, mimetype: str = "application/zip") -> dict[str, Any]:
-    return {"name": name, "url_private": url, "mimetype": mimetype}
-
-
-def _entry(name: str, url: str) -> slack_webhook.SlackFileEntry:
-    return slack_webhook.SlackFileEntry(name=name, url=url)
-
-
-def test_slack_file_entries_skips_images_and_dedupes_by_url() -> None:
-    messages = [
-        {
-            "files": [
-                _file("bundle.zip", "https://files.slack.com/a/bundle.zip"),
-                _file("shot.png", "https://files.slack.com/a/shot.png", "image/png"),
-                {"name": "no-url.txt"},
-            ]
-        },
-        {"files": [_file("bundle.zip", "https://files.slack.com/a/bundle.zip")]},
-    ]
-
-    entries = slack_webhook._slack_file_entries(messages)
-
-    assert [entry.name for entry in entries] == ["bundle.zip"]
-
-
-def test_slack_file_entries_caps_attachment_count() -> None:
-    files = [
-        _file(f"f{index}.zip", f"https://files.slack.com/a/f{index}.zip") for index in range(25)
-    ]
-
-    entries = slack_webhook._slack_file_entries([{"files": files}])
-
-    assert len(entries) == slack_webhook._MAX_SLACK_FILE_ATTACHMENTS
-
-
-@pytest.mark.parametrize(
-    ("name", "url", "expected"),
-    [
-        ("bundle.zip", "https://files.slack.com/a/x", "bundle.zip"),
-        ("../../etc/passwd", "https://files.slack.com/a/fallback.zip", "fallback.zip"),
-        ("", "https://files.slack.com/a/from-url.tar.gz", "from-url.tar.gz"),
-        ("weird name!.txt", "https://files.slack.com/a/x", "weird_name_.txt"),
-    ],
-)
-def test_sanitize_slack_filename(name: str, url: str, expected: str) -> None:
-    assert slack_webhook._sanitize_slack_filename(name, url) == expected
-
-
-@pytest.mark.asyncio
-async def test_download_slack_files_stages_into_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
-    backend = MagicMock()
-    backend.aupload_files = AsyncMock(return_value=[{"error": None}])
-    monkeypatch.setattr(
-        "agent.sandboxes.lifecycle.ensure_sandbox_for_thread", AsyncMock(return_value=backend)
-    )
-    monkeypatch.setattr(
-        slack_webhook.slack_utils, "download_slack_file", AsyncMock(return_value=b"zip")
-    )
-
-    staged = await slack_webhook._download_slack_files_to_sandbox(
-        [_entry("bundle.zip", "https://files.slack.com/a/bundle.zip")], "thread-1"
-    )
-
-    assert staged == [
-        slack_webhook.StagedSlackFile("bundle.zip", f"{slack_webhook._SLACK_FILE_DIR}/bundle.zip")
-    ]
-    uploaded_path, uploaded_content = backend.aupload_files.await_args.args[0][0]
-    assert uploaded_path == f"{slack_webhook._SLACK_FILE_DIR}/bundle.zip"
-    assert uploaded_content == b"zip"
-
-
-@pytest.mark.asyncio
-async def test_download_slack_files_skips_failed_download(monkeypatch: pytest.MonkeyPatch) -> None:
-    backend = MagicMock()
-    backend.aupload_files = AsyncMock(return_value=[{"error": None}])
-    monkeypatch.setattr(
-        "agent.sandboxes.lifecycle.ensure_sandbox_for_thread", AsyncMock(return_value=backend)
-    )
-    monkeypatch.setattr(
-        slack_webhook.slack_utils,
-        "download_slack_file",
-        AsyncMock(
-            side_effect=[
-                slack_client.SlackFileDownloadError("file_too_large"),
-                b"ok",
-            ]
-        ),
-    )
-
-    staged = await slack_webhook._download_slack_files_to_sandbox(
-        [
-            _entry("huge.zip", "https://files.slack.com/a/huge.zip"),
-            _entry("small.zip", "https://files.slack.com/a/small.zip"),
-        ],
-        "thread-1",
-    )
-
-    assert staged == [
-        slack_webhook.StagedSlackFile("small.zip", f"{slack_webhook._SLACK_FILE_DIR}/small.zip")
-    ]
-
-
-@pytest.mark.asyncio
-async def test_download_slack_files_tolerates_unreachable_sandbox(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "agent.sandboxes.lifecycle.ensure_sandbox_for_thread",
-        AsyncMock(side_effect=RuntimeError("sandbox unreachable")),
-    )
-
-    staged = await slack_webhook._download_slack_files_to_sandbox(
-        [_entry("bundle.zip", "https://files.slack.com/a/bundle.zip")], "thread-1"
-    )
-
-    assert staged == []
+def _entry(name: str, url: str) -> staged_files.SlackFileEntry:
+    return staged_files.SlackFileEntry(name=name, url=url)
 
 
 @pytest.mark.asyncio
@@ -213,31 +98,6 @@ async def test_download_slack_file_stops_reading_oversize_payload(
 
 
 @pytest.mark.asyncio
-async def test_download_slack_file_rejects_large_content_length_without_reading(
-    download_http,
-) -> None:
-    responses, _ = download_http
-    stream = DownloadStream([b"oversized"])
-    responses.append(httpx2.Response(200, headers={"Content-Length": "9"}, stream=stream))
-
-    with pytest.raises(slack_client.SlackFileDownloadError, match="file_too_large"):
-        await slack_client.download_slack_file("https://files.slack.com/a.zip")
-    assert stream.read_count == 0
-    assert stream.closed
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("payload", [b"", b"zip"])
-async def test_download_slack_file_accepts_payload_up_to_limit(download_http, payload) -> None:
-    responses, _ = download_http
-    stream = DownloadStream([payload[:1], payload[1:]])
-    responses.append(httpx2.Response(200, stream=stream))
-
-    assert await slack_client.download_slack_file("https://files.slack.com/a.zip") == payload
-    assert stream.closed
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [httpx2.ReadError("interrupted"), asyncio.CancelledError()])
 async def test_download_slack_file_closes_interrupted_stream(download_http, failure) -> None:
     responses, _ = download_http
@@ -263,11 +123,13 @@ async def test_download_slack_file_closes_redirect_before_blocking_private_host(
         httpx2.Response(302, headers={"Location": "http://127.0.0.1/file"}, stream=stream)
     )
     resolve = url_safety.resolve_and_validate
-    monkeypatch.setattr(
-        url_safety,
-        "resolve_and_validate",
-        lambda url: (False, "private host", None, None) if "127.0.0.1" in url else resolve(url),
-    )
+
+    def public_host(url: str) -> tuple[str, list[str]]:
+        if "127.0.0.1" in url:
+            raise url_safety.UnsafeUrlError(url, "private host")
+        return resolve(url)
+
+    monkeypatch.setattr(url_safety, "resolve_and_validate", public_host)
 
     with pytest.raises(slack_client.SlackFileDownloadError, match="unsafe_download_url"):
         await slack_client.download_slack_file("https://files.slack.com/a.zip")
@@ -277,46 +139,82 @@ async def test_download_slack_file_closes_redirect_before_blocking_private_host(
 
 
 @pytest.mark.asyncio
-async def test_download_slack_files_uploads_before_downloading_next_file(
+async def test_slack_files_wait_for_the_runs_sandbox_and_land_there_once(
     monkeypatch, tmp_path
 ) -> None:
+    """The webhook only records the files: MDA creates the thread's sandbox when its run starts."""
+    from deepagents.backends.protocol import FileUploadResponse
+
+    from openswe.sandboxes import state
+
+    metadata: dict[str, object] = {}
+
+    async def read_metadata(_thread_id: str) -> dict[str, object]:
+        return dict(metadata)
+
+    async def write_metadata(*, thread_id: str, metadata: dict[str, object]) -> None:
+        stored.update(metadata)
+
+    stored = metadata
+    client = MagicMock()
+    client.threads.update = write_metadata
+    monkeypatch.setattr(state, "get_sandbox_metadata", read_metadata)
+    monkeypatch.setattr(staged_files, "get_client", lambda: client)
+
     async def download(url: str) -> bytes:
         if url.endswith("second.zip"):
             assert (tmp_path / "bundle.zip").read_bytes() == b"zip"
         return b"zip"
 
-    async def upload(files: list[tuple[str, bytes]]) -> list[dict[str, None]]:
+    async def upload(files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
         for path, content in files:
             (tmp_path / path.rsplit("/", 1)[-1]).write_bytes(content)
-        return [{"error": None} for _ in files]
+        return [FileUploadResponse(path=path) for path, _ in files]
 
     backend = MagicMock()
-    backend.aupload_files = upload
-    monkeypatch.setattr(
-        "agent.sandboxes.lifecycle.ensure_sandbox_for_thread", AsyncMock(return_value=backend)
-    )
+    backend.aupload_files = AsyncMock(side_effect=upload)
     monkeypatch.setattr(slack_client, "download_slack_file", download)
 
-    staged = await slack_webhook._download_slack_files_to_sandbox(
+    first = await staged_files.queue_slack_files(
+        "thread-1",
         [
             _entry("bundle.zip", "https://files.slack.com/first.zip"),
             _entry("bundle.zip", "https://files.slack.com/second.zip"),
         ],
-        "thread-1",
     )
+    # A later message before the run starts names its files apart from those waiting.
+    later = await staged_files.queue_slack_files(
+        "thread-1", [_entry("bundle.zip", "https://files.slack.com/third.zip")]
+    )
+    backend.aupload_files.assert_not_awaited()
 
-    assert staged == [
-        slack_webhook.StagedSlackFile("bundle.zip", "/workspace/.alephat/slack-files/bundle.zip"),
-        slack_webhook.StagedSlackFile("bundle-1", "/workspace/.alephat/slack-files/bundle-1"),
+    run_read = dict(metadata)
+    # A message queued after the run read the thread waits for the next run, not lost.
+    racing = await staged_files.queue_slack_files(
+        "thread-1", [_entry("late.csv", "https://files.slack.com/late.csv")]
+    )
+    await staged_files.deliver_slack_files("thread-1", run_read, backend)
+    assert metadata[staged_files.PENDING_SLACK_FILES_KEY] == [
+        {"url": "https://files.slack.com/late.csv", "path": racing[0].sandbox_path}
     ]
-    assert (tmp_path / "bundle-1").read_bytes() == b"zip"
+    await staged_files.deliver_slack_files("thread-1", dict(metadata), backend)
+
+    assert [*first, *later] == [
+        staged_files.StagedSlackFile("bundle.zip", "/workspace/.open-swe/slack-files/bundle.zip"),
+        staged_files.StagedSlackFile("bundle-1", "/workspace/.open-swe/slack-files/bundle-1"),
+        staged_files.StagedSlackFile("bundle-2", "/workspace/.open-swe/slack-files/bundle-2"),
+    ]
+    assert backend.aupload_files.await_count == 4
+    assert (tmp_path / "bundle-2").read_bytes() == b"zip"
+    assert metadata[staged_files.PENDING_SLACK_FILES_KEY] is None
 
 
 @pytest.mark.asyncio
 async def test_download_slack_file_requires_a_bot_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    from agent.slack import client as slack_client
+    from openswe.slack import client as slack_client
+    from openswe.slack.http import SlackConfigurationError
 
-    monkeypatch.setattr(slack_client, "SLACK_BOT_TOKEN", "")
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
 
-    with pytest.raises(slack_client.SlackFileDownloadError, match="missing_slack_bot_token"):
+    with pytest.raises(SlackConfigurationError, match="SLACK_BOT_TOKEN is required"):
         await slack_client.download_slack_file("https://files.slack.com/a/x.zip")

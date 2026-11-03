@@ -93,10 +93,10 @@ describe("cloud terminal connection", () => {
     expect(
       cloudTerminalProtocols({
         url: "wss://agent.example/terminal",
-        protocol: "alephat-terminal",
+        protocol: "open-swe-terminal",
         ticket: "signed-ticket",
       })
-    ).toEqual(["alephat-terminal", "signed-ticket"])
+    ).toEqual(["open-swe-terminal", "signed-ticket"])
   })
 
   it("keeps the actionable handshake error when close has no reason", () => {

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from deepagents.backends.protocol import FileDownloadResponse
 
-attach_tool = importlib.import_module("agent.slack.tools.attach_html")
+attach_tool = importlib.import_module("openswe.slack.tools.attach_html")
 
 
 def _config() -> dict:
@@ -61,7 +61,7 @@ def _setup(
         yield current[-1]
 
     monkeypatch.setattr(attach_tool, "slack_thread_mutation_lock", unlocked)
-    upload = AsyncMock(return_value=("F1", None))
+    upload = AsyncMock(return_value="F1")
     monkeypatch.setattr(attach_tool, "upload_slack_thread_file", upload)
     return upload
 
@@ -77,7 +77,7 @@ async def test_slack_attach_html_uploads_to_active_thread(monkeypatch: pytest.Mo
     )
 
     assert result == {"success": True, "file_id": "F1", "filename": "test.html"}
-    assert ".alephat-slack-upload-" in backend.adownload_files.await_args.args[0][0]
+    assert ".open-swe-slack-upload-" in backend.adownload_files.await_args.args[0][0]
     upload.assert_awaited_once_with(
         "C1", "1.0", "test.html", content, title="Plan", initial_comment="Preview"
     )

@@ -4,18 +4,19 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 
-from agent.github.comments import fetch_pr_comments_since_last_tag
-from agent.slack import webhook
-from agent.slack.request import SlackRequest
-from agent.slack.tools import move_thread
+from openswe.github.comments import fetch_pr_comments_since_last_tag
+from openswe.slack import move as slack_move
+from openswe.slack import webhook
+from openswe.slack.request import SlackRequest
+from openswe.slack.tools import move_thread
 
 
 @pytest.mark.asyncio
 async def test_github_batch_ends_at_authorized_event(monkeypatch):
-    from agent.github import comments
+    from openswe.github import comments
 
     event = {
-        "body": "@alephat Alice's request",
+        "body": "@open-swe Alice's request",
         "author": "alice",
         "created_at": "2026-01-01T00:00:00Z",
         "type": "pr_comment",
@@ -35,7 +36,7 @@ async def test_github_batch_ends_at_authorized_event(monkeypatch):
                     },
                     {
                         "id": 2,
-                        "body": "@alephat Bob's request",
+                        "body": "@open-swe Bob's request",
                         "user": {"login": "bob"},
                         "created_at": "2026-01-01T00:00:01Z",
                     },
@@ -53,10 +54,10 @@ async def test_github_batch_ends_at_authorized_event(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_review_batch_keeps_same_second_inline_and_ignores_non_owner_tags(monkeypatch):
-    from agent.github import comments
+    from openswe.github import comments
 
     event = {
-        "body": "@alephat address review",
+        "body": "@open-swe address review",
         "author": "alice",
         "type": "review",
         "comment_id": 90,
@@ -76,7 +77,7 @@ async def test_review_batch_keeps_same_second_inline_and_ignores_non_owner_tags(
                     },
                     {
                         "id": 2,
-                        "body": "@alephat Bob",
+                        "body": "@open-swe Bob",
                         "user": {"login": "bob"},
                         "created_at": "2026-01-01T00:00:01Z",
                     },
@@ -109,10 +110,10 @@ async def test_review_batch_keeps_same_second_inline_and_ignores_non_owner_tags(
 
 @pytest.mark.asyncio
 async def test_edited_github_trigger_keeps_context_since_previous_tag(monkeypatch):
-    from agent.github import comments
+    from openswe.github import comments
 
     event = {
-        "body": "@alephat revised request",
+        "body": "@open-swe revised request",
         "author": "alice",
         "type": "pr_comment",
         "comment_id": 1,
@@ -127,8 +128,8 @@ async def test_edited_github_trigger_keeps_context_since_previous_tag(monkeypatc
             "created_at": f"2026-01-01T00:00:0{index}Z",
         }
         for index, body in [
-            (1, "@alephat stale trigger"),
-            (2, "@alephat previous invocation"),
+            (1, "@open-swe stale trigger"),
+            (2, "@open-swe previous invocation"),
             (3, "Do not delete customer data"),
             (6, "Future context"),
         ]
@@ -152,9 +153,8 @@ async def test_private_slack_edit_rejects_non_owner(monkeypatch):
     )
     monkeypatch.setattr(webhook, "get_langgraph_client", lambda: client)
     monkeypatch.setattr(webhook.common, "get_client", lambda **kwargs: client)
-    monkeypatch.setattr(webhook.common, "refresh_user_mapping_cache", AsyncMock())
     monkeypatch.setattr(webhook.common, "get_slack_user_info", AsyncMock(return_value={}))
-    monkeypatch.setattr(webhook, "_slack_login", AsyncMock(return_value="bob"))
+    monkeypatch.setattr(webhook, "slack_login", AsyncMock(return_value="bob"))
     queue = AsyncMock()
     monkeypatch.setattr(webhook, "queue_message_for_thread", queue)
     request = SlackRequest(
@@ -196,7 +196,7 @@ async def test_private_slack_move_cannot_publish_to_channel(monkeypatch):
         ),
     )
     post = AsyncMock()
-    monkeypatch.setattr(move_thread, "post_slack_top_level_message_with_ts", post)
+    monkeypatch.setattr(slack_move, "post_slack_top_level_message_with_ts", post)
     result = await move_thread.slack_move_thread("Move here", "C1")
     assert result["success"] is False
     post.assert_not_awaited()

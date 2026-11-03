@@ -1,0 +1,45 @@
+import type { OpenPullRequest } from "@/lib/api"
+
+const inlineLimit = 3
+
+export function PullRequestChecks({ pr }: { pr: OpenPullRequest }) {
+  if (pr.failingChecks.length === 0 && pr.pendingChecks.length === 0)
+    return null
+  const overflow = pr.failingChecks.slice(inlineLimit)
+  return (
+    <div className="space-y-space-1 text-xs">
+      {pr.failingChecks.length > 0 && (
+        <p className="text-error-secondary">
+          {pr.failingChecks.slice(0, inlineLimit).map((name, index) => (
+            <span key={`${name}-${index}`}>
+              {index > 0 && <span aria-hidden="true"> · </span>}
+              {name}
+            </span>
+          ))}
+        </p>
+      )}
+      {overflow.length > 0 && (
+        <details className="text-error-secondary">
+          <summary className="cursor-pointer">+{overflow.length} more</summary>
+          <ul className="mt-space-1 space-y-space-1">
+            {overflow.map((name, index) => (
+              <li key={`${name}-${index}`}>{name}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {pr.pendingChecks.length > 0 && (
+        <details className="text-secondary">
+          <summary className="cursor-pointer">
+            {pr.pendingChecks.length} pending
+          </summary>
+          <ul className="mt-space-1">
+            {pr.pendingChecks.map((name, index) => (
+              <li key={`${name}-${index}`}>{name}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  )
+}

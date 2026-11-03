@@ -1,3 +1,5 @@
+import { Button } from "@langchain/macaw-components/Button"
+import { CaretDownIcon } from "@langchain/macaw-components/icons"
 import {
   memo,
   useCallback,
@@ -6,24 +8,26 @@ import {
   useRef,
   useState,
 } from "react"
-import { MultiFileDiff } from "@pierre/diffs/react"
 import { DiffView } from "./DiffView"
+import { SqlResultTable, parseSqlResult } from "./SqlResultTable"
 import { formatToolDisplay } from "./toolExecutionDisplay"
+import { ScopedFileDiff } from "@/features/agents/components/ScopedFileDiff"
 import type { ToolExecutionChunk } from "@/features/agents/lib/types"
 import { useDiffOptions } from "@/features/agents/utils/diffUtils"
 import { countLineChanges } from "@/features/agents/utils/diffStats"
+import { cn } from "@/lib/utils"
 
 interface ToolExecutionProps {
   chunk: ToolExecutionChunk
-  projectPath?: string
+  repoPath?: string
   onApprove?: (approvalRequestId: string) => void
   onReject?: (approvalRequestId: string) => void
   onAutoApprove?: (approvalRequestId: string) => void
 }
 
-function stripProjectPath(path: string, projectPath?: string): string {
-  if (!projectPath || !path.startsWith(projectPath)) return path
-  const relative = path.slice(projectPath.length)
+function stripRepoPath(path: string, repoPath?: string): string {
+  if (!repoPath || !path.startsWith(repoPath)) return path
+  const relative = path.slice(repoPath.length)
   return relative.startsWith("/") ? "." + relative : "./" + relative
 }
 
@@ -73,8 +77,10 @@ const InlineDiffCollapsible = memo(function InlineDiffCollapsible({
   }, [expanded, updateScrollIndicators])
 
   const edgeShadows = [
-    scrolledFromTop ? "inset 0 12px 10px -10px rgba(42, 63, 95, 0.95)" : "",
-    scrolledFromBottom ? "inset 0 -12px 10px -10px rgba(42, 63, 95, 0.95)" : "",
+    scrolledFromTop ? "inset 0 12px 10px -10px var(--shadow-color-subtle)" : "",
+    scrolledFromBottom
+      ? "inset 0 -12px 10px -10px var(--shadow-color-subtle)"
+      : "",
   ]
     .filter(Boolean)
     .join(", ")
@@ -84,55 +90,71 @@ const InlineDiffCollapsible = memo(function InlineDiffCollapsible({
 
   if (!expanded) {
     return (
-      <div className="my-0.5 text-[12px] leading-5">
-        <button
+      <div className="my-0.5 text-xxs leading-5">
+        <Button
+          color="secondary"
+          variant="plain"
+          size="xs"
+          aria-label={`Edited ${fileName}`}
           type="button"
           onClick={toggle}
-          className="inline-flex items-center gap-1.5 text-left transition-colors hover:brightness-125"
+          className="h-auto justify-start gap-space-2 border-0 px-0 text-left hover:brightness-125"
         >
-          <span className={isError ? "text-red-400" : "text-muted-foreground"}>
-            Edited <span className="text-primary">{fileName}</span>
+          <span className={isError ? "text-error-secondary" : "text-secondary"}>
+            Edited <span className="text-brand-primary">{fileName}</span>
           </span>
-        </button>
+        </Button>
       </div>
     )
   }
 
   return (
-    <div className="my-1">
-      <div className="my-0.5 mb-1.5 text-[12px] leading-5">
-        <button
+    <div className="my-space-1">
+      <div className="my-0.5 mb-space-1 text-xxs leading-5">
+        <Button
+          color="secondary"
+          variant="plain"
+          size="xs"
+          aria-label="Edited file"
           type="button"
           onClick={toggle}
-          className="inline-flex items-center gap-1.5 text-left transition-colors hover:brightness-125"
+          className="h-auto justify-start gap-space-2 border-0 px-0 text-left hover:brightness-125"
         >
-          <span className={isError ? "text-red-400" : "text-muted-foreground"}>
+          <span className={isError ? "text-error-secondary" : "text-secondary"}>
             Edited file
           </span>
-          <span className="text-[10px] text-muted-foreground/70">▾</span>
-        </button>
+          <CaretDownIcon
+            size={10}
+            weight="fill"
+            className="text-icon-tertiary"
+            aria-hidden
+          />
+        </Button>
       </div>
 
-      <div className="overflow-hidden rounded-lg border border-border/60 bg-muted">
-        <div className="flex items-center gap-2 px-3 py-2">
+      <div className="overflow-hidden rounded-lg border border-subtle bg-surface-level-2">
+        <div className="flex items-center gap-space-2 px-space-3 py-space-2">
           <span
-            className={`min-w-0 flex-1 truncate text-[13px] ${isError ? "text-red-400" : "text-primary"}`}
+            className={cn(
+              "min-w-0 flex-1 truncate text-xs",
+              isError ? "text-error-secondary" : "text-brand-primary"
+            )}
           >
             {filePath}
           </span>
-          <span className="flex shrink-0 items-center gap-2 text-xs">
-            <span className="text-green-400">+{additions}</span>
-            <span className="text-red-400">-{deletions}</span>
+          <span className="flex shrink-0 items-center gap-space-2 text-xxs">
+            <span className="text-success-secondary">+{additions}</span>
+            <span className="text-error-secondary">-{deletions}</span>
           </span>
         </div>
 
         <div
           ref={scrollRef}
           onScroll={updateScrollIndicators}
-          className="max-h-[250px] overflow-auto border-t border-border"
+          className="max-h-[250px] overflow-auto border-t border-default"
           style={{ boxShadow: edgeShadows || "none" }}
         >
-          <MultiFileDiff
+          <ScopedFileDiff
             oldFile={oldFile}
             newFile={newFile}
             options={inlineDiffOptions}
@@ -145,7 +167,7 @@ const InlineDiffCollapsible = memo(function InlineDiffCollapsible({
 
 export const ToolExecution = memo(function ToolExecution({
   chunk,
-  projectPath,
+  repoPath,
 }: ToolExecutionProps) {
   const { title, toolKind, input, status, output } = chunk
   const diffs = chunk.diffs?.length
@@ -163,7 +185,7 @@ export const ToolExecution = memo(function ToolExecution({
   const isCompletedEditOp =
     isEditOp && diffData && (status === "completed" || status === "error")
   const editedFilePath = diffData
-    ? stripProjectPath(diffData.filePath, projectPath)
+    ? stripRepoPath(diffData.filePath, repoPath)
     : ""
   const editedFileName = editedFilePath ? getFileName(editedFilePath) : ""
   const diffStats = diffData
@@ -190,44 +212,48 @@ export const ToolExecution = memo(function ToolExecution({
 
   if (isEditOp && status === "pending" && diffData) {
     return (
-      <div className="my-1 text-[12px] leading-5">
+      <div className="my-space-1 text-xxs leading-5">
         <DiffView diffData={diffData} />
-        <span className="text-muted-foreground/70">
-          Waiting for approval...
-        </span>
+        <span className="text-tertiary">Waiting for approval...</span>
       </div>
     )
   }
 
   if (isEditOp && status === "in_progress") {
-    const path = stripProjectPath(
+    const path = stripRepoPath(
       diffData?.filePath ||
         (input?.filePath as string) ||
         (input?.path as string) ||
         "file",
-      projectPath
+      repoPath
     )
     return (
-      <div className="my-0.5 text-[12px] leading-5">
-        <span className="text-yellow-400">Editing {getFileName(path)}...</span>
+      <div className="my-0.5 text-xxs leading-5">
+        <span className="text-status-yellow">
+          Editing {getFileName(path)}...
+        </span>
       </div>
     )
   }
 
-  const displayName = formatToolDisplay(title, toolKind, input, projectPath)
+  if (toolKind === "sql" && status === "completed" && parseSqlResult(output)) {
+    return <SqlResultTable output={output} />
+  }
+
+  const displayName = formatToolDisplay(title, toolKind, input, repoPath)
   const statusTextClass =
     status === "error"
-      ? "text-red-400"
+      ? "text-status-red"
       : status === "in_progress" || status === "pending"
-        ? "text-yellow-400"
-        : "text-muted-foreground"
+        ? "text-status-yellow"
+        : "text-secondary"
 
   return (
-    <div className="my-0.5 text-[12px] leading-5">
-      <div className="flex min-w-0 items-center gap-2">
-        <span className={`${statusTextClass} truncate`}>{displayName}</span>
+    <div className="my-0.5 text-xxs leading-5">
+      <div className="flex min-w-0 items-center gap-space-2">
+        <span className={cn(statusTextClass, "truncate")}>{displayName}</span>
         {status === "error" && output && (
-          <span className="truncate text-red-400/80">
+          <span className="truncate text-error-tertiary">
             {output.slice(0, 80)}
           </span>
         )}

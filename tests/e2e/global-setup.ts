@@ -49,14 +49,14 @@ export default async function globalSetup() {
     if (!existsSync(resolve(ui, "node_modules"))) {
       execFileSync(
         "pnpm",
-        ["install", "--frozen-lockfile", "--filter", "alephat-dashboard..."],
+        ["install", "--frozen-lockfile", "--filter", "open-swe-dashboard..."],
         {
           cwd: repoRoot,
           stdio: "inherit",
         },
       );
     }
-    execFileSync("pnpm", ["--filter", "alephat-dashboard", "run", "build"], {
+    execFileSync("pnpm", ["--filter", "open-swe-dashboard", "run", "build"], {
       cwd: repoRoot,
       stdio: "inherit",
       env: {

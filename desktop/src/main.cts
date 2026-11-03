@@ -5,6 +5,7 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const {
   app,
+  autoUpdater: nativeAutoUpdater,
   BrowserWindow,
   clipboard,
   ipcMain,
@@ -14,12 +15,20 @@ const {
   net,
   protocol,
   powerMonitor,
-  safeStorage,
   session,
   shell,
+  webContents,
 } = require("electron");
 const { autoUpdater } = require("electron-updater");
-const { BackendSupervisor } = require("./backend-supervisor.cjs");
+const {
+  ConsoleLogBuffer,
+  buildDiagnosticsReport,
+  captureProcessConsole,
+  diagnosticsFileName,
+  normalizeConsoleMessage,
+} = require("./diagnostics.cjs");
+const { LocalBridges } = require("./local-bridges.cjs");
+const { DesktopUi } = require("./desktop-ui.cjs");
 const { LocalThreadStore } = require("./local-thread-store.cjs");
 const {
   addWorktree,
@@ -27,8 +36,11 @@ const {
   checkoutBranch,
   checkpointRef,
   currentBranch,
+  defaultBranch,
+  git,
   localBranches,
   deleteRefs,
+  originRepo,
   readBranchDiff,
   readDiff,
   removeWorktree,
@@ -42,6 +54,7 @@ const {
   closeAllTerminals,
   configureTerminalIpc,
   closeThreadTerminals,
+  getUserShellEnv,
 } = require("./terminal-manager.cjs");
 const {
   addProject,
@@ -49,29 +62,43 @@ const {
   removeProject,
 } = require("./project-store.cjs");
 const { beginLogin } = require("./login-server.cjs");
-const { OpenAiOAuthManager } = require("./openai-oauth.cjs");
+const {
+  listWorkspaceFiles,
+  readWorkspacePath,
+} = require("./workspace-files.cjs");
 const { isDesktopCommandId } = require("./commands.cjs");
+const { DesktopLinks } = require("./desktop-links.cjs");
 const {
   APP_ORIGIN,
   APP_URL,
   SESSION_COOKIE_NAME,
   appRedirectUrl,
   backendRequestUrl,
+  desktopEnvironmentsUrl,
   desktopExchangeUrl,
+  desktopLoginUrl,
+  resolveAppRuntime,
+  resolveBackendUrl,
   connectExchangeUrl,
   connectLoginUrl,
-  desktopLoginUrl,
   isAppLoginUrl,
   isAppUrl,
+  headersFramedByApp,
   isConnectProvider,
   isTrustedPermissionRequest,
   isTrustedProxyRequest,
   localCallbackUrl,
-  resolveBackendUrl,
-  resolveAppRuntime,
-  staticFilePath,
+  parseDesktopEnvironments,
   validateBackendUrl,
 } = require("./config.cjs");
+const {
+  migrateDesktopConfig,
+  readSharedConfig,
+  shareSession,
+  sharedConfigPath,
+  unshareSession,
+  updateSharedConfig,
+} = require("./shared-config.js");
 
 const appRuntime = resolveAppRuntime({
   argv: process.argv,
@@ -88,7 +115,7 @@ app.setAppUserModelId(appRuntime.appUserModelId);
 
 protocol.registerSchemesAsPrivileged([
   {
-    scheme: "alephat",
+    scheme: "open-swe",
     privileges: {
       standard: true,
       secure: true,
@@ -101,15 +128,23 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 let backendUrl = null;
+// The backend the app started on; `backendUrl` differs only while switched to
+// one of its alternate environments, which lasts until the app restarts.
+let primaryBackendUrl = null;
+let alternativeEnvironments = [];
+let desktopUi: InstanceType<typeof DesktopUi> | null = null;
 let mainWindow = null;
+
+// Installed builds have no terminal; "Save Diagnostics Report…" exports these.
+const rendererConsole = new ConsoleLogBuffer(2000);
+const mainConsole = new ConsoleLogBuffer(500);
+captureProcessConsole(mainConsole);
 let setupWindow = null;
 let loginFlow = null;
 const connectFlows = new Map();
 let quitting = false;
 let localThreadStore = null;
-let lastActivity = {};
-let backendSupervisor = null;
-let openAiOAuth = null;
+let localBridges = null;
 type DesktopUpdateState = {
   status: "idle" | "downloading" | "ready" | "installing";
   version?: string;
@@ -129,9 +164,23 @@ function setUpdateState(
 let lastUpdateCheck = 0;
 let updateCheck: ReturnType<typeof autoUpdater.checkForUpdates> | null = null;
 
+async function checkAndDownloadLatest() {
+  const result = await autoUpdater.checkForUpdates();
+  const version = result?.updateInfo.version;
+  if (
+    !result?.isUpdateAvailable ||
+    updateState.status === "downloading" ||
+    version === updateState.version
+  )
+    return result;
+  setUpdateState("downloading", version);
+  void autoUpdater.downloadUpdate().catch(() => undefined);
+  return result;
+}
+
 function checkForUpdates() {
   lastUpdateCheck = Date.now();
-  updateCheck ??= autoUpdater.checkForUpdates().finally(() => {
+  updateCheck ??= checkAndDownloadLatest().finally(() => {
     updateCheck = null;
   });
   return updateCheck;
@@ -139,7 +188,8 @@ function checkForUpdates() {
 
 function checkForUpdatesInBackground() {
   if (
-    updateState.status !== "idle" ||
+    updateState.status === "downloading" ||
+    updateState.status === "installing" ||
     Date.now() - lastUpdateCheck < 60 * 60 * 1000
   )
     return;
@@ -148,21 +198,38 @@ function checkForUpdatesInBackground() {
   );
 }
 
+let updateInstallTimer: ReturnType<typeof setTimeout> | undefined;
+
+function failDesktopUpdate(error: unknown) {
+  console.warn("Desktop update failed", error);
+  const installing = updateState.status === "installing";
+  clearTimeout(updateInstallTimer);
+  setUpdateState("idle");
+  if (!installing) return;
+  quitting = false;
+  dialog.showErrorBox(
+    "Could not install the update",
+    `The update did not complete. Quit and reopen ${appRuntime.name} before continuing. ` +
+      `If updating still fails, install the latest release from https://github.com/langchain-ai/open-swe/releases/latest.\n\n` +
+      String(error),
+  );
+}
+
 function configureAutoUpdater() {
   if (!app.isPackaged) return;
-  autoUpdater.autoDownload = true;
+  autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.allowPrerelease = false;
-  autoUpdater.on("update-available", (info) =>
-    setUpdateState("downloading", info.version),
-  );
-  autoUpdater.on("update-downloaded", (info) =>
-    setUpdateState("ready", info.version),
-  );
-  autoUpdater.on("error", (error) => {
-    console.warn("Desktop update failed", error);
-    if (updateState.status === "downloading") setUpdateState("idle");
-  });
+  if (process.platform === "darwin") {
+    nativeAutoUpdater.on("update-downloaded", () =>
+      setUpdateState("ready", updateState.version),
+    );
+  } else {
+    autoUpdater.on("update-downloaded", (info) =>
+      setUpdateState("ready", info.version),
+    );
+  }
+  autoUpdater.on("error", failDesktopUpdate);
   checkForUpdatesInBackground();
   const timer = setInterval(checkForUpdatesInBackground, 4 * 60 * 60 * 1000);
   timer.unref();
@@ -173,9 +240,9 @@ function configureAutoUpdater() {
 
 async function checkForDesktopUpdates() {
   try {
-    if (updateState.status === "ready" || updateState.status === "installing")
-      return;
+    if (updateState.status === "installing") return;
     const result = await checkForUpdates();
+    if (updateState.status === "ready") return;
     if (result?.isUpdateAvailable) {
       await dialog.showMessageBox({
         type: "info",
@@ -278,9 +345,19 @@ function registeredProject(cwd) {
 }
 
 function threadRoot(thread) {
+  if (thread?.managedTaskFolder) return localThreadStore.taskRoot(thread);
   const project = thread ? registeredProject(thread.cwd) : null;
   if (!project) return null;
   return thread.worktreePath || project;
+}
+
+async function projectForRepo(repo) {
+  if (typeof repo !== "string" || !repo) return null;
+  for (const project of listProjects()) {
+    const origin = await originRepo(project.cwd);
+    if (origin?.toLowerCase() === repo.toLowerCase()) return project.cwd;
+  }
+  return null;
 }
 
 function resolveLocalProjectPath(localSessionId, value) {
@@ -336,8 +413,51 @@ async function diffThread(threadId) {
   const thread = localThreadStore.get(threadId);
   if (!thread) return thread;
   if (thread.worktreePath) return syncThreadBranch(thread);
-  const activity = await backendSupervisor.threadActivity();
-  return activity?.[threadId] === "running" ? syncThreadBranch(thread) : thread;
+  return (await threadRunning(threadId)) ? syncThreadBranch(thread) : thread;
+}
+
+/** Whether the backend has a run in flight on this thread. */
+async function threadRunning(threadId) {
+  if (!backendUrl) throw new Error("Open SWE is not connected to a backend");
+  const response = await backendFetch(
+    new URL(
+      `/dashboard/api/threads/${encodeURIComponent(threadId)}?mark_viewed=false`,
+      backendUrl,
+    ).toString(),
+    { signal: AbortSignal.timeout(10_000) },
+  );
+  if (response.status === 404) return false;
+  if (!response.ok)
+    throw new Error(`Could not read the thread's status (${response.status})`);
+  const thread = await response.json();
+  return thread?.status === "running";
+}
+
+/**
+ * Sends one bridge call to the backend under the app's session. A long poll
+ * brings its own abort signal; anything else gives up rather than hold a quit.
+ */
+async function sendBridgeRequest(method, apiPath, { body, signal }) {
+  if (!backendUrl) throw new Error("Open SWE is not connected to a backend");
+  const response = await backendFetch(
+    new URL(`/dashboard/api${apiPath}`, backendUrl).toString(),
+    {
+      method,
+      headers: body ? { "content-type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+      // A reply carries a command's output, which can take a while to upload.
+      signal:
+        signal ??
+        AbortSignal.timeout(apiPath.includes("/requests/") ? 120_000 : 15_000),
+    },
+  );
+  const text = await response.text();
+  if (!response.ok)
+    throw Object.assign(
+      new Error(`HTTP ${response.status}: ${text.slice(0, 600)}`),
+      { status: response.status },
+    );
+  return text ? JSON.parse(text) : null;
 }
 
 async function createThreadWorktree(thread, baseBranch) {
@@ -352,30 +472,80 @@ async function createThreadWorktree(thread, baseBranch) {
     worktreesPath(),
     `${path.basename(repo)}-${token}`,
   );
-  await addWorktree(repo, worktree, `alephat/local-${token}`, base);
+  await addWorktree(repo, worktree, `open-swe/local-${token}`, base, true);
   return localThreadStore.setWorktree(thread.id, worktree, true);
 }
 
+function sendLocalThreadsChanged() {
+  if (mainWindow && !mainWindow.isDestroyed())
+    mainWindow.webContents.send("desktop:local-threads-changed");
+}
+
 /**
- * Two agents in one working tree overwrite each other's edits and fight over
- * its branch, and the backend now runs local threads concurrently, so a tree an
- * agent is working in is off limits to everything else.
+ * The agent's way out of the user's own checkout: a new branch in a new
+ * worktree, which the thread then follows. The checkout itself is untouched.
  */
-async function assertWorkspaceFree(root, exceptThreadId = null) {
-  const activity = await backendSupervisor.threadActivity();
-  if (!activity) throw new Error("Could not reach the local Alephat backend");
-  const busy = localThreadStore
-    .list()
-    .find(
-      (thread) =>
-        thread.id !== exceptThreadId &&
-        activity[thread.id] === "running" &&
-        threadRoot(thread) === root,
-    );
-  if (busy)
+async function handoffThreadToWorktree(threadId, params) {
+  const thread = localThreadStore.get(threadId);
+  if (!thread) throw new Error("This thread does not run on This Mac");
+  const repo = await repoRoot(thread.cwd);
+  if (!repo) throw new Error("Local projects must be git repositories");
+  const branch = await validBranchName(repo, params.branch);
+  if (!branch) throw new Error("A valid branch name is required");
+  const ref = (await localBranches(repo)).find((it) => it.name === branch);
+  if (params.user_checkout)
+    return moveThreadToUserCheckout(thread, repo, ref ?? { name: branch });
+  if (ref?.current || ref?.worktreePath)
+    return followCheckedOutBranch(thread, repo, ref);
+  if (thread.worktreePath)
     throw new Error(
-      `“${busy.title}” is working in ${path.basename(root)}. Stop it, or use a worktree.`,
+      `This thread already works in its own worktree at ${thread.worktreePath}`,
     );
+  const base =
+    (await validBranchName(repo, params.base_ref)) ??
+    (await defaultBranch(repo));
+  if (!base) throw new Error("Pass base_ref: no default branch was found");
+  const fromOrigin = params.start_from_origin !== false;
+  if (fromOrigin) await git(repo, ["fetch", "origin", base], null, 60_000);
+  const startPoint = fromOrigin ? `origin/${base}` : base;
+  const worktree = path.join(
+    worktreesPath(),
+    `${path.basename(repo)}-${randomBytes(4).toString("hex")}`,
+  );
+  await addWorktree(repo, worktree, branch, startPoint);
+  await closeThreadTerminals(threadId);
+  await recordLocalCheckpoint(
+    localThreadStore.setWorktree(threadId, worktree, true),
+  );
+  sendLocalThreadsChanged();
+  return { worktree_path: worktree, branch, base: startPoint };
+}
+
+/** Moves the thread to wherever `ref` is already checked out, as the branch picker does. */
+async function followCheckedOutBranch(thread, repo, ref) {
+  const target = ref.worktreePath ? managedWorktree(ref.worktreePath) : null;
+  if (ref.worktreePath && !target)
+    throw new Error(
+      `“${ref.name}” is checked out in ${ref.worktreePath}, which Open SWE does not manage.`,
+    );
+  await moveThreadWorkspace(thread, target);
+  sendLocalThreadsChanged();
+  return { worktree_path: target ?? repo, branch: ref.name };
+}
+
+/** Switches the user's own checkout to `ref`, as the project branch picker does, and moves the thread there. */
+async function moveThreadToUserCheckout(thread, repo, ref) {
+  if (ref.worktreePath)
+    throw new Error(
+      `“${ref.name}” is checked out in the worktree ${ref.worktreePath}, so it cannot also be checked out in ${repo}.`,
+    );
+  if (!ref.current) {
+    await git(repo, ["fetch", "origin", ref.name], null, 60_000).catch(
+      (error) => console.warn("Could not fetch the branch", error),
+    );
+    await checkoutBranch(repo, ref.name);
+  }
+  return followCheckedOutBranch(thread, repo, { ...ref, current: true });
 }
 
 /**
@@ -391,7 +561,6 @@ async function startThreadWorktree(thread, baseBranch) {
     : null;
   if (!existing || !managedWorktree(existing))
     return createThreadWorktree(thread, baseBranch);
-  await assertWorkspaceFree(existing, thread.id);
   return localThreadStore.setWorktree(thread.id, existing);
 }
 
@@ -411,6 +580,17 @@ async function ensureThreadWorktree(thread) {
   if (!repo || !branch) return thread;
   await restoreWorktree(repo, thread.worktreePath, branch);
   return thread;
+}
+
+async function discardLocalThread(thread) {
+  await localBridges.close(thread.id);
+  await closeThreadTerminals(thread.id);
+  localThreadStore.delete(thread.id);
+  if (thread.checkpoint.repo && thread.checkpoint.ref)
+    deleteRefs(thread.checkpoint.repo, [thread.checkpoint.ref]);
+  await discardThreadWorktree(thread).catch((error) =>
+    console.warn("Could not remove a local thread's worktree", error),
+  );
 }
 
 /**
@@ -439,6 +619,16 @@ function configureDesktopIpc() {
     requireTrustedDesktopIpc(event);
     if (typeof value === "string") clipboard.writeText(value);
   });
+  ipcMain.handle("desktop:copy-page-link", (event) => {
+    requireTrustedDesktopIpc(event);
+    if (!backendUrl) throw new Error("Open SWE is not connected to a backend");
+    const source = new URL(event.sender.getURL());
+    const target = new URL(backendUrl);
+    target.pathname = source.pathname;
+    target.search = source.search;
+    target.hash = source.hash;
+    clipboard.writeText(target.toString());
+  });
   ipcMain.handle("desktop:version", (event) => {
     requireTrustedDesktopIpc(event);
     return app.getVersion();
@@ -454,18 +644,22 @@ function configureDesktopIpc() {
     const version = updateState.version;
     setUpdateState("installing", version);
     quitting = true;
+    updateInstallTimer = setTimeout(
+      () =>
+        failDesktopUpdate(
+          new Error("Installation timed out after 60 seconds."),
+        ),
+      60_000,
+    );
+    updateInstallTimer.unref();
     try {
-      await Promise.all([
-        closeAllTerminals(),
-        backendSupervisor?.close(),
-        openAiOAuth?.close(),
-      ]);
+      await Promise.all([closeAllTerminals(), localBridges?.closeAll()]);
+      if (!quitting) return false;
       autoUpdater.quitAndInstall(false, true);
       return true;
     } catch (error) {
-      quitting = false;
-      setUpdateState("ready", version);
-      throw error;
+      failDesktopUpdate(error);
+      return false;
     }
   });
 
@@ -522,7 +716,6 @@ function configureDesktopIpc() {
         ? registeredProject(input.cwd)
         : null;
     if (!project) throw new Error("Project is not registered");
-    await assertWorkspaceFree(project);
     return checkoutBranch(project, input.branch);
   });
 
@@ -548,7 +741,7 @@ function configureDesktopIpc() {
     const options = {
       type: "warning",
       title: "Remove project",
-      message: `Remove “${project.name}” from Alephat?`,
+      message: `Remove “${project.name}” from Open SWE?`,
       detail: `${project.cwd}\n\nThis does not delete files from your Mac.`,
       buttons: ["Cancel", "Remove"],
       defaultId: 0,
@@ -598,99 +791,118 @@ function configureDesktopIpc() {
     requireTrustedDesktopIpc(event);
     return resolveLocalProjectPath(input?.localSessionId, input?.path);
   });
-  ipcMain.handle("desktop:local-model-credential-status", (event, modelId) => {
-    requireTrustedDesktopIpc(event);
-    return backendSupervisor.credentialStatus(modelId);
-  });
-  ipcMain.handle("desktop:local-openai-sign-in", async (event) => {
-    requireTrustedDesktopIpc(event);
-    if (!openAiOAuth) throw new Error("ChatGPT sign-in is unavailable");
-    return openAiOAuth.login((url) => shell.openExternal(url));
-  });
-  ipcMain.handle("desktop:start-local-thread", async (event, input) => {
+  /**
+   * Set up a "This Mac" thread the renderer is about to start in the cloud as
+   * `threadId`: its checkout (or a fresh worktree), the diff baseline, and the
+   * bridge the agent will run its commands through. The renderer names the
+   * bridge and repo on the thread's first `run.start`.
+   */
+  ipcMain.handle("desktop:prepare-local-thread", async (event, input) => {
     requireTrustedDesktopIpc(event);
     const cwd =
       typeof input?.cwd === "string" ? registeredProject(input.cwd) : null;
-    if (!cwd)
-      throw new Error(
-        "Add a valid project to Alephat before starting a local agent",
-      );
-    await backendSupervisor.start();
-    if (input?.workspaceMode !== "worktree") await assertWorkspaceFree(cwd);
-    let thread = localThreadStore.create({ ...input, cwd });
+    if (!cwd && input?.taskWorkspace !== true)
+      throw new Error("Choose a folder before starting a local agent");
+    if (!cwd && input?.cwd != null) throw new Error("Folder is not registered");
+    let thread = cwd
+      ? localThreadStore.create({ id: input?.threadId, cwd })
+      : localThreadStore.createTask(input?.threadId);
     try {
-      if (input?.workspaceMode === "worktree")
+      if (cwd && input?.workspaceMode === "worktree")
         thread = await startThreadWorktree(thread, input?.baseBranch);
-      thread = await recordLocalCheckpoint(thread);
-      await backendSupervisor.createThread(thread.id);
+      if (!thread.managedTaskFolder)
+        thread = await recordLocalCheckpoint(thread);
+      const bridgeId = await localBridges.ensure(thread.id);
+      return {
+        bridgeId,
+        repo: thread.managedTaskFolder
+          ? null
+          : await originRepo(threadRoot(thread)),
+      };
     } catch (error) {
-      localThreadStore.delete(thread.id);
-      if (thread.checkpoint.repo && thread.checkpoint.ref)
-        deleteRefs(thread.checkpoint.repo, [thread.checkpoint.ref]);
-      await discardThreadWorktree(thread).catch(() => {});
+      await discardLocalThread(thread);
       throw error;
     }
-    return thread;
   });
-  ipcMain.handle("desktop:get-local-prompt", (event, threadId) => {
+  /**
+   * Move a cloud thread onto This Mac: the worktree it had here, or a fresh one
+   * of the project whose origin is the thread's repository, and the bridge its
+   * next run hands the cloud checkout over through.
+   */
+  ipcMain.handle("desktop:take-over-thread", async (event, input) => {
     requireTrustedDesktopIpc(event);
-    return localThreadStore.pendingPrompt(threadId);
+    const existing = localThreadStore.get(input?.threadId);
+    if (existing?.managedTaskFolder) return localBridges.ensure(existing.id);
+    if (existing) {
+      // Its worktree and bridge may be the source of a handoff still pending.
+      // A thread that ran in the user's own checkout moves to a worktree, so
+      // the handoff never overwrites that checkout.
+      const thread = existing.worktreePath
+        ? await ensureThreadWorktree(existing)
+        : await recordLocalCheckpoint(
+            await createThreadWorktree(existing, null),
+          );
+      return localBridges.ensure(thread.id);
+    }
+    if (input?.repo != null && typeof input.repo !== "string")
+      throw new Error("Invalid thread repository");
+    if (!input?.repo?.trim()) {
+      const thread = localThreadStore.createTask(input?.threadId);
+      try {
+        return await localBridges.ensure(thread.id);
+      } catch (error) {
+        await discardLocalThread(thread);
+        throw error;
+      }
+    }
+    const cwd = await projectForRepo(input.repo);
+    if (!cwd)
+      throw new Error(`Add a checkout of ${input?.repo} to Open SWE first`);
+    let thread = localThreadStore.create({ id: input?.threadId, cwd });
+    try {
+      thread = await createThreadWorktree(thread, null);
+      thread = await recordLocalCheckpoint(thread);
+      return await localBridges.ensure(thread.id);
+    } catch (error) {
+      await discardLocalThread(thread);
+      throw error;
+    }
   });
-  ipcMain.handle("desktop:clear-local-prompt", (event, threadId) => {
-    requireTrustedDesktopIpc(event);
-    return localThreadStore.clearPrompt(threadId);
-  });
-  ipcMain.handle("desktop:get-local-thread", async (event, threadId) => {
+  /** Serve an existing thread's checkout again, before its next run. */
+  ipcMain.handle("desktop:ensure-local-bridge", async (event, threadId) => {
     requireTrustedDesktopIpc(event);
     const thread = await ensureThreadWorktree(localThreadStore.get(threadId));
-    if (!thread) return null;
-    await backendSupervisor.createThread(thread.id);
-    return thread;
+    if (!thread?.bridgeId)
+      throw new Error("This thread does not run on This Mac");
+    await localBridges.ensure(thread.id);
+    return true;
+  });
+  ipcMain.handle("desktop:open-task-folder", async (event, threadId) => {
+    requireTrustedDesktopIpc(event);
+    const root = threadRoot(localThreadStore.get(threadId));
+    if (!root) throw new Error("Task folder is unavailable");
+    const error = await shell.openPath(root);
+    if (error) throw new Error(error);
+    return true;
+  });
+  ipcMain.handle("desktop:get-local-thread", (event, threadId) => {
+    requireTrustedDesktopIpc(event);
+    return localThreadStore.get(threadId);
   });
   ipcMain.handle("desktop:list-local-threads", (event) => {
     requireTrustedDesktopIpc(event);
     return localThreadStore.list();
   });
-  ipcMain.handle("desktop:local-activity", async (event) => {
-    requireTrustedDesktopIpc(event);
-    const activity = await backendSupervisor.threadActivity();
-    if (!activity) return lastActivity;
-    for (const [threadId, status] of Object.entries(lastActivity)) {
-      if (status === "running" && activity[threadId] !== "running")
-        localThreadStore.update(threadId, { viewed: false });
-    }
-    lastActivity = activity;
-    return activity;
-  });
-  ipcMain.handle("desktop:update-local-thread", async (event, input) => {
-    requireTrustedDesktopIpc(event);
-    return localThreadStore.update(input?.threadId, {
-      ...(typeof input?.title === "string" ? { title: input.title } : {}),
-      ...(typeof input?.viewed === "boolean" ? { viewed: input.viewed } : {}),
-      ...(typeof input?.archived === "boolean"
-        ? { archived: input.archived }
-        : {}),
-      ...(typeof input?.modelId === "string" ? { modelId: input.modelId } : {}),
-      ...(typeof input?.effort === "string" ? { effort: input.effort } : {}),
-    });
-  });
-  ipcMain.handle("desktop:delete-local-thread", async (event, threadId) => {
+  /**
+   * Forget a thread the backend no longer has: stop serving it and remove the
+   * worktrees and refs this app made for it. Its files in the user's own
+   * checkout are theirs and stay.
+   */
+  ipcMain.handle("desktop:discard-local-thread", async (event, threadId) => {
     requireTrustedDesktopIpc(event);
     const thread = localThreadStore.get(threadId);
     if (!thread) return false;
-    const activity = await backendSupervisor.threadActivity();
-    if (!activity || activity[threadId] === "running")
-      throw new Error("Stop the local agent before deleting it");
-    await closeThreadTerminals(threadId);
-    try {
-      await backendSupervisor.deleteThread(threadId);
-    } catch (error) {
-      console.warn("Could not delete local LangGraph thread", error);
-    }
-    localThreadStore.delete(threadId);
-    if (thread.checkpoint.repo && thread.checkpoint.ref)
-      deleteRefs(thread.checkpoint.repo, [thread.checkpoint.ref]);
-    await discardThreadWorktree(thread);
+    await discardLocalThread(thread);
     return true;
   });
   /**
@@ -707,8 +919,7 @@ function configureDesktopIpc() {
     if (!project) throw new Error("Project is not registered");
     const branch = await validBranchName(project, input?.branch);
     if (!branch) throw new Error("Branch name is required");
-    const activity = await backendSupervisor.threadActivity();
-    if (!activity || activity[thread.id] === "running")
+    if (await threadRunning(thread.id))
       throw new Error("Stop the local agent before switching its branch");
 
     const ref = (await localBranches(project)).find(
@@ -717,17 +928,14 @@ function configureDesktopIpc() {
     if (ref?.worktreePath) {
       if (!managedWorktree(ref.worktreePath))
         throw new Error(
-          `“${branch}” is checked out in ${ref.worktreePath}, which Alephat does not manage.`,
+          `“${branch}” is checked out in ${ref.worktreePath}, which Open SWE does not manage.`,
         );
-      await assertWorkspaceFree(ref.worktreePath, thread.id);
       return moveThreadWorkspace(thread, ref.worktreePath);
     }
     if (ref?.current) {
-      await assertWorkspaceFree(project, thread.id);
       return moveThreadWorkspace(thread, null);
     }
     const root = threadRoot(thread);
-    await assertWorkspaceFree(root, thread.id);
     await checkoutBranch(root, branch);
     return syncThreadBranch(thread);
   });
@@ -769,6 +977,21 @@ function configureDesktopIpc() {
       return { status: "error", files: [], truncated: false };
     }
   });
+  const localWorkspaceRoot = (id: unknown): string => {
+    const root =
+      threadRoot(localThreadStore.get(id)) ?? projectScopeSession(id)?.cwd;
+    if (!root) throw new Error("Local workspace not found");
+    return root;
+  };
+  ipcMain.handle("desktop:read-workspace-path", (event, input) => {
+    requireTrustedDesktopIpc(event);
+    const root = localWorkspaceRoot(input?.localSessionId);
+    return readWorkspacePath(root, input.relativePath);
+  });
+  ipcMain.handle("desktop:list-workspace-files", (event, localSessionId) => {
+    requireTrustedDesktopIpc(event);
+    return listWorkspaceFiles(localWorkspaceRoot(localSessionId));
+  });
   ipcMain.handle("desktop:get-local-pr-diff", async (event, threadId) => {
     requireTrustedDesktopIpc(event);
     const thread = await diffThread(threadId);
@@ -788,46 +1011,157 @@ function configureDesktopIpc() {
       return { status: "error", files: [], truncated: false };
     }
   });
+  /** The checked-out branch's pull request, for the composer PR link. */
+  ipcMain.handle("desktop:get-local-pr", async (event, threadId) => {
+    requireTrustedDesktopIpc(event);
+    const thread = await diffThread(threadId);
+    if (!thread || !registeredProject(thread.cwd) || !thread.checkpoint.repo)
+      return null;
+    try {
+      const { pr } = await repositoryMetadata(thread.checkpoint.repo);
+      return pr;
+    } catch {
+      return null;
+    }
+  });
 }
 
-function configPath() {
+function profileConfigPath() {
   return path.join(app.getPath("userData"), "desktop-config.json");
+}
+
+/** Only packaged apps share configuration with the CLI. */
+function configPath() {
+  return !isDevelopment
+    ? sharedConfigPath(require("node:os").homedir())
+    : profileConfigPath();
+}
+
+function migrateStoredConfig() {
+  if (isDevelopment) return;
+  try {
+    migrateDesktopConfig({
+      home: require("node:os").homedir(),
+      platform: process.platform,
+      env: process.env,
+    });
+  } catch (error) {
+    console.warn("Could not migrate desktop-config.json", error);
+  }
+}
+
+function isBackendSessionCookie(cookie) {
+  return (
+    Boolean(backendUrl) &&
+    cookie.name === SESSION_COOKIE_NAME &&
+    cookie.domain.replace(/^\./, "") === new URL(backendUrl).hostname
+  );
+}
+
+/** Mirror the app's session into the shared config, so `oswe` is signed in whenever the app is. */
+async function shareBackendSession() {
+  if (isDevelopment) return;
+  session.defaultSession.cookies.on(
+    "changed",
+    (_event, cookie, cause, removed) => {
+      if (!isBackendSessionCookie(cookie)) return;
+      if (removed && cause === "overwrite") return;
+      try {
+        if (removed) unshareSession(configPath(), backendUrl, cookie.value);
+        else shareSession(configPath(), backendUrl, cookie.value);
+      } catch (error) {
+        console.warn("Could not share the desktop session with oswe", error);
+      }
+    },
+  );
+  if (!backendUrl) return;
+  try {
+    const [cookie] = await session.defaultSession.cookies.get({
+      url: backendUrl,
+      name: SESSION_COOKIE_NAME,
+    });
+    if (cookie) shareSession(configPath(), backendUrl, cookie.value);
+  } catch (error) {
+    console.warn("Could not share the desktop session with oswe", error);
+  }
 }
 
 function readStoredBackendUrl() {
   try {
-    const config = JSON.parse(fs.readFileSync(configPath(), "utf8"));
-    return typeof config.backendUrl === "string"
-      ? validateBackendUrl(config.backendUrl)
-      : undefined;
-  } catch {
+    const { backendUrl: storedBackendUrl } = readSharedConfig(configPath());
+    return storedBackendUrl ? validateBackendUrl(storedBackendUrl) : undefined;
+  } catch (error) {
+    console.warn("Could not read the stored backend URL", error);
     return undefined;
   }
 }
 
 function storeBackendUrl(value) {
   const url = validateBackendUrl(value.trim());
-  fs.mkdirSync(path.dirname(configPath()), { recursive: true });
-  fs.writeFileSync(
-    configPath(),
-    `${JSON.stringify({ backendUrl: url }, null, 2)}\n`,
-    {
-      mode: 0o600,
-    },
-  );
+  updateSharedConfig(configPath(), (config) => ({
+    ...config,
+    backendUrl: url,
+  }));
   return url;
+}
+
+/** Ask the backend the app started on which others it offers to switch to. */
+async function loadAlternativeEnvironments() {
+  const url = primaryBackendUrl;
+  if (!url) return;
+  let environments = [];
+  try {
+    const response = await fetch(desktopEnvironmentsUrl(url), {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (response.ok)
+      environments = parseDesktopEnvironments(await response.json());
+  } catch (error) {
+    console.warn("Could not read the alternate environments", error);
+  }
+  if (url !== primaryBackendUrl) return;
+  alternativeEnvironments = environments;
+  createMenu();
+}
+
+/** Point the app at `url` and reload it there, dropping the last backend's page state. */
+async function connectToBackend(url) {
+  const previousUrl = backendUrl;
+  backendUrl = url;
+  if (previousUrl && previousUrl !== url)
+    await session.defaultSession.clearStorageData({ origin: APP_URL });
+  createMenu();
+  if (mainWindow && !mainWindow.isDestroyed()) await loadApp(mainWindow);
+  else createWindow();
+}
+
+function environmentMenuItem() {
+  if (
+    !primaryBackendUrl ||
+    (!alternativeEnvironments.length && backendUrl === primaryBackendUrl)
+  )
+    return null;
+  const environments = [
+    { name: "Main", url: primaryBackendUrl },
+    ...alternativeEnvironments,
+  ];
+  return {
+    label: "Environment",
+    submenu: environments.map(({ name, url }) => ({
+      label: `${name} (${new URL(url).host})`,
+      type: "radio",
+      checked: url === backendUrl,
+      click: () => {
+        if (url !== backendUrl) void connectToBackend(url);
+      },
+    })),
+  };
 }
 
 function iconPath() {
   return app.isPackaged
     ? path.join(process.resourcesPath, "icon.png")
     : path.resolve(__dirname, "../resources/icon.png");
-}
-
-function bundledUiPath() {
-  return app.isPackaged
-    ? path.join(process.resourcesPath, "ui")
-    : path.resolve(__dirname, "../../ui/.output/public");
 }
 
 function errorPage(error) {
@@ -838,7 +1172,7 @@ function errorPage(error) {
     <meta charset="utf-8">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
     <meta name="color-scheme" content="light dark">
-    <title>Alephat</title>
+    <title>Startup error - ${appRuntime.name}</title>
     <style>
       body { margin: 0; min-height: 100vh; display: grid; place-items: center; font: 14px system-ui, sans-serif; }
       main { max-width: 520px; padding: 32px; text-align: center; }
@@ -848,7 +1182,7 @@ function errorPage(error) {
   </head>
   <body>
     <main>
-      <h1>Alephat could not start</h1>
+      <h1>${appRuntime.name} could not start</h1>
       <p>${escapeHtml(message)}</p>
       <p>Use View → Reload to try again.</p>
     </main>
@@ -964,46 +1298,59 @@ async function clearBackendCookies(url) {
   }
 }
 
-async function serveBundledUi(request) {
+async function serveDesktopUi(request: Request) {
   if (!backendUrl)
     return new Response("Backend is not configured", { status: 503 });
   const url = new URL(request.url);
   if (url.pathname.startsWith("/dashboard/api"))
     return proxyBackendRequest(request);
-  if (
-    url.pathname === "/local-graph" ||
-    url.pathname.startsWith("/local-graph/")
-  )
-    return backendSupervisor.proxy(request);
   if (!["GET", "HEAD"].includes(request.method)) {
     return new Response("Method not allowed", { status: 405 });
   }
-
-  const root = bundledUiPath();
-  let filePath = staticFilePath(root, request.url);
-  if (
-    !filePath ||
-    !fs.existsSync(filePath) ||
-    !fs.statSync(filePath).isFile()
-  ) {
-    if (path.extname(url.pathname))
-      return new Response("Not found", { status: 404 });
-    filePath = path.join(root, "_shell.html");
+  if (desktopUi?.backendUrl !== backendUrl) {
+    desktopUi = new DesktopUi(
+      backendUrl,
+      fetch,
+      path.join(app.getPath("userData"), "ui-cache"),
+      (filename: string) => net.fetch(pathToFileURL(filename).toString()),
+      process.env.OPEN_SWE_DESKTOP_UI_ARCHIVE ?? null,
+      () =>
+        void dialog.showMessageBox({
+          type: "warning",
+          message: `${appRuntime.name} needs an update`,
+          detail: `Your backend has a newer UI than this version of ${appRuntime.name} can run. You are still on the previous UI; update the desktop app to get the new one.`,
+        }),
+    );
   }
-  if (!fs.existsSync(filePath)) {
-    return new Response("Bundled UI is missing. Run pnpm run build:ui.", {
-      status: 500,
-    });
-  }
-  return net.fetch(pathToFileURL(filePath).toString());
+  return desktopUi.serve(request);
 }
 
-async function loadApp(window) {
+const appNavigations = new WeakMap<Electron.BrowserWindow, { url: string }>();
+const failedAppUrls = new WeakMap<Electron.BrowserWindow, string>();
+
+async function loadApp(window: Electron.BrowserWindow, url = APP_URL) {
   if (!backendUrl) return;
+  failedAppUrls.delete(window);
+  const navigation = { url };
+  appNavigations.set(window, navigation);
   try {
-    await window.loadURL(APP_URL);
+    await window.loadURL(url);
   } catch (error) {
-    if (!window.isDestroyed()) await window.loadURL(errorPage(error));
+    console.warn("Desktop navigation failed", error);
+    if (
+      window.isDestroyed() ||
+      appNavigations.get(window) !== navigation ||
+      (error instanceof Error &&
+        "code" in error &&
+        error.code === "ERR_ABORTED")
+    )
+      return;
+    failedAppUrls.set(window, url);
+    await window
+      .loadURL(errorPage(error))
+      .catch((pageError) =>
+        console.warn("Could not show desktop navigation error", pageError),
+      );
   }
 }
 
@@ -1012,6 +1359,10 @@ function createMenu() {
     label: "Backend URL…",
     click: () => createSetupWindow(),
   };
+  const environmentItem = environmentMenuItem();
+  const backendItems = environmentItem
+    ? [backendSettingsItem, environmentItem]
+    : [backendSettingsItem];
   const settingsItem = {
     id: "open-settings",
     label: "Settings…",
@@ -1032,7 +1383,7 @@ function createMenu() {
               { role: "about" },
               settingsItem,
               checkForUpdatesItem,
-              backendSettingsItem,
+              ...backendItems,
               { type: "separator" },
               { role: "services" },
               { type: "separator" },
@@ -1061,7 +1412,7 @@ function createMenu() {
         },
         ...(process.platform === "darwin"
           ? []
-          : [{ type: "separator" }, settingsItem, backendSettingsItem]),
+          : [{ type: "separator" }, settingsItem, ...backendItems]),
         { type: "separator" },
         { role: process.platform === "darwin" ? "close" : "quit" },
       ],
@@ -1095,10 +1446,15 @@ function createMenu() {
             if (!mainWindow || mainWindow.isDestroyed()) return;
             if (isAppUrl(mainWindow.webContents.getURL()))
               mainWindow.webContents.reload();
-            else void loadApp(mainWindow);
+            else
+              void loadApp(
+                mainWindow,
+                failedAppUrls.get(mainWindow) ?? APP_URL,
+              );
           },
         },
-        ...(isDevelopment ? [{ role: "toggleDevTools" }] : []),
+        // Installed builds too: the renderer is sandboxed with no Node access.
+        { role: "toggleDevTools" },
         { type: "separator" },
         { role: "resetZoom" },
         { role: "zoomIn" },
@@ -1124,9 +1480,14 @@ function createMenu() {
         },
         { type: "separator" },
         {
-          label: "Alephat on GitHub",
+          label: `${appRuntime.name} on GitHub`,
           click: () =>
-            void shell.openExternal("https://github.com/moule3053/alephat"),
+            void shell.openExternal("https://github.com/langchain-ai/open-swe"),
+        },
+        { type: "separator" },
+        {
+          label: "Save Diagnostics Report…",
+          click: () => void saveDiagnosticsReport(),
         },
       ],
     },
@@ -1134,7 +1495,7 @@ function createMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-async function startExternalLogin() {
+async function startExternalLogin(navigationUrl: string) {
   if (!backendUrl) return;
   loginFlow?.cancel();
   loginFlow = null;
@@ -1150,7 +1511,7 @@ async function startExternalLogin() {
     return;
   }
   loginFlow = flow;
-  void shell.openExternal(desktopLoginUrl(backendUrl, flow));
+  void shell.openExternal(desktopLoginUrl(backendUrl, flow, navigationUrl));
 
   const code = await flow.code;
   if (loginFlow !== flow) return;
@@ -1165,7 +1526,7 @@ async function startExternalLogin() {
 }
 
 /**
- * Link a Slack or Notion account from the desktop app.
+ * Link a Slack or LangSmith account from the desktop app.
  *
  * The consent leg has to run in the user's own browser, which carries neither
  * the app's session cookie nor the flow's state cookie — that mismatch is why
@@ -1279,7 +1640,7 @@ async function completeExternalLogin(verifier, code) {
 function handleNavigation(window, event, url) {
   if (isAppLoginUrl(url)) {
     event.preventDefault();
-    void startExternalLogin();
+    void startExternalLogin(url);
     return;
   }
   const callback = backendUrl ? localCallbackUrl(url, backendUrl) : null;
@@ -1296,7 +1657,7 @@ function handleNavigation(window, event, url) {
   }
 }
 
-function createWindow() {
+function createWindow(initialUrl = APP_URL) {
   if (!backendUrl) return createSetupWindow();
   const window = new BrowserWindow({
     title: appRuntime.name,
@@ -1329,7 +1690,7 @@ function createWindow() {
   window.webContents.setWindowOpenHandler(({ url }) => {
     const scheme = new URL(url).protocol;
     if (isAppLoginUrl(url)) {
-      void startExternalLogin();
+      void startExternalLogin(url);
     } else if (["http:", "https:", "mailto:"].includes(scheme)) {
       void shell.openExternal(url);
     }
@@ -1353,9 +1714,62 @@ function createWindow() {
   window.on("leave-full-screen", () =>
     window.webContents.send("desktop:fullscreen-change", false),
   );
+  window.webContents.on("console-message", (_event, details) =>
+    rendererConsole.push(normalizeConsoleMessage(details)),
+  );
   mainWindow = window;
-  void loadApp(window);
+  void loadApp(window, initialUrl);
   return window;
+}
+
+async function collectPerfSpans(window) {
+  if (!window || window.isDestroyed()) return null;
+  try {
+    const exported = await window.webContents.executeJavaScript(
+      "window.__openSwePerf ? window.__openSwePerf.export() : null",
+      true,
+    );
+    return typeof exported === "string" ? exported : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveDiagnosticsReport() {
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  const report = buildDiagnosticsReport({
+    app: {
+      name: appRuntime.name,
+      version: app.getVersion(),
+      isPackaged: app.isPackaged,
+      electron: process.versions.electron,
+      chrome: process.versions.chrome,
+      node: process.versions.node,
+      platform: process.platform,
+      arch: process.arch,
+      osRelease: require("node:os").release(),
+      locale: app.getLocale(),
+    },
+    backendHost: backendUrl ? new URL(backendUrl).host : null,
+    renderer: rendererConsole.entries(),
+    main: mainConsole.entries(),
+    perf: await collectPerfSpans(window),
+  });
+  const options = {
+    title: "Save diagnostics report",
+    defaultPath: path.join(app.getPath("downloads"), diagnosticsFileName()),
+    filters: [{ name: "Text", extensions: ["txt"] }],
+  };
+  const result = window
+    ? await dialog.showSaveDialog(window, options)
+    : await dialog.showSaveDialog(options);
+  if (result.canceled || !result.filePath) return;
+  try {
+    fs.writeFileSync(result.filePath, report, "utf8");
+    shell.showItemInFolder(result.filePath);
+  } catch (error) {
+    dialog.showErrorBox("Could not save the diagnostics report", error.message);
+  }
 }
 
 function createSetupWindow() {
@@ -1387,19 +1801,18 @@ function createSetupWindow() {
   });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", async (event, targetUrl) => {
-    if (!targetUrl.startsWith("alephat-setup://configure")) return;
+    if (!targetUrl.startsWith("open-swe-setup://configure")) return;
     event.preventDefault();
     try {
       const value = new URL(targetUrl).searchParams.get("url");
       if (!value) throw new Error("Enter a backend URL");
-      const previousUrl = backendUrl;
-      backendUrl = storeBackendUrl(value);
-      if (previousUrl && previousUrl !== backendUrl) {
-        await clearBackendCookies(previousUrl);
-        await session.defaultSession.clearStorageData({ origin: APP_URL });
-      }
-      if (mainWindow && !mainWindow.isDestroyed()) await loadApp(mainWindow);
-      else createWindow();
+      const url = storeBackendUrl(value);
+      if (primaryBackendUrl && primaryBackendUrl !== url)
+        await clearBackendCookies(primaryBackendUrl);
+      primaryBackendUrl = url;
+      alternativeEnvironments = [];
+      await connectToBackend(url);
+      void loadAlternativeEnvironments();
       window.close();
     } catch (error) {
       dialog.showErrorBox(
@@ -1414,13 +1827,33 @@ function createSetupWindow() {
   return window;
 }
 
+/** The thread's browser panel frames a LangSmith page, which cannot name the app as a frame ancestor. */
+function configureFraming() {
+  session.defaultSession.webRequest.onHeadersReceived(
+    { urls: ["https://*/*"] },
+    (details, callback) => {
+      // Requests no page made, like the main process's own, carry no webContentsId.
+      const page =
+        details.resourceType === "subFrame" &&
+        details.webContentsId !== undefined
+          ? webContents.fromId(details.webContentsId)?.getURL()
+          : undefined;
+      callback(
+        isAppUrl(page ?? "")
+          ? { responseHeaders: headersFramedByApp(details.responseHeaders) }
+          : {},
+      );
+    },
+  );
+}
+
 function configurePermissions() {
   session.defaultSession.setPermissionRequestHandler(
-    (webContents, permission, callback, details) => {
+    (requester, permission, callback, details) => {
       callback(
         isTrustedPermissionRequest(
           permission,
-          details.requestingUrl || webContents.getURL(),
+          details.requestingUrl || requester.getURL(),
         ),
       );
     },
@@ -1430,6 +1863,33 @@ function configurePermissions() {
       isTrustedPermissionRequest(permission, requestingOrigin),
   );
 }
+
+const desktopLinks = new DesktopLinks({
+  backendUrl: () => backendUrl,
+  openApp: openDesktopLink,
+  openExternal: (url: string) => shell.openExternal(url),
+});
+
+function openDesktopLink(target: string) {
+  const existingWindow =
+    mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  const window = existingWindow || createWindow(target);
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+  if (existingWindow) void loadApp(window, target);
+  return true;
+}
+
+app.on("will-continue-activity", (event, type) => {
+  if (type === "NSUserActivityTypeBrowsingWeb") event.preventDefault();
+});
+
+app.on("continue-activity", (event, type, _userInfo, details) => {
+  if (type !== "NSUserActivityTypeBrowsingWeb" || !details.webpageURL) return;
+  event.preventDefault();
+  desktopLinks.receive(details.webpageURL);
+});
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
@@ -1441,6 +1901,7 @@ if (!hasSingleInstanceLock) {
       app.quit();
       return;
     }
+
     const window = mainWindow || setupWindow || createWindow();
     if (window.isMinimized()) window.restore();
     window.show();
@@ -1448,6 +1909,7 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    migrateStoredConfig();
     try {
       backendUrl = resolveBackendUrl({
         argv: process.argv.slice(1),
@@ -1463,59 +1925,35 @@ if (!hasSingleInstanceLock) {
       app.exit(1);
       return;
     }
+    primaryBackendUrl = backendUrl;
+    void shareBackendSession();
 
     localThreadStore = new LocalThreadStore(
-      path.join(app.getPath("userData"), "desktop-local-threads.json"),
+      path.join(app.getPath("userData"), "desktop-this-mac-threads.json"),
     );
-    openAiOAuth = new OpenAiOAuthManager({
-      storagePath: path.join(app.getPath("userData"), "openai-auth.bin"),
-      encryptString: (value) => {
-        if (!safeStorage.isEncryptionAvailable()) {
-          throw new Error("Secure credential storage is unavailable");
-        }
-        return safeStorage.encryptString(value);
-      },
-      decryptString: (value) => safeStorage.decryptString(value),
+    localBridges = new LocalBridges({
+      send: sendBridgeRequest,
+      rootFor: (threadId) => threadRoot(localThreadStore.get(threadId)),
+      bridgeIdFor: (threadId) =>
+        localThreadStore.get(threadId)?.bridgeId ?? null,
+      remember: (threadId, bridgeId) =>
+        localThreadStore.setBridge(threadId, bridgeId),
+      env: getUserShellEnv,
+      handlers: (threadId) => ({
+        worktree_handoff: (params) => handoffThreadToWorktree(threadId, params),
+      }),
+      log: (message, error) =>
+        error === undefined
+          ? console.warn(message)
+          : console.warn(message, error),
     });
-    await openAiOAuth.startBroker().catch((error) => {
-      console.warn("Could not start the local OpenAI credential broker", error);
-    });
-    backendSupervisor = new BackendSupervisor({
-      isPackaged: app.isPackaged,
-      repoRoot: path.resolve(__dirname, "../.."),
-      resourcesPath: process.resourcesPath,
-      stateDir: path.join(app.getPath("userData"), "local-backend"),
-      projectsFile: projectsPath(),
-      worktreesDir: worktreesPath(),
-      tracingEnv: async () => {
-        if (!backendUrl) return {};
-        try {
-          const response = await backendFetch(
-            new URL("/dashboard/api/me/preferences", backendUrl).toString(),
-            { signal: AbortSignal.timeout(2_000) },
-          );
-          if (!response.ok) return {};
-          const preferences = await response.json();
-          const project =
-            preferences.local_tracing_project ||
-            preferences.default_local_tracing_project;
-          return project
-            ? { LANGSMITH_PROJECT: project, LANGSMITH_TRACING: "true" }
-            : {};
-        } catch {
-          return {};
-        }
-      },
-      providerEnv: () => openAiOAuth?.backendEnv() || {},
-      openAiOAuthAvailable: () =>
-        openAiOAuth?.status().signedIn === true &&
-        Boolean(openAiOAuth?.backendEnv().ALEPHAT_OPENAI_OAUTH_BROKER_URL),
-    });
-    protocol.handle("alephat", serveBundledUi);
+    protocol.handle("open-swe", serveDesktopUi);
     configurePermissions();
+    configureFraming();
     configureDesktopIpc();
     createMenu();
-    createWindow();
+    void loadAlternativeEnvironments();
+    if (!desktopLinks.ready()) createWindow();
     configureAutoUpdater();
     configureTerminalIpc({
       ipcMain,
@@ -1539,12 +1977,10 @@ if (!hasSingleInstanceLock) {
     if (quitting) return;
     event.preventDefault();
     quitting = true;
-    void Promise.all([
-      closeAllTerminals(),
-      backendSupervisor?.close(),
-      openAiOAuth?.close(),
-    ]).finally(() => {
-      app.quit();
-    });
+    void Promise.all([closeAllTerminals(), localBridges?.closeAll()]).finally(
+      () => {
+        app.quit();
+      },
+    );
   });
 }

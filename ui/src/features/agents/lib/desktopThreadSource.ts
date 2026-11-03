@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react"
 
 export type DesktopThreadSource = "local" | "cloud"
 
-const STORAGE_KEY = "alephat.agents.desktop-thread-source"
+const STORAGE_KEY = "open-swe.agents.desktop-thread-source"
 const listeners = new Set<() => void>()
 let storageListenerAttached = false
 

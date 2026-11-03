@@ -1,4 +1,24 @@
+import { taskEventMetadata } from "./taskEventMetadata"
+import type { TaskEventMetadata } from "./taskEventMetadata"
+import type {
+  PassageReply,
+  PassageSource,
+} from "@/features/agents/utils/passageReply"
+
+export type { TaskEventMetadata } from "./taskEventMetadata"
+
 export type StructuredSenderKind = "person" | "system"
+
+/** Senders that steer the model and say nothing a reader of the thread needs. */
+const SILENT_SENDERS = new Set([
+  "system:sender-context",
+  "system:dashboard-handoff",
+  "system:slack-note",
+])
+
+export function isSilentSender(sender: string): boolean {
+  return SILENT_SENDERS.has(sender)
+}
 
 export type ParsedStructuredInput =
   | {
@@ -16,6 +36,8 @@ export type ParsedStructuredInput =
       sender: string
       senderKind: StructuredSenderKind
       surface?: string
+      taskEvent?: TaskEventMetadata
+      replies?: Array<PassageReply>
     }
   | { type: "legacy"; content: string }
 
@@ -33,6 +55,9 @@ const MESSAGE_PATTERN =
   /^\s*<input-message\b([^>]*)>([\s\S]*?)<\/input-message>\s*$/
 const OPEN_TAG_PATTERN = /^\s*<([A-Za-z_][\w:.-]*)>/
 const ATTRIBUTE_PATTERN = /([A-Za-z_][\w:.-]*)\s*=\s*("[^"]*"|'[^']*')/g
+const ENTITY_FIELD_PATTERN = /^([A-Za-z_][\w.-]*):(?: (.*))?$/
+const ELEMENT_ENTITY_FIELD_PATTERN =
+  /<([A-Za-z_][\w.-]*)(?:\s[^>]*)?>([\s\S]*?)<\/\1>/g
 
 export function decodeXmlText(value: string): string {
   return value.replace(
@@ -86,8 +111,9 @@ function parseAttributes(source: string): Record<string, string> | null {
   return source.slice(cursor).trim() ? null : attributes
 }
 
-// A real envelope carries the context's data fields — `<timestamp>`, `<comment_id>`,
-// nested dicts and lists — as siblings of `<content>`. Consume them so their text
+// A real envelope carries structured data as elements beside its text: one tag of
+// `field: value` lines, such as `<issue>` or `<replying_to>`; messages stored earlier
+// nest a tag per field. Consume them so their text
 // never reaches the transcript, and refuse anything that is not a balanced element
 // so unrecognized markup still falls back to legacy rendering.
 function consumeDataElements(source: string): boolean {
@@ -117,36 +143,119 @@ function consumeDataElements(source: string): boolean {
   }
 }
 
-// Anchor on the final `<content>`: data fields can surround it but never
-// contribute markup of their own, since their text is escaped.
+// The serializer puts the text on its own lines inside the wrapper, so drop the
+// one newline it added on each side to recover the authored whitespace.
+function unwrapEnvelopeText(text: string): string {
+  const start = text.startsWith("\n") ? 1 : 0
+  const end = text.endsWith("\n") ? text.length - 1 : text.length
+  return text.slice(start, Math.max(start, end))
+}
+
+// The text is the envelope's own, with data fields following it as elements that
+// each start a line. Messages stored before that shape wrap the text in
+// `<content>`, and data fields can surround it there; anchor on the final one.
+// Either way a data field contributes no markup, since its text is escaped.
 function splitContent(
   body: string
 ): { content: string; remainder: string } | null {
   const start = body.lastIndexOf("<content>")
-  if (start === -1) return null
-  const end = body.indexOf("</content>", start)
-  if (end === -1) return null
-  return {
-    content: body.slice(start + "<content>".length, end),
-    remainder: `${body.slice(0, start)}${body.slice(end + "</content>".length)}`,
+  if (start !== -1) {
+    const end = body.indexOf("</content>", start)
+    if (end === -1) return null
+    return {
+      content: body.slice(start + "<content>".length, end),
+      remainder: `${body.slice(0, start)}${body.slice(end + "</content>".length)}`,
+    }
   }
+  if (body.startsWith("<") && OPEN_TAG_PATTERN.test(body))
+    return { content: "", remainder: body }
+  for (
+    let index = body.indexOf("\n<");
+    index !== -1;
+    index = body.indexOf("\n<", index + 1)
+  ) {
+    const remainder = body.slice(index + 1)
+    if (!OPEN_TAG_PATTERN.test(remainder)) continue
+    return {
+      content: unwrapEnvelopeText(body.slice(0, index + 1)),
+      remainder,
+    }
+  }
+  return { content: unwrapEnvelopeText(body), remainder: "" }
 }
 
-function childText(body: string, tag: string): string | undefined {
-  const match = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`).exec(body)
-  return match ? decodeXmlText(match[1] ?? "") : undefined
+const REPLY_ELEMENT_PATTERN = /(?:^|\n)<reply>\n([\s\S]*?)\n<\/reply>/g
+const PASSAGE_SOURCES = new Set<string>(["conversation", "terminal", "file"])
+
+function isPassageSource(value: string | undefined): value is PassageSource {
+  return value !== undefined && PASSAGE_SOURCES.has(value)
+}
+
+/** The `<reply>` elements a message carries: passages its sender replied to. */
+function replyElements(data: string): Array<PassageReply> {
+  return [...data.matchAll(REPLY_ELEMENT_PATTERN)].flatMap(([, body]) => {
+    const fields = entityFields(body ?? "")
+    const source = fields.get("source")
+    const selection = fields.get("selection")
+    if (!isPassageSource(source) || !selection) return []
+    const file = fields.get("file")
+    const lines = fields.get("lines")
+    return [
+      {
+        source,
+        ...(file ? { file } : {}),
+        ...(lines ? { lines } : {}),
+        before: fields.get("before") ?? "",
+        selection,
+        after: fields.get("after") ?? "",
+        comment: fields.get("comment") ?? "",
+      },
+    ]
+  })
+}
+
+// An entity body is `field: value` lines; a value spanning lines puts nothing
+// after the colon and indents each of its lines by two spaces.
+function entityFields(body: string): Map<string, string> {
+  if (OPEN_TAG_PATTERN.test(body)) {
+    return new Map(
+      [...body.matchAll(ELEMENT_ENTITY_FIELD_PATTERN)].map(
+        ([, name, value]) => [name ?? "", decodeXmlText(value ?? "")]
+      )
+    )
+  }
+  const fields = new Map<string, string[]>()
+  let current: string[] | null = null
+  for (const line of body.split("\n")) {
+    if (current && line.startsWith("  ")) {
+      current.push(line.slice(2))
+      continue
+    }
+    const match = ENTITY_FIELD_PATTERN.exec(line)
+    const name = match?.[1]
+    if (!name) {
+      current = null
+      continue
+    }
+    const inline = match[2]
+    current = inline ? [inline] : []
+    fields.set(name, current)
+  }
+  return new Map(
+    [...fields].map(([name, lines]) => [name, decodeXmlText(lines.join("\n"))])
+  )
 }
 
 function senderKind(
   attributes: Record<string, string>,
   entities: ReadonlyMap<string, StructuredEntity>
 ): StructuredSenderKind {
+  const entity = entities.get(attributes.sender ?? "")
+  if (entity?.senderType === "bot") return "person"
   const explicit = attributes.kind?.toLowerCase()
   if (explicit === "system" || explicit === "automation") return "system"
   if (explicit === "human" || explicit === "person") return "person"
-  return entities.get(attributes.sender ?? "")?.kind === "system"
-    ? "system"
-    : "person"
+  return entity?.kind === "system" ? "system" : "person"
 }
 
 export function parseStructuredInput(
@@ -159,15 +268,15 @@ export function parseStructuredInput(
     const id = attributes?.id
     const kind = attributes?.kind
     if (id && kind) {
-      const body = entityMatch[2] ?? ""
+      const fields = entityFields(entityMatch[2] ?? "")
       return {
         type: "entity",
         id,
         kind: kind.toLowerCase(),
-        displayName: childText(body, "display_name"),
-        handle: childText(body, "handle") ?? childText(body, "github_login"),
-        senderType: childText(body, "sender_type"),
-        openSweAccount: childText(body, "alephat_account"),
+        displayName: fields.get("display_name"),
+        handle: fields.get("handle") ?? fields.get("github_login"),
+        senderType: fields.get("sender_type"),
+        openSweAccount: fields.get("open_swe_account"),
       }
     }
   }
@@ -177,12 +286,16 @@ export function parseStructuredInput(
     const attributes = parseAttributes(messageMatch[1] ?? "")
     const split = splitContent(messageMatch[2] ?? "")
     if (attributes?.sender && split && consumeDataElements(split.remainder)) {
+      const taskEvent = taskEventMetadata(attributes)
+      const replies = replyElements(split.remainder)
       return {
         type: "message",
         content: decodeXmlText(split.content),
+        ...(replies.length ? { replies } : {}),
         sender: attributes.sender,
         senderKind: senderKind(attributes, entities),
         surface: attributes.surface,
+        ...(taskEvent ? { taskEvent } : {}),
       }
     }
   }

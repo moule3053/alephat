@@ -1,5 +1,5 @@
 export const DEFAULT_AUTH_REDIRECT = "/agents"
-export const AUTH_REDIRECT_STORAGE_KEY = "alephat-auth-redirect"
+export const AUTH_REDIRECT_STORAGE_KEY = "open-swe-auth-redirect"
 
 type LocationParts = {
   pathname: string
@@ -40,7 +40,7 @@ export function sanitizeAuthRedirect(
 
   let parsed: URL
   try {
-    parsed = new URL(trimmed, origin ?? "https://alephat.invalid")
+    parsed = new URL(trimmed, origin ?? "https://open-swe.invalid")
   } catch {
     return fallback
   }

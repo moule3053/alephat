@@ -5,9 +5,9 @@ from typing import Any
 import pytest
 from langchain_core.messages import ToolMessage
 
-from agent.utils.html_artifact import artifact_skeleton, sandbox_wrap_command
+from openswe.utils.html_artifact import artifact_skeleton, sandbox_wrap_command
 
-iframe_tool = importlib.import_module("agent.tools.output_iframe")
+iframe_tool = importlib.import_module("openswe.tools.output_iframe")
 
 
 class _Backend:
@@ -60,7 +60,7 @@ async def test_output_iframe_snapshots_html_and_returns_signed_urls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls, backend = _configure(monkeypatch)
-    snapshot_path = "/workspace/project/.alephat/iframe-artifacts/artifact-id/chart.html"
+    snapshot_path = "/workspace/project/.open-swe/iframe-artifacts/artifact-id/chart.html"
 
     content, artifact = await iframe_tool._output_iframe("chart.html", "Quarterly chart")
 
@@ -73,8 +73,8 @@ async def test_output_iframe_snapshots_html_and_returns_signed_urls(
         "filename": "chart.html",
     }
     assert backend.commands == [
-        "test -f /workspace/project/chart.html && stat -c %s -- /workspace/project/chart.html",
-        "mkdir -p -- /workspace/project/.alephat/iframe-artifacts/artifact-id && "
+        "test -f /workspace/project/chart.html && wc -c < /workspace/project/chart.html",
+        "mkdir -p -- /workspace/project/.open-swe/iframe-artifacts/artifact-id && "
         + sandbox_wrap_command(
             "/workspace/project/chart.html",
             snapshot_path,
@@ -126,7 +126,7 @@ async def test_output_iframe_rejects_snapshot_that_grows_during_copy(
         await iframe_tool._output_iframe("chart.html")
 
     assert backend.commands[-1] == (
-        "rm -f -- /workspace/project/.alephat/iframe-artifacts/artifact-id/chart.html"
+        "rm -f -- /workspace/project/.open-swe/iframe-artifacts/artifact-id/chart.html"
     )
     assert calls == []
 

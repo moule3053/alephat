@@ -31,7 +31,7 @@ describe("useDesktopThreadSource", () => {
     expect(screen.getByRole("button", { name: "First: cloud" })).toBeTruthy()
     expect(screen.getByRole("button", { name: "Second: cloud" })).toBeTruthy()
     expect(
-      window.localStorage.getItem("alephat.agents.desktop-thread-source")
+      window.localStorage.getItem("open-swe.agents.desktop-thread-source")
     ).toBe("cloud")
   })
 })

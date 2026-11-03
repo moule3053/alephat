@@ -1,11 +1,37 @@
 import importlib
 from unittest.mock import AsyncMock
 
+import httpx2
 import pytest
 
-from agent.baby_sit import BabySitWatch
+from openswe.baby_sit import BabySitWatch
+from openswe.github.http import GitHubError
+from openswe.github.pull_request_status import PullRequestClient
 
-manage_tool = importlib.import_module("agent.tools.manage_baby_sit")
+manage_tool = importlib.import_module("openswe.tools.manage_baby_sit")
+
+
+async def test_start_reports_retryable_github_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        manage_tool, "get_config", lambda: {"configurable": {"thread_id": "thread-1"}}
+    )
+    monkeypatch.setattr(
+        manage_tool, "resolve_github_token", AsyncMock(return_value=("token", None))
+    )
+    response = httpx2.Response(
+        503,
+        text="Service unavailable",
+        request=httpx2.Request("GET", "https://api.github.com/repos/acme/repo/pulls/7"),
+    )
+    monkeypatch.setattr(PullRequestClient, "pull", AsyncMock(side_effect=GitHubError(response)))
+
+    result = await manage_tool.manage_baby_sit("https://github.com/acme/repo/pull/7")
+
+    assert result["success"] is False
+    assert result["retryable"] is True
+    assert "temporarily unavailable" in result["error"]
 
 
 async def test_manage_baby_sit_starts_cross_repo_watch_from_github_issue(
@@ -17,6 +43,7 @@ async def test_manage_baby_sit_starts_cross_repo_watch_from_github_issue(
         "github_login": "octocat",
         "repo": {"owner": "acme", "name": "default"},
         "github_issue": {"number": 12, "url": "https://github.com/acme/default/issues/12"},
+        "workspace": "oss",
     }
     monkeypatch.setattr(manage_tool, "get_config", lambda: {"configurable": configurable})
     monkeypatch.setattr(
@@ -29,8 +56,8 @@ async def test_manage_baby_sit_starts_cross_repo_watch_from_github_issue(
         installation,
     )
     monkeypatch.setattr(
-        manage_tool,
-        "fetch_pr",
+        PullRequestClient,
+        "pull",
         AsyncMock(return_value={"state": "open", "head": {"sha": "head-1", "ref": "feature"}}),
     )
     start = AsyncMock(
@@ -56,6 +83,8 @@ async def test_manage_baby_sit_starts_cross_repo_watch_from_github_issue(
         "name": "default",
     }
     assert start.await_args.kwargs["run_config"]["source_installation_id"] == 84
+    # The watch's own runs must boot from the same workspace as the thread.
+    assert start.await_args.kwargs["run_config"]["workspace"] == "oss"
     assert start.await_args.kwargs["source_context"].dump() == {
         "github_issue": {
             "number": 12,

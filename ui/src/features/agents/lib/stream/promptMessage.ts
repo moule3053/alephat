@@ -1,4 +1,5 @@
 import type { ImageChunk } from "@/features/agents/lib/types"
+import type { PassageReply } from "@/features/agents/utils/passageReply"
 import type { ModelSelection } from "@/features/agents/lib/provider/useModelOptions"
 
 export function imageBlocks(images: ReadonlyArray<ImageChunk> = []) {
@@ -10,10 +11,14 @@ export function imageBlocks(images: ReadonlyArray<ImageChunk> = []) {
   }))
 }
 
-/** The human message a prompt bar submission becomes on the graph. */
+/**
+ * The human message a prompt bar submission becomes on the graph. Replies ride
+ * beside the content for the server to add to the message's envelope.
+ */
 export function promptMessage(
   text: string,
-  images: ReadonlyArray<ImageChunk> = []
+  images: ReadonlyArray<ImageChunk> = [],
+  replies: ReadonlyArray<PassageReply> = []
 ) {
   const trimmed = text.trim()
   return {
@@ -22,18 +27,23 @@ export function promptMessage(
       ...imageBlocks(images),
       ...(trimmed ? [{ type: "text" as const, text: trimmed }] : []),
     ],
+    ...(replies.length ? { additional_kwargs: { replies } } : {}),
   }
 }
 
-/** Run `configurable` entries for the picked model, or none when unset. */
+/** Run model settings, distinguishing a picker action from an inherited choice. */
 export function modelConfigurable(
   selection:
     | Partial<Record<keyof ModelSelection, string | null>>
     | null
-    | undefined
+    | undefined,
+  selectionChanged = false
 ): Record<string, unknown> {
   if (!selection?.modelId || !selection.effort)
-    return { model_selection: "auto" }
+    return {
+      model_selection: "auto",
+      ...(selectionChanged ? { model_selection_changed: true } : {}),
+    }
   return {
     agent_model_id: selection.modelId,
     agent_effort: selection.effort,

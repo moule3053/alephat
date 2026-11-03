@@ -1,15 +1,64 @@
+import { ArrowLeftIcon } from "@langchain/macaw-components/icons"
+import { useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
-import { ArrowLeft } from "lucide-react"
+import { Button } from "@langchain/macaw-components/Button"
+import { Skeleton } from "@langchain/macaw-components/Skeleton"
 import { useIsHydrated } from "@/lib/hydration"
 
 import { PlanReview } from "@/features/agents/components/PlanReview"
-import { buttonVariants } from "@/components/ui/button"
-import { Skeleton } from "@/components/ui/skeleton"
 import { loginUrl } from "@/lib/api"
 import { currentAuthRedirectPath } from "@/lib/auth-redirect"
 import { PlanApiError, getPlan } from "@/lib/plan"
+import { pageTitle } from "@/lib/pageTitle"
 import { cn } from "@/lib/utils"
+
+const DEFAULT_TITLE = pageTitle("Artifact")
+
+/** Publishes the artifact's own `<title>` as the document title. */
+function artifactTitle(html: string, markdown: string): string | null {
+  const source = html.trim() ? html : markdown
+  const found = /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(source)
+  const raw = found
+    ?.at(1)
+    ?.replace(/<[^>]*>/g, " ")
+    .trim()
+  if (!raw) return null
+  // The server escapes the title, so decode entities ("a &amp; b" → "a & b").
+  const decoded = new DOMParser()
+    .parseFromString(raw, "text/html")
+    .body.textContent?.replace(/\s+/g, " ")
+    .trim()
+  return decoded || null
+}
+
+function usePlanDocumentTitle(threadId: string) {
+  const query = useQuery({
+    queryKey: ["plan", threadId],
+    queryFn: () => getPlan(threadId),
+    refetchInterval: (q) =>
+      q.state.data?.html || q.state.data?.markdown ? false : 2000,
+    retry: (count, error) =>
+      !(
+        error instanceof PlanApiError &&
+        (error.status === 401 || error.status === 404)
+      ) && count < 3,
+  })
+  const title = query.data
+    ? artifactTitle(query.data.html, query.data.markdown)
+    : null
+
+  useEffect(() => {
+    if (!title) return
+    const documentTitle = pageTitle(title)
+    document.title = documentTitle
+    return () => {
+      if (document.title === documentTitle) document.title = DEFAULT_TITLE
+    }
+  }, [title])
+
+  return query
+}
 
 function Centered({
   children,
@@ -21,8 +70,8 @@ function Centered({
   return (
     <div
       className={cn(
-        "flex min-w-0 flex-1 items-center justify-center px-4 py-6",
-        standalone && "max-md:pt-14 md:p-6"
+        "flex min-w-0 flex-1 items-center justify-center px-space-4 py-space-5",
+        standalone && "max-md:pt-space-8 md:p-space-5"
       )}
     >
       {children}
@@ -35,9 +84,9 @@ function BackLink({ threadId }: { threadId: string }) {
     <Link
       to="/agents/$threadId"
       params={{ threadId }}
-      className="inline-flex items-center gap-1 text-xs text-muted-foreground/70 hover:text-foreground"
+      className="inline-flex items-center gap-space-1 text-xs text-tertiary hover:text-primary"
     >
-      <ArrowLeft className="size-3.5" />
+      <ArrowLeftIcon size={14} weight="regular" />
       Back to conversation
     </Link>
   )
@@ -49,34 +98,22 @@ export function planSignInHref(): string {
 
 export function PlanSignInButton() {
   return (
-    <a href={planSignInHref()} className={buttonVariants({ size: "sm" })}>
-      Sign in to view this plan
-    </a>
+    <Button as={<a href={planSignInHref()} />}>
+      Sign in to view this artifact
+    </Button>
   )
 }
 
 export function PlanView({
   threadId,
   standalone = false,
-  onApprove,
 }: {
   threadId: string
   standalone?: boolean
-  onApprove?: (runId: string) => void
 }) {
   const mounted = useIsHydrated()
 
-  const query = useQuery({
-    queryKey: ["plan", threadId],
-    queryFn: () => getPlan(threadId),
-    refetchInterval: (q) =>
-      q.state.data?.html || q.state.data?.markdown ? false : 2000,
-    retry: (count, error) =>
-      !(
-        error instanceof PlanApiError &&
-        (error.status === 401 || error.status === 404)
-      ) && count < 3,
-  })
+  const query = usePlanDocumentTitle(threadId)
   const backLink = standalone ? <BackLink threadId={threadId} /> : null
 
   if (!mounted || query.isLoading) {
@@ -91,11 +128,11 @@ export function PlanView({
     const status = query.error instanceof PlanApiError ? query.error.status : 0
     return (
       <Centered standalone={standalone}>
-        <div className="space-y-3 text-center text-sm text-muted-foreground/70">
+        <div className="space-y-space-3 text-center text-sm text-tertiary">
           <p>
             {status === 401
-              ? "Please sign in to view this plan."
-              : "This plan could not be found."}
+              ? "Please sign in to view this artifact."
+              : "This artifact could not be found."}
           </p>
           {status === 401 ? <PlanSignInButton /> : null}
           {backLink}
@@ -108,7 +145,7 @@ export function PlanView({
   if (!plan?.html.trim() && !plan?.markdown.trim()) {
     return (
       <Centered standalone={standalone}>
-        <div className="space-y-3 text-center text-sm text-muted-foreground/70">
+        <div className="space-y-space-3 text-center text-sm text-tertiary">
           <p>
             The agent is still writing the content. This view will update
             automatically…
@@ -122,11 +159,11 @@ export function PlanView({
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       {standalone && (
-        <div className="border-b border-border px-4 pt-14 md:px-6 md:pt-3">
+        <div className="border-b border-default px-space-4 pt-space-8 md:px-space-5 md:pt-space-3">
           {backLink}
         </div>
       )}
-      <PlanReview plan={plan} onApprove={onApprove} />
+      <PlanReview plan={plan} />
     </div>
   )
 }

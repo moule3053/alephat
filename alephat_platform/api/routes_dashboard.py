@@ -84,7 +84,7 @@ def _command_configurable(params: Any) -> dict[str, Any]:
 async def _fetch_installed_github_repositories() -> tuple[
     list[dict[str, Any]], list[dict[str, Any]]
 ]:
-    from agent.github.app import (
+    from openswe.github.app import (
         GITHUB_APP_INSTALLATION_ID,
         get_github_app_installation_token,
     )
@@ -338,18 +338,18 @@ async def get_repos() -> dict[str, Any]:
         "installations": installations,
         "repositories": sorted(
             [
-                {"full_name": item["full_name"], "private": bool(item.get("private"))}
+                {"full_name": str(item["full_name"]), "private": bool(item.get("private"))}
                 for item in repositories
                 if isinstance(item.get("full_name"), str) and item["full_name"]
             ],
-            key=lambda item: item["full_name"].casefold(),
+            key=lambda item: str(item["full_name"]).casefold(),
         ),
     }
 
 
 @router.get("/options")
 async def get_options() -> dict[str, Any]:
-    from agent.dashboard.options import model_profile_context_window
+    from openswe.dashboard.options import model_profile_context_window
 
     settings = get_settings()
     default_model = settings.default_model or "google:gemini-3.5-flash"

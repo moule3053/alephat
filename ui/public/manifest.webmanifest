@@ -1,7 +1,7 @@
 {
   "id": "./",
-  "name": "Alephat",
-  "short_name": "Alephat",
+  "name": "Open SWE",
+  "short_name": "Open SWE",
   "description": "Open-source coding agents for Slack, Linear, and GitHub.",
   "start_url": "./",
   "scope": "./",

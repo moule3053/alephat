@@ -1,7 +1,12 @@
-import { useEffect } from "react"
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import {
+  useMutation,
+  useMutationState,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query"
 
-import { ApiError, api } from "./api"
+import { ApiError, api, DEFAULT_WORKSPACE_SLUG } from "./api"
+import { hasLinkedGitHub } from "./linkedGitHub"
 import {
   REPOS_CACHE_MAX_AGE_MS,
   readCachedRepos,
@@ -10,19 +15,54 @@ import {
 import { useSession } from "./session"
 import type { Profile, ProfileUpdate, ReposPayload } from "./api"
 
+const profileQueryKey = (login: string | undefined) => [
+  "profile",
+  login ?? null,
+]
+
+const saveProfileMutationKey = (login: string | undefined) => [
+  "saveProfile",
+  login ?? null,
+]
+
+interface ProfilePatch {
+  login: string | undefined
+  patch: Partial<ProfileUpdate>
+}
+
+function applyProfileWrite(profile: Profile, write: ProfilePatch): Profile {
+  return { ...profile, ...write.patch }
+}
+
+/** The profile, with saves still in flight already applied. */
 export function useProfile() {
   const session = useSession()
+  const login = session.data?.login
+  const pending = useMutationState({
+    filters: {
+      mutationKey: saveProfileMutationKey(login),
+      exact: true,
+      status: "pending",
+    },
+    select: (m) => m.state.variables as ProfilePatch,
+  })
   return useQuery({
-    queryKey: ["profile"],
+    queryKey: profileQueryKey(login),
     queryFn: api.profile,
     enabled: !!session.data,
+    select: (profile) => pending.reduce(applyProfileWrite, profile),
   })
 }
 
-export function useOptions() {
+/**
+ * Selectable models and defaults for the workspace a run will land in; model
+ * defaults and the Fable flag are per workspace, so the key carries the slug.
+ */
+export function useOptions(workspace?: string | null) {
+  const slug = workspace ?? DEFAULT_WORKSPACE_SLUG
   return useQuery({
-    queryKey: ["options"],
-    queryFn: api.options,
+    queryKey: ["options", slug],
+    queryFn: () => api.options(slug),
   })
 }
 
@@ -39,18 +79,7 @@ export const REPOS_STALE_TIME_MS = 10 * 60 * 1000
 export function useRepos() {
   const session = useSession()
   const login = session.data?.login ?? null
-  const qc = useQueryClient()
-
-  useEffect(() => {
-    if (!login) return
-    const key = reposQueryKey(login)
-    if (qc.getQueryData<ReposPayload>(key)) return
-    const cached = readCachedRepos(login)
-    if (!cached) return
-    qc.setQueryData<ReposPayload>(key, cached.payload, {
-      updatedAt: cached.updatedAt,
-    })
-  }, [login, qc])
+  const cached = login ? readCachedRepos(login) : null
 
   return useQuery({
     queryKey: reposQueryKey(login),
@@ -65,7 +94,9 @@ export function useRepos() {
         throw e
       }
     },
-    enabled: !!session.data,
+    enabled: !!session.data && hasLinkedGitHub(session.data),
+    initialData: cached?.payload,
+    initialDataUpdatedAt: cached?.updatedAt,
     staleTime: REPOS_STALE_TIME_MS,
     gcTime: REPOS_CACHE_MAX_AGE_MS,
   })
@@ -77,6 +108,7 @@ export function useRefreshRepos() {
   const login = session.data?.login ?? null
   const qc = useQueryClient()
   return useMutation({
+    meta: { errorTitle: "Couldn't refresh repositories" },
     mutationFn: () => api.repos({ refresh: true }),
     onSuccess: (payload) => {
       qc.setQueryData<ReposPayload>(reposQueryKey(login), payload)
@@ -85,14 +117,45 @@ export function useRefreshRepos() {
   })
 }
 
-export function useSaveProfile() {
+/**
+ * Saves `patch` over the profile the server last confirmed. Saves run one at
+ * a time per account, so each request carries every earlier one's result and
+ * a failed save drops only its own patch.
+ */
+export function usePatchProfile() {
   const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (body: ProfileUpdate) => api.saveProfile(body),
-    onSuccess: (saved) => {
-      qc.setQueryData(["profile"], saved)
+  const session = useSession()
+  const login = session.data?.login
+  const mutationKey = saveProfileMutationKey(login)
+  const mutation = useMutation({
+    mutationKey,
+    scope: { id: JSON.stringify(mutationKey) },
+    meta: { errorTitle: "Couldn't save preferences" },
+    mutationFn: (write: ProfilePatch) =>
+      api.saveProfile(
+        buildProfileUpdate(
+          qc.getQueryData<Profile>(profileQueryKey(write.login)),
+          write.patch
+        )
+      ),
+    onMutate: async (write) => {
+      await qc.cancelQueries({ queryKey: profileQueryKey(write.login) })
+    },
+    onSuccess: (saved, write) => {
+      qc.setQueryData(profileQueryKey(write.login), saved)
+    },
+    onSettled: async (_saved, _error, write) => {
+      if (
+        qc.isMutating({ mutationKey: saveProfileMutationKey(write.login) }) > 1
+      )
+        return
+      await qc.invalidateQueries({ queryKey: profileQueryKey(write.login) })
     },
   })
+  return {
+    patch: (patch: Partial<ProfileUpdate>) => mutation.mutate({ login, patch }),
+    isPending: mutation.isPending,
+  }
 }
 
 /**
@@ -102,28 +165,44 @@ export function useSaveProfile() {
  */
 export function buildProfileUpdate(
   current: Profile | undefined,
-  patch: Partial<ProfileUpdate>,
-  fallbackModel: string,
-  fallbackEffort: string
+  patch: Partial<ProfileUpdate>
 ): ProfileUpdate {
   return {
-    default_model: current?.default_model ?? fallbackModel,
-    reasoning_effort: current?.reasoning_effort ?? fallbackEffort,
-    default_subagent_model:
-      current?.default_subagent_model ??
-      current?.default_model ??
-      fallbackModel,
-    subagent_reasoning_effort:
-      current?.subagent_reasoning_effort ??
-      current?.reasoning_effort ??
-      fallbackEffort,
     default_repo: current?.default_repo ?? null,
+    workspace_default_repos: current?.workspace_default_repos ?? {},
     base_branch: current?.base_branch ?? null,
     branch_prefix: current?.branch_prefix ?? null,
     auto_fix_ci: current?.auto_fix_ci ?? true,
-    model_routing_enabled: current?.model_routing_enabled ?? null,
+    auto_human_review_enabled: current?.auto_human_review_enabled ?? true,
     draft_prs: current?.draft_prs ?? true,
     review_draft_prs: current?.review_draft_prs ?? null,
+    experimental_background_callbacks:
+      current?.experimental_background_callbacks ?? null,
     ...patch,
   }
+}
+
+export function useDismissSlackOnboarding() {
+  const qc = useQueryClient()
+  const session = useSession()
+  const queryKey = profileQueryKey(session.data?.login)
+  return useMutation({
+    meta: { errorTitle: "Couldn't dismiss Slack onboarding" },
+    mutationFn: api.dismissSlackOnboarding,
+    onMutate: async () => {
+      await qc.cancelQueries({ queryKey })
+      const previous = qc.getQueryData<Profile>(queryKey)
+      qc.setQueryData<Profile>(queryKey, (profile) =>
+        profile ? { ...profile, slack_onboarding_dismissed: true } : profile
+      )
+      return previous
+    },
+    onError: (_error, _variables, previous) => {
+      if (previous) qc.setQueryData(queryKey, previous)
+    },
+    onSuccess: (profile) => {
+      qc.setQueryData(queryKey, profile)
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey }),
+  })
 }

@@ -68,7 +68,7 @@ class DaytonaProvider(SandboxProviderBase):
             logger.warning("Explicit local stub sandbox enabled: %s", sid)
             return SandboxRef(provider=self.name, sandbox_id=sid, metadata={"stub": True})
         try:
-            from agent.sandboxes.providers.daytona import create_daytona_sandbox
+            from openswe.sandboxes.providers.daytona import create_daytona_sandbox
 
             backend = await asyncio.to_thread(create_daytona_sandbox, None)
             sid = (
@@ -97,7 +97,7 @@ class DaytonaProvider(SandboxProviderBase):
         if not settings.daytona_api_key or sandbox_id.startswith("daytona-stub-"):
             return SandboxRef(provider=self.name, sandbox_id=sandbox_id, metadata={"stub": True})
         try:
-            from agent.sandboxes.providers.daytona import create_daytona_sandbox
+            from openswe.sandboxes.providers.daytona import create_daytona_sandbox
 
             backend = await asyncio.to_thread(create_daytona_sandbox, sandbox_id)
             return SandboxRef(provider=self.name, sandbox_id=sandbox_id, handle=backend)
@@ -391,7 +391,7 @@ class LocalProvider(SandboxProviderBase):
         return os.path.join(base, sandbox_id)
 
     async def create(self, *, task_id: str, metadata: dict[str, Any] | None = None) -> SandboxRef:
-        from agent.sandboxes.providers.local import create_local_sandbox
+        from openswe.sandboxes.providers.local import create_local_sandbox
 
         sid = f"local-{task_id[:8]}-{uuid.uuid4().hex[:8]}"
         root_dir = self._root_dir(sid)
@@ -404,7 +404,7 @@ class LocalProvider(SandboxProviderBase):
         )
 
     async def connect(self, sandbox_id: str) -> SandboxRef:
-        from agent.sandboxes.providers.local import create_local_sandbox
+        from openswe.sandboxes.providers.local import create_local_sandbox
 
         root_dir = self._root_dir(sandbox_id)
         backend = await asyncio.to_thread(

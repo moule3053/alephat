@@ -57,7 +57,7 @@ test.describe("Slack Code Channels", () => {
     expect(initialResult.thread_id).toBeTruthy();
     expect(followupResult.thread_id).toBe(initialResult.thread_id);
     await expect(page.locator("#thread")).toContainText(
-      "this unmentioned follow-up reached the same Alephat session",
+      "this unmentioned follow-up reached the same Open SWE session",
     );
     await expect(page.locator(".channel").filter({ hasText: "✦" })).toHaveCount(
       1,
@@ -72,7 +72,7 @@ test.describe("Slack Code Channels", () => {
     });
     await page.goto(`/agents/${initialResult.thread_id}`);
     const codeChannelLink = page.getByRole("link", {
-      name: "Open code channel",
+      name: "Open in Slack",
     });
     await expect(codeChannelLink).toBeVisible();
     await expect(codeChannelLink).toHaveAttribute(

@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld("openSweDesktop", {
   removeProject: (cwd) => ipcRenderer.invoke("desktop:remove-project", cwd),
   writeClipboard: (value) =>
     ipcRenderer.invoke("desktop:write-clipboard", value),
+  copyPageLink: () => ipcRenderer.invoke("desktop:copy-page-link"),
   getVersion: () => ipcRenderer.invoke("desktop:version"),
   getUpdateState: () => ipcRenderer.invoke("desktop:update-state"),
   installUpdate: () => ipcRenderer.invoke("desktop:install-update"),
@@ -52,30 +53,39 @@ contextBridge.exposeInMainWorld("openSweDesktop", {
   openExternal: (url) => ipcRenderer.invoke("desktop:open-external", url),
   resolveLocalProjectPath: (input) =>
     ipcRenderer.invoke("desktop:resolve-local-project-path", { ...input }),
-  localModelCredentialStatus: (modelId) =>
-    ipcRenderer.invoke("desktop:local-model-credential-status", modelId),
-  signInLocalOpenAI: () => ipcRenderer.invoke("desktop:local-openai-sign-in"),
-  startLocalThread: (input) =>
-    ipcRenderer.invoke("desktop:start-local-thread", input),
-  getLocalPrompt: (threadId) =>
-    ipcRenderer.invoke("desktop:get-local-prompt", threadId),
-  clearLocalPrompt: (threadId) =>
-    ipcRenderer.invoke("desktop:clear-local-prompt", threadId),
+  taskWorkspaces: true,
+  prepareLocalThread: (input) =>
+    ipcRenderer.invoke("desktop:prepare-local-thread", { ...input }),
+  takeOverThread: (input) =>
+    ipcRenderer.invoke("desktop:take-over-thread", { ...input }),
+  ensureLocalBridge: (threadId) =>
+    ipcRenderer.invoke("desktop:ensure-local-bridge", threadId),
+  openTaskFolder: (threadId) =>
+    ipcRenderer.invoke("desktop:open-task-folder", threadId),
   getLocalThread: (threadId) =>
     ipcRenderer.invoke("desktop:get-local-thread", threadId),
   setAppearance: (appearance) =>
     ipcRenderer.invoke("desktop:set-appearance", appearance),
   listLocalThreads: () => ipcRenderer.invoke("desktop:list-local-threads"),
-  localActivity: () => ipcRenderer.invoke("desktop:local-activity"),
-  updateLocalThread: (input) =>
-    ipcRenderer.invoke("desktop:update-local-thread", input),
-  deleteLocalThread: (threadId) =>
-    ipcRenderer.invoke("desktop:delete-local-thread", threadId),
+  discardLocalThread: (threadId) =>
+    ipcRenderer.invoke("desktop:discard-local-thread", threadId),
   getLocalDiff: (threadId) =>
     ipcRenderer.invoke("desktop:get-local-diff", threadId),
   getLocalPrDiff: (threadId) =>
     ipcRenderer.invoke("desktop:get-local-pr-diff", threadId),
+  getLocalPr: (threadId) =>
+    ipcRenderer.invoke("desktop:get-local-pr", threadId),
   getProjectDiff: (cwd) => ipcRenderer.invoke("desktop:get-project-diff", cwd),
+  readWorkspacePath: (input) =>
+    ipcRenderer.invoke("desktop:read-workspace-path", { ...input }),
+  listWorkspaceFiles: (localSessionId) =>
+    ipcRenderer.invoke("desktop:list-workspace-files", localSessionId),
+  onLocalThreadsChanged: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on("desktop:local-threads-changed", listener);
+    return () =>
+      ipcRenderer.removeListener("desktop:local-threads-changed", listener);
+  },
   onProjectsChanged: (callback) => {
     const listener = (_event, projects) => callback(projects);
     ipcRenderer.on("desktop:projects-changed", listener);

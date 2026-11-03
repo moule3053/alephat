@@ -1,37 +1,19 @@
 import { createFileRoute } from "@tanstack/react-router"
 
-import { AppShell } from "@/components/AppShell"
 import { ReviewStylesPanel } from "@/components/ReviewStylesPanel"
-import { Skeleton } from "@/components/ui/skeleton"
-import { RequireLogin } from "@/lib/auth-redirect"
-import { useSession } from "@/lib/session"
+import { SettingsPage } from "@/components/AppShell"
+import { pageTitle } from "@/lib/pageTitle"
 
 export const Route = createFileRoute("/review_/styles")({
-  component: ReviewStylesPage,
-})
-
-function ReviewStylesPage() {
-  const session = useSession()
-
-  if (session.isLoading) {
-    return (
-      <main className="p-6">
-        <Skeleton className="h-64 w-full" />
-      </main>
-    )
-  }
-  if (!session.data) return <RequireLogin />
-
-  return (
-    <AppShell
-      user={session.data}
-      title="Review Style Prompts"
-      description="An agent browses recent merged PR review feedback on GitHub, then writes a per-repo style guide for the reviewer."
-      backTo={{ to: "/review", label: "Back to Alephat Review" }}
+  head: () => ({ meta: [{ title: pageTitle("Review styles") }] }),
+  component: () => (
+    <SettingsPage
+      title="Review Styles"
+      description="Per-repository review style guides and approval policies."
     >
-      <div className="rounded-lg border border-border bg-card">
+      <div className="rounded-lg border border-default bg-surface-level-1">
         <ReviewStylesPanel />
       </div>
-    </AppShell>
-  )
-}
+    </SettingsPage>
+  ),
+})

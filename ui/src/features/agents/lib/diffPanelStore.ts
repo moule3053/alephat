@@ -20,7 +20,7 @@ export type DiffPanelSelection = { kind: DiffScopeKind }
 const WORKING_TREE_SELECTION: DiffPanelSelection = { kind: "working-tree" }
 const BRANCH_SELECTION: DiffPanelSelection = { kind: "branch" }
 
-const DIFF_PANEL_STORAGE_KEY = "alephat:diff-panel-state"
+const DIFF_PANEL_STORAGE_KEY = "open-swe:diff-panel-state"
 const DIFF_PANEL_STORAGE_VERSION = 2
 
 interface DiffPanelStoreState {

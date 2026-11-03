@@ -1,33 +1,43 @@
-import inspect
+from collections.abc import Callable
+from importlib import import_module
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent.tools.read_user_settings import read_user_settings
-from agent.utils import thread_participants as participants
+from openswe.tools.read_user_settings import read_user_settings
+from openswe.utils import thread_participants as participants
 
 
-def test_read_user_settings_accepts_no_model_arguments() -> None:
-    assert list(inspect.signature(read_user_settings).parameters) == []
+@pytest.fixture(autouse=True)
+def collaborative_scope(
+    monkeypatch: pytest.MonkeyPatch, grant_tool_access: Callable[..., None]
+) -> None:
+    grant_tool_access(private=True, owner=True)
+    monkeypatch.setattr(
+        import_module("openswe.tools.read_user_settings"),
+        "private_credential_login",
+        AsyncMock(return_value=None),
+    )
 
 
 @pytest.mark.asyncio
 async def test_read_user_settings_returns_redacted_participant_settings() -> None:
     with (
         patch(
-            "agent.tools.read_user_settings.get_config",
+            "openswe.tools.read_user_settings.get_config",
             return_value={"configurable": {"thread_id": "thread-1"}},
         ),
         patch(
-            "agent.tools.read_user_settings.resolve_thread_participant_logins",
+            "openswe.tools.read_user_settings.resolve_thread_participant_logins",
             new_callable=AsyncMock,
-            return_value=({"octocat"}, 1, None),
+            return_value=({"octocat"}, 1),
         ),
         patch(
-            "agent.tools.read_user_settings.get_profile",
+            "openswe.tools.read_user_settings.get_profile",
             new_callable=AsyncMock,
             return_value={
-                "default_model": "openai:gpt-5.6-sol",
+                "default_model": "openai:gpt-6.1-sol",
                 "reasoning_effort": "high",
                 "email": "private@example.com",
                 "default_repo": "private/internal",
@@ -36,14 +46,9 @@ async def test_read_user_settings_returns_redacted_participant_settings() -> Non
             },
         ),
         patch(
-            "agent.tools.read_user_settings.get_user_instructions",
+            "openswe.tools.read_user_settings.get_user_instructions",
             new_callable=AsyncMock,
             return_value={"instructions": "Be concise."},
-        ),
-        patch(
-            "agent.tools.read_user_settings.get_notion_status",
-            new_callable=AsyncMock,
-            return_value={"notion": {"connected": True}},
         ),
     ):
         result = await read_user_settings()
@@ -53,14 +58,8 @@ async def test_read_user_settings_returns_redacted_participant_settings() -> Non
         "participants": [
             {
                 "login": "octocat",
-                "profile": {
-                    "default_model": "openai:gpt-5.6-sol",
-                    "reasoning_effort": "high",
-                },
+                "profile": {"auto_human_review_enabled": True},
                 "instructions": "Be concise.",
-                "connections": {
-                    "notion": {"connected": True},
-                },
             }
         ],
         "unresolved_participant_count": 1,
@@ -78,15 +77,15 @@ async def test_read_user_settings_fails_before_settings_reads() -> None:
     profile = AsyncMock()
     with (
         patch(
-            "agent.tools.read_user_settings.get_config",
+            "openswe.tools.read_user_settings.get_config",
             return_value={"configurable": {"thread_id": "thread-1"}},
         ),
         patch(
-            "agent.tools.read_user_settings.resolve_thread_participant_logins",
+            "openswe.tools.read_user_settings.resolve_thread_participant_logins",
             new_callable=AsyncMock,
-            return_value=(None, 0, "Could not verify the active thread"),
+            side_effect=ValueError("Could not verify the active thread"),
         ),
-        patch("agent.tools.read_user_settings.get_profile", profile),
+        patch("openswe.tools.read_user_settings.get_profile", profile),
     ):
         result = await read_user_settings()
 
@@ -104,45 +103,23 @@ async def test_slack_participants_include_broadcasts_and_exclude_system_messages
         {"user": "U2"},
     ]
 
-    async def login_for_slack_id(user_id: str) -> str | None:
+    async def login_for_slack(user_id: str) -> str | None:
         return {
             "U1": "octocat",
             "UBROADCAST": "broadcaster",
             "U2": None,
         }.get(user_id)
 
-    async def get_mapping(login: str) -> dict[str, str]:
-        return {"github_login": login, "status": "active"}
+    async def for_login(provider: str, login: str) -> SimpleNamespace:
+        return SimpleNamespace(github_login=login)
 
     with (
-        patch.object(participants, "login_for_slack_id", side_effect=login_for_slack_id),
-        patch.object(participants, "get_mapping", side_effect=get_mapping),
+        patch.object(participants.User, "login_for_slack", side_effect=login_for_slack),
+        patch.object(participants.User, "for_login", side_effect=for_login),
     ):
         logins, unresolved = await participants._mapped_slack_logins(messages)
 
     assert logins == {"octocat", "broadcaster"}
-    assert unresolved == 1
-
-
-@pytest.mark.asyncio
-async def test_linear_participants_use_verified_email_mappings() -> None:
-    async def login_for_email(email: str) -> str | None:
-        return {"octo@example.com": "octocat", "missing@example.com": None}.get(email)
-
-    with (
-        patch.object(participants, "login_for_email", side_effect=login_for_email),
-        patch.object(
-            participants,
-            "get_mapping",
-            new_callable=AsyncMock,
-            return_value={"github_login": "octocat", "status": "active"},
-        ),
-    ):
-        logins, unresolved = await participants._mapped_email_logins(
-            {"octo@example.com", "missing@example.com"}
-        )
-
-    assert logins == {"octocat"}
     assert unresolved == 1
 
 
@@ -162,17 +139,16 @@ async def test_dashboard_participants_are_read_from_trusted_metadata() -> None:
     class Client:
         threads = Threads()
 
-    async def get_mapping(login: str) -> dict[str, str]:
-        return {"github_login": login, "status": "active"}
+    async def for_login(provider: str, login: str) -> SimpleNamespace:
+        return SimpleNamespace(github_login=login)
 
     with (
         patch.object(participants, "get_client", return_value=Client()),
-        patch.object(participants, "get_mapping", side_effect=get_mapping),
+        patch.object(participants.User, "for_login", side_effect=for_login),
     ):
-        logins, unresolved, error = await participants.resolve_thread_participant_logins(
+        logins, unresolved = await participants.resolve_thread_participant_logins(
             {"configurable": {"thread_id": "thread-1", "source": "dashboard"}}
         )
 
-    assert error is None
     assert unresolved == 0
     assert logins == {"owner", "teammate"}

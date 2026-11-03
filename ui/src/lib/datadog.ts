@@ -1,9 +1,26 @@
 import type { RumInitConfiguration } from "@datadog/browser-rum"
 
+import { TelemetryConfig } from "./telemetry-config"
+import { stripUrlDetails } from "./telemetry-url"
+
 type PublicEnv = Record<string, string | boolean | undefined>
 type RumClient = {
   init: (configuration: RumInitConfiguration) => void
   getInternalContext: () => { session_id?: string } | undefined
+  addDurationVital?: (
+    name: string,
+    options: {
+      /** Epoch milliseconds. */
+      startTime: number
+      duration: number
+      context?: Record<string, string | number | boolean | null>
+    }
+  ) => void
+  setGlobalContextProperty?: (key: string, value: string) => void
+  addError?: (
+    error: unknown,
+    context?: Record<string, string | number | null>
+  ) => void
 }
 type RumLoader = () => Promise<RumClient>
 
@@ -46,61 +63,15 @@ export function isDatadogRumInitialized(): boolean {
   return initializedRum !== undefined
 }
 
+export function getDatadogRum(): RumClient | undefined {
+  return initializedRum
+}
+
 export function subscribeToDatadogInitialization(
   listener: () => void
 ): () => void {
   initializationListeners.add(listener)
   return () => initializationListeners.delete(listener)
-}
-
-function templateDashboardPath(pathname: string): string {
-  if (/^\/agents\/reviews\/[^/]+\/[^/]+\/[^/]+\/?$/.test(pathname))
-    return "/agents/reviews/:owner/:repo/:number"
-  if (/^\/agents\/local\/[^/]+\/?$/.test(pathname))
-    return "/agents/local/:sessionId"
-  if (/^\/agents\/automations\/(?!new\/?$)[^/]+\/?$/.test(pathname))
-    return "/agents/automations/:scheduleId"
-  if (/^\/agents\/[^/]+\/plan\/?$/.test(pathname))
-    return "/agents/:threadId/plan"
-  if (
-    /^\/agents\/[^/]+\/?$/.test(pathname) &&
-    !/^\/agents\/(automations|environments|instructions|local|reviews|sandbox|skills|threads)\/?$/.test(
-      pathname
-    )
-  )
-    return "/agents/:threadId"
-  if (/^\/review\/repositories\/[^/]+\/?$/.test(pathname))
-    return "/review/repositories/:owner"
-  if (/^\/[^/]+\/[^/]+\/pull\/[^/]+\/?$/.test(pathname))
-    return "/:owner/:repo/pull/:number"
-  return pathname
-}
-
-function stripUrlDetails(url: string, dashboardOrigin?: string): string {
-  const withoutDetails = url.split(/[?#]/, 1)[0] ?? ""
-  if (withoutDetails.startsWith("/"))
-    return withoutDetails.startsWith("//")
-      ? stripAbsoluteUrlDetails(withoutDetails, dashboardOrigin)
-      : templateDashboardPath(withoutDetails)
-  if (!/^https?:\/\//i.test(withoutDetails)) return withoutDetails
-  return stripAbsoluteUrlDetails(withoutDetails, dashboardOrigin)
-}
-
-function stripAbsoluteUrlDetails(
-  url: string,
-  dashboardOrigin?: string
-): string {
-  try {
-    const parsed = new URL(url, dashboardOrigin)
-    const pathname =
-      parsed.origin === dashboardOrigin
-        ? templateDashboardPath(parsed.pathname)
-        : parsed.pathname
-    const prefix = url.startsWith("//") ? `//${parsed.host}` : parsed.origin
-    return `${prefix}${pathname}`
-  } catch {
-    return url
-  }
 }
 
 function stripEventUrlDetails(
@@ -150,6 +121,16 @@ export async function initializeDatadogRum(
   if (!applicationId || !clientToken) return
 
   const version = envString(env, "VITE_DATADOG_VERSION")
+  let environment: string
+  try {
+    environment = (await TelemetryConfig.load()).environment
+  } catch (error) {
+    console.warn(
+      "Datadog initialization skipped: telemetry configuration unavailable",
+      error
+    )
+    return
+  }
   const rum = await loadRum().catch(() => undefined)
   if (!rum) return
 
@@ -164,11 +145,8 @@ export async function initializeDatadogRum(
     applicationId,
     clientToken,
     site: site as RumInitConfiguration["site"],
-    service: envString(env, "VITE_DATADOG_SERVICE") ?? "alephat-dashboard",
-    env:
-      envString(env, "VITE_DATADOG_ENV") ??
-      envString(env, "MODE") ??
-      "production",
+    service: envString(env, "VITE_DATADOG_SERVICE") ?? "open-swe-dashboard",
+    env: environment,
     ...(version ? { version } : {}),
     sessionSampleRate: sampleRate(env, "VITE_DATADOG_SESSION_SAMPLE_RATE", 100),
     sessionReplaySampleRate: replaySampleRate(env),

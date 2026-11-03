@@ -246,7 +246,7 @@ function shouldExcludeEnv(key) {
   return (
     INTERNAL_ENV.has(normalized) ||
     normalized.startsWith("ELECTRON_") ||
-    normalized.startsWith("ALEPHAT_") ||
+    normalized.startsWith("OPEN_SWE_") ||
     normalized.startsWith("VITE_")
   );
 }
@@ -1259,5 +1259,6 @@ module.exports = {
   createTerminalManager,
   ensurePtySpawnHelperExecutable,
   getProjectShellEnv,
+  getUserShellEnv,
   sanitizeHistoryChunk,
 };

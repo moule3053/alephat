@@ -1,125 +1,257 @@
-import { Link } from "@tanstack/react-router"
+import { ExperienceSelector } from "@/components/ExperienceSelector"
 import {
-  IoArrowBackOutline,
-  IoCloudOutline,
-  IoCubeOutline,
-  IoGitPullRequestOutline,
-  IoOptionsOutline,
-  IoSettingsOutline,
-  IoStatsChartOutline,
-} from "react-icons/io5"
-import type { ComponentType, SVGProps } from "react"
+  ArrowLeftIcon,
+  ArticleRegularIcon,
+  CubeRegularIcon,
+  GearRegularIcon,
+  InfoRegularIcon,
+  SlidersHorizontalRegularIcon,
+  WarningRegularIcon,
+} from "@langchain/macaw-components/icons"
+import type { IconComponent } from "@langchain/macaw-components/Icon"
+import { ChartBarIcon } from "@phosphor-icons/react/dist/ssr/ChartBar"
+import { ChartBarHorizontalIcon } from "@phosphor-icons/react/dist/ssr/ChartBarHorizontal"
+import { FileTextIcon } from "@phosphor-icons/react/dist/ssr/FileText"
+import { FlaskIcon } from "@phosphor-icons/react/dist/ssr/Flask"
+import { GitBranchIcon } from "@phosphor-icons/react/dist/ssr/GitBranch"
+import { GitPullRequestIcon } from "@phosphor-icons/react/dist/ssr/GitPullRequest"
+import { LinkIcon } from "@phosphor-icons/react/dist/ssr/Link"
+import { PaintBrushIcon } from "@phosphor-icons/react/dist/ssr/PaintBrush"
+import { PulseIcon } from "@phosphor-icons/react/dist/ssr/Pulse"
+import { PuzzlePieceIcon } from "@phosphor-icons/react/dist/ssr/PuzzlePiece"
+import { SparkleIcon } from "@phosphor-icons/react/dist/ssr/Sparkle"
+import { TerminalWindowIcon } from "@phosphor-icons/react/dist/ssr/TerminalWindow"
+import { UsersIcon } from "@phosphor-icons/react/dist/ssr/Users"
+import { Link, useRouterState } from "@tanstack/react-router"
+import { Fragment } from "react"
 
+import { useWorkspaceOptions } from "@/features/agents/lib/queries"
 import type { SessionUser } from "@/lib/api"
 import { SidebarUserMenu } from "@/components/SidebarUserMenu"
+import { LogoMark } from "@/components/Branding"
+import { useAgentWorkspace } from "@/features/agents/lib/agentWorkspace"
 import {
   SidebarCollapseButton,
   SidebarFrame,
   useSidebarLayout,
 } from "@/components/sidebar-layout"
 import { cn } from "@/lib/utils"
-import { getLastAppLocation } from "@/lib/appLocation"
-
-type IconType = ComponentType<SVGProps<SVGSVGElement>>
+import { getLastAppLocation, useHrefLinkOptions } from "@/lib/appLocation"
 
 interface NavItem {
   to: string
   label: string
-  icon: IconType
-  adminOnly?: boolean
+  icon: IconComponent
+  /** Child pages that also highlight this item. */
+  childPrefix?: string
 }
 
-const NAV: Array<{ heading: string; items: Array<NavItem> }> = [
+interface NavGroup {
+  heading: string
+  adminOnly?: boolean
+  items: Array<NavItem>
+}
+
+const NAV: Array<NavGroup> = [
   {
-    heading: "User settings",
+    heading: "Personal",
     items: [
-      { to: "/my-settings", label: "Profile", icon: IoOptionsOutline },
-      { to: "/cloud-agents", label: "Alephat Agent", icon: IoCloudOutline },
-      { to: "/usage", label: "Usage", icon: IoStatsChartOutline },
+      { to: "/my-settings", label: "General", icon: GearRegularIcon },
+      { to: "/my-settings/agent", label: "Agent", icon: SparkleIcon },
+      { to: "/my-settings/git", label: "Git", icon: GitBranchIcon },
+      {
+        to: "/my-settings/instructions",
+        label: "Instructions",
+        icon: ArticleRegularIcon,
+      },
+      {
+        to: "/my-settings/connections",
+        label: "Connections",
+        icon: LinkIcon,
+      },
+      {
+        to: "/my-settings/claude-code",
+        label: "Claude Code",
+        icon: TerminalWindowIcon,
+      },
+      {
+        to: "/my-settings/experiments",
+        label: "Experiments",
+        icon: FlaskIcon,
+      },
     ],
   },
   {
-    heading: "Workspace settings",
+    heading: "Workspace",
     items: [
       {
         to: "/review",
-        label: "Alephat Review",
-        icon: IoGitPullRequestOutline,
+        label: "Code Review",
+        icon: GitPullRequestIcon,
+        childPrefix: "/review/repositories/",
       },
-      { to: "/environments", label: "Environments", icon: IoCubeOutline },
+      { to: "/review/styles", label: "Review Styles", icon: PaintBrushIcon },
       {
-        to: "/admin",
-        label: "Admin",
-        icon: IoSettingsOutline,
-        adminOnly: true,
+        to: "/agents/instructions",
+        label: "Repository Instructions",
+        icon: FileTextIcon,
+      },
+      { to: "/workspaces", label: "Workspaces", icon: CubeRegularIcon },
+      { to: "/usage", label: "Usage", icon: ChartBarIcon },
+    ],
+  },
+  {
+    heading: "Administration",
+    adminOnly: true,
+    items: [
+      { to: "/admin", label: "Defaults", icon: SlidersHorizontalRegularIcon },
+      {
+        to: "/admin/integrations",
+        label: "Integrations",
+        icon: PuzzlePieceIcon,
+      },
+      { to: "/admin/incidents", label: "Incidents", icon: WarningRegularIcon },
+      { to: "/admin/operations", label: "Operations", icon: PulseIcon },
+      {
+        to: "/admin/audit-logs",
+        label: "Audit Logs",
+        icon: ArticleRegularIcon,
+      },
+      { to: "/admin/users", label: "Users", icon: UsersIcon },
+      { to: "/admin/evals", label: "Evals", icon: ChartBarHorizontalIcon },
+    ],
+  },
+  {
+    heading: "Help",
+    items: [
+      {
+        to: "/my-settings/about",
+        label: "About",
+        icon: InfoRegularIcon,
       },
     ],
   },
 ]
 
+function isActive(item: NavItem, pathname: string): boolean {
+  if (pathname === item.to) return true
+  return !!item.childPrefix && pathname.startsWith(item.childPrefix)
+}
+
 const LINK_CLASS =
-  "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs/relaxed text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+  "flex items-center gap-space-3 rounded-md px-space-2 py-space-1 text-xs/relaxed text-secondary transition-colors hover:bg-surface-level-2-hover hover:text-primary"
+
+const ACTIVE_LINK_PROPS = {
+  className: "bg-surface-level-2-hover text-primary font-medium",
+}
+
+function WorkspaceNavItems({ onNavigate }: { onNavigate: () => void }) {
+  const options = useWorkspaceOptions()
+  const workspaces = options.data?.workspaces ?? []
+  if (workspaces.length === 0) return null
+  return (
+    <div className="ml-[1.1rem] flex flex-col gap-0.5 border-l border-default pl-space-2">
+      {workspaces.map((workspace) => (
+        <Link
+          key={workspace.slug}
+          to="/workspaces/$slug"
+          params={{ slug: workspace.slug }}
+          onClick={onNavigate}
+          className={cn(LINK_CLASS, "py-space-1")}
+          activeProps={ACTIVE_LINK_PROPS}
+        >
+          <span className="truncate">{workspace.name}</span>
+        </Link>
+      ))}
+    </div>
+  )
+}
 
 export function AppSidebar({ user }: { user: SessionUser }) {
+  const agentWorkspace = useAgentWorkspace()
   const layout = useSidebarLayout()
+  const hrefLinkOptions = useHrefLinkOptions()
+  const pathname = useRouterState({ select: (s) => s.location.pathname })
   const isDesktop =
     typeof window !== "undefined" && Boolean(window.openSweDesktop)
 
   return (
     <SidebarFrame
       {...layout}
-      className="border-r border-border bg-sidebar text-sidebar-foreground"
+      className="border-r border-default bg-surface-level-2 text-primary"
     >
       <div
         className={cn(
-          "flex items-center justify-between px-4 pb-4",
-          isDesktop ? "pt-13" : "pt-5"
+          "flex items-center justify-between px-space-4 pb-space-4",
+          isDesktop ? "pt-13" : "pt-space-4"
         )}
       >
         <Link
-          to={getLastAppLocation()}
-          className={cn(LINK_CLASS, "-mx-2.5 font-medium")}
+          {...hrefLinkOptions(getLastAppLocation())}
+          className={cn(LINK_CLASS, "-mx-space-2 font-medium")}
           onClick={layout.closeOnMobile}
         >
-          <IoArrowBackOutline className="size-4" />
+          <ArrowLeftIcon size={16} weight="regular" />
           <span>Back to app</span>
         </Link>
         <SidebarCollapseButton onToggle={layout.toggle} />
       </div>
 
-      <nav className="flex flex-1 flex-col gap-5 px-2">
-        {NAV.map((group) => {
-          const items = group.items.filter((i) => !i.adminOnly || user.is_admin)
-          if (items.length === 0) return null
-          return (
+      <ExperienceSelector onNavigate={layout.closeOnMobile} />
+      {agentWorkspace && (
+        <div className="flex items-center gap-space-3 px-space-4 pt-space-2 pb-space-6">
+          <LogoMark className="size-8 shrink-0" alt="" />
+          <div className="flex flex-col gap-space-1">
+            <span className="text-sm font-medium">Open SWE</span>
+            <span className="text-xs text-tertiary">Settings</span>
+          </div>
+        </div>
+      )}
+      <nav className="flex flex-1 flex-col gap-space-5 overflow-y-auto px-space-2">
+        {NAV.filter((group) => !group.adminOnly || user.is_admin).map(
+          (group) => (
             <div key={group.heading} className="flex flex-col gap-0.5">
-              <span className="px-2.5 pb-1 text-[10px] font-medium tracking-wide text-muted-foreground/70 uppercase">
+              <span
+                className={cn(
+                  "px-space-2 pb-space-1 text-xxs font-medium tracking-wide text-tertiary uppercase",
+                  agentWorkspace &&
+                    "px-space-3 text-xs font-normal tracking-normal normal-case"
+                )}
+              >
                 {group.heading}
               </span>
-              {items.map((item) => {
+              {group.items.map((item) => {
                 const Icon = item.icon
                 return (
-                  <Link
-                    key={item.to}
-                    to={item.to}
-                    onClick={layout.closeOnMobile}
-                    className={LINK_CLASS}
-                    activeProps={{
-                      className:
-                        "bg-sidebar-accent text-sidebar-accent-foreground font-medium",
-                    }}
-                  >
-                    <Icon className="size-4" />
-                    <span>{item.label}</span>
-                  </Link>
+                  <Fragment key={item.to}>
+                    <Link
+                      to={item.to}
+                      onClick={layout.closeOnMobile}
+                      className={cn(
+                        LINK_CLASS,
+                        agentWorkspace &&
+                          "gap-space-2 rounded-xl px-space-3 py-space-2 text-sm hover:bg-surface-level-3",
+                        isActive(item, pathname) && ACTIVE_LINK_PROPS.className,
+                        agentWorkspace &&
+                          isActive(item, pathname) &&
+                          "bg-surface-level-3 font-normal"
+                      )}
+                    >
+                      <Icon size={16} weight="regular" />
+                      <span>{item.label}</span>
+                    </Link>
+                    {item.to === "/workspaces" && user.is_admin && (
+                      <WorkspaceNavItems onNavigate={layout.closeOnMobile} />
+                    )}
+                  </Fragment>
                 )
               })}
             </div>
           )
-        })}
+        )}
       </nav>
 
-      <div className="p-2">
+      <div className="p-space-2">
         <SidebarUserMenu user={user} />
       </div>
     </SidebarFrame>

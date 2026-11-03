@@ -7,7 +7,7 @@ import type {
   ToolExecutionChunk,
 } from "@/features/agents/lib/types"
 
-const projectPath = "/workspace/alephat"
+const repoPath = "/workspace/open-swe"
 
 function chunk(
   overrides: Partial<ToolExecutionChunk> = {}
@@ -24,7 +24,7 @@ function chunk(
 
 function diff(overrides: Partial<DiffData> = {}): DiffData {
   return {
-    filePath: `${projectPath}/ui/src/app.tsx`,
+    filePath: `${repoPath}/ui/src/app.tsx`,
     originalContent: "a\n",
     newContent: "b\n",
     isNewFile: false,
@@ -36,11 +36,27 @@ function diff(overrides: Partial<DiffData> = {}): DiffData {
 }
 
 describe("describeWorkEntry", () => {
+  it("links only successful cross-thread messages to their authorized recipient", () => {
+    const recipient = "553f74de-534d-5377-815d-c14b58b21ea2"
+    const sent = chunk({
+      title: "message_task_thread",
+      toolKind: "other",
+      output: JSON.stringify({ success: true, recipient_thread_id: recipient }),
+    })
+    expect(describeWorkEntry(sent).destinationHref).toBe(`/agents/${recipient}`)
+    expect(
+      describeWorkEntry({ ...sent, output: "invalid" }).destinationHref
+    ).toBeUndefined()
+    expect(
+      describeWorkEntry({ ...sent, status: "error" }).destinationHref
+    ).toBeUndefined()
+  })
+
   it("splits a read into a verb, file name, and full-path tooltip", () => {
-    const fullPath = `${projectPath}/ui/src/AGENTS.md`
+    const fullPath = `${repoPath}/ui/src/AGENTS.md`
     const entry = describeWorkEntry(
       chunk({ input: { file_path: fullPath } }),
-      projectPath
+      repoPath
     )
 
     expect(entry.heading).toBe("Read")
@@ -52,12 +68,12 @@ describe("describeWorkEntry", () => {
   it("describes a completed edit from its diff rather than the raw tool title", () => {
     const entry = describeWorkEntry(
       chunk({ title: "edit_file", toolKind: "edit", diffData: diff() }),
-      projectPath
+      repoPath
     )
 
     expect(entry.heading).toBe("Edited")
     expect(entry.preview).toBe("app.tsx")
-    expect(entry.previewTooltip).toBe(`${projectPath}/ui/src/app.tsx`)
+    expect(entry.previewTooltip).toBe(`${repoPath}/ui/src/app.tsx`)
     expect(entry.diffStats).toEqual({ additions: 1, deletions: 1 })
     expect(entry.icon).toBe("square-pen")
     // The diff is rendered as the row body, so there is no text fallback.
@@ -67,7 +83,7 @@ describe("describeWorkEntry", () => {
   it("distinguishes a created file from an edited one", () => {
     const entry = describeWorkEntry(
       chunk({ toolKind: "edit", diffData: diff({ isNewFile: true }) }),
-      projectPath
+      repoPath
     )
 
     expect(entry.heading).toBe("Created")
@@ -76,7 +92,7 @@ describe("describeWorkEntry", () => {
   it("reports an in-flight edit in the present tense", () => {
     const entry = describeWorkEntry(
       chunk({ toolKind: "edit", status: "in_progress", diffData: diff() }),
-      projectPath
+      repoPath
     )
 
     expect(entry.heading).toBe("Editing")
@@ -89,9 +105,9 @@ describe("describeWorkEntry", () => {
         title: "shell",
         toolKind: "execute",
         status: "error",
-        input: { command: "pnpm test" },
+        input: { command: "cd /workspace/open-swe && pnpm test" },
       }),
-      projectPath
+      repoPath
     )
 
     expect(entry.tone).toBe("error")
@@ -106,34 +122,45 @@ describe("describeWorkEntry", () => {
         title: "search",
         toolKind: "search",
         input: {},
-        locations: [
-          { path: `${projectPath}/a.ts` },
-          { path: `${projectPath}/b.ts` },
-        ],
+        locations: [{ path: `${repoPath}/a.ts` }, { path: `${repoPath}/b.ts` }],
       }),
-      projectPath
+      repoPath
     )
 
     expect(entry.preview).toBe("a.ts +1 more")
   })
 
-  it("builds an expandable body from the command and its output", () => {
+  it("shows important tool text in the preview", () => {
+    const reason =
+      "This is a conversation between people, not a request.".repeat(100)
     const entry = describeWorkEntry(
       chunk({
-        title: "shell",
-        toolKind: "execute",
-        input: { command: "ls" },
-        output: "a.ts\nb.ts",
-      }),
-      projectPath
+        title: "slack_no_reply_needed",
+        toolKind: "other",
+        input: { reason, confirmation: "Internal confirmation" },
+        output: '{"ok":true}',
+      })
     )
 
-    expect(entry.expandedText).toBe("ls\n\na.ts\nb.ts")
+    expect(entry.preview).toBe(`${reason.slice(0, 80)}...`)
+    expect(entry.previewTooltip).toBe(reason)
+
+    const task = describeWorkEntry(
+      chunk({
+        title: "task",
+        toolKind: "task",
+        input: {
+          description: "Investigate the failure",
+          instructions: "Keep the report concise",
+        },
+      })
+    )
+    expect(task.preview).toBe("Investigate the failure")
   })
 
   it("keeps complete JSON tool output available for highlighted rendering", () => {
     const output = JSON.stringify({ value: "x".repeat(5000) })
-    const entry = describeWorkEntry(chunk({ output }), projectPath)
+    const entry = describeWorkEntry(chunk({ output }), repoPath)
 
     expect(entry.expandedText).toBe(JSON.stringify(JSON.parse(output), null, 2))
     expect(entry.expandedText).not.toContain("…")
@@ -146,12 +173,38 @@ describe("liveActivityLabel", () => {
       { kind: "reasoning", text: "Inspecting" },
       chunk({
         toolCallId: "call_read",
-        input: { file_path: `${projectPath}/ui/src/AGENTS.md` },
+        input: { file_path: `${repoPath}/ui/src/AGENTS.md` },
         status: "in_progress",
       }),
     ]
 
-    expect(liveActivityLabel(chunks, projectPath)).toBe("Exploring · AGENTS.md")
+    expect(liveActivityLabel(chunks, repoPath)).toBe("Exploring · AGENTS.md")
+  })
+
+  it("keeps showing an active parallel tool until all tools finish", () => {
+    const running = chunk({
+      toolCallId: "running",
+      toolKind: "execute",
+      status: "in_progress",
+      input: { command: "pnpm test" },
+    })
+    expect(liveActivityLabel([running, chunk()])).toBe("Running · pnpm test")
+    expect(
+      liveActivityLabel([{ ...running, status: "completed" }, chunk()])
+    ).toBe("Thinking…")
+  })
+
+  it("names the thought by its latest finished heading", () => {
+    const reasoning = (text: string): Chunk => ({ kind: "reasoning", text })
+
+    expect(liveActivityLabel([reasoning("**Evaluating tok")])).toBe("Thinking…")
+    expect(
+      liveActivityLabel([
+        reasoning(
+          "**Evaluating token budget**\n\nEnough left.\n\n**Running the e2e test**\n\nStarting"
+        ),
+      ])
+    ).toBe("Running the e2e test…")
   })
 
   it("switches to response status when final text starts streaming", () => {

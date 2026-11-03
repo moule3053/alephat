@@ -5,7 +5,7 @@ only GitHub itself is faked, so the loopback flow is exercised end to end.
 
     uv run python tests/e2e/local_desktop_login.py
 
-Then point the desktop app at http://127.0.0.1:8765 (Alephat -> Backend URL...)
+Then point the desktop app at http://127.0.0.1:8765 (Open SWE -> Backend URL...)
 and sign in. Endpoints other than /auth/* and /me need a real backend and will
 error; login is what this harness covers.
 """
@@ -29,20 +29,22 @@ import uvicorn  # noqa: E402
 from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.responses import HTMLResponse, RedirectResponse  # noqa: E402
 
-from agent.dashboard import routes  # noqa: E402
+from openswe.dashboard import auth_routes, routes  # noqa: E402
+from openswe.dashboard.oauth import GithubUser  # noqa: E402
+from openswe.users import User  # noqa: E402
 
 LOGIN = os.environ.get("FAKE_GITHUB_LOGIN", "local-tester")
 EMAIL = os.environ.get("FAKE_GITHUB_EMAIL", "local-tester@example.com")
 
-routes.GITHUB_AUTHORIZE_URL = f"{BASE_URL}/fake-gh/login/oauth/authorize"
+auth_routes.GITHUB_AUTHORIZE_URL = f"{BASE_URL}/fake-gh/login/oauth/authorize"
 
 
 async def fake_exchange_code(code: str) -> dict[str, Any]:
     return {"access_token": "gho_local", "token_type": "bearer"}
 
 
-async def fake_fetch_github_user(access_token: str) -> tuple[dict[str, Any], str | None]:
-    return {"login": LOGIN, "avatar_url": None}, EMAIL
+async def fake_fetch_github_user(access_token: str) -> tuple[GithubUser, str | None]:
+    return GithubUser(id=1, login=LOGIN, avatar_url=None), EMAIL
 
 
 async def fake_enforce_github_login_gate(login: str) -> None:
@@ -53,10 +55,18 @@ async def fake_upsert(login: str, email: str, data: dict[str, Any]) -> None:
     return None
 
 
-routes.exchange_code = fake_exchange_code
-routes.fetch_github_user = fake_fetch_github_user
-routes.enforce_github_login_gate = fake_enforce_github_login_gate
-routes.upsert_access_token_from_github_response = fake_upsert
+FAKE_USER = User(display_name=LOGIN)
+
+
+async def fake_sign_in(provider: str, external_id: str, **fields: object) -> User:
+    return FAKE_USER
+
+
+auth_routes.exchange_code = fake_exchange_code
+auth_routes.fetch_github_user = fake_fetch_github_user
+auth_routes.enforce_github_login_gate = fake_enforce_github_login_gate
+auth_routes.upsert_access_token_from_github_response = fake_upsert
+setattr(auth_routes.User, "sign_in", fake_sign_in)  # noqa: B010
 
 app = FastAPI()
 app.include_router(routes.router)
@@ -74,7 +84,7 @@ async def fake_github_authorize(redirect_uri: str, state: str, client_id: str = 
     return HTMLResponse(
         f"""<!doctype html><meta charset=utf-8><title>Fake GitHub</title>
         <body style="font:16px system-ui;max-width:30rem;margin:4rem auto;text-align:center">
-        <h1 style="font-size:1.1rem">Authorize Alephat</h1>
+        <h1 style="font-size:1.1rem">Authorize Open SWE</h1>
         <p style="opacity:.7">Signing in as <b>{escape(LOGIN)}</b> — a local fake, not GitHub.</p>
         <p><a href="{target}"
               style="display:inline-block;padding:.6rem 1rem;border:1px solid;border-radius:.4rem">

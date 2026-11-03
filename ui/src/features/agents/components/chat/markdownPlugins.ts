@@ -66,7 +66,7 @@ export function remarkGithubAlerts() {
   }
 }
 
-const INLINE_PARSE_PREFIX = "alephat-markdown-inline-prefix:"
+const INLINE_PARSE_PREFIX = "open-swe-markdown-inline-prefix:"
 
 function isSameLineOverIndentedCode(
   node: MarkdownAstNode,

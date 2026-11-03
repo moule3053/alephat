@@ -1,21 +1,23 @@
 """PostgreSQL reporting preserves usage cohorts, identities, and disclosure rules."""
 
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
 
-from agent.analytics import directory, queries
-from agent.database import analytics as database
+from openswe.analytics import directory, queries
+from openswe.database import analytics as database
+from openswe.database import postgres
+from tests.analytics.conftest import initialize_database
 
 NOW = datetime(2026, 9, 11, tzinfo=UTC)
 
 
 @pytest.fixture
 async def usage_db(deployment_db, monkeypatch):
-    await database.migrate()
-    async with database.transaction() as conn:
+    await initialize_database()
+    async with postgres.transaction() as conn:
         await conn.execute(
             text("UPDATE deployment_metadata SET reporting_cutover_at = :cutover"),
             {"cutover": NOW - timedelta(days=90)},
@@ -32,7 +34,7 @@ async def usage_db(deployment_db, monkeypatch):
 
 async def insert(table, *, workspace_id=None, **values):
     values = {"workspace_id": workspace_id or database.workspace_id(), **values}
-    async with database.transaction() as conn:
+    async with postgres.transaction() as conn:
         await conn.execute(
             text(
                 f"INSERT INTO {table} ({', '.join(values)}) "
@@ -96,36 +98,59 @@ async def pr(person_id, *, age=1, state="open", additions=0, deletions=0, **kwar
     return pr_id
 
 
+async def feedback(
+    person_id: UUID | None,
+    *,
+    age: int = 1,
+    withdrawn_at: datetime | None = None,
+    workspace_id: UUID | None = None,
+) -> UUID:
+    feedback_id = uuid4()
+    await insert(
+        "feedback_projection",
+        workspace_id=workspace_id,
+        feedback_id=feedback_id,
+        user_id=person_id,
+        sentiment="positive",
+        submitted_at=NOW - timedelta(days=age),
+        withdrawn_at=withdrawn_at,
+    )
+    return feedback_id
+
+
 async def report(**kwargs):
     return await queries.usage_leaderboard(
         **{"period": "7d", "limit": 100, "current_login": None, "current_email": None, **kwargs}
     )
 
 
-async def test_empty_report_exposes_collection_progress(usage_db):
-    result = await report()
-    assert result["rows"] == []
-    assert result["total_members"] == 0
-    assert result["current_user_rank"] is None
-    assert result["completeness"] == "not_started"
-    assert result["data_source"] == "event_projections"
-    assert result["collection_started_at"] is None
-    assert result["reviewer_stats"]["reviewed_prs"] == 0
-    assert result["reviewer_stats"]["resolution_rate"] == 0
-    assert result["reviewer_stats"]["top_categories"] == []
-
-
 async def test_usage_ranks_run_and_pr_cohorts_with_cost_coverage(usage_db):
-    alice = await person("alice", "alice@example.com")
+    alice = await person("alice", "alice@example.com", display_name="Alice Example")
     bob = await person("bob", "bob@example.com")
     carol = await person("carol", "carol@example.com")
     stale = await person("stale")
     model = uuid4()
     await insert("model_directory", model_id=model, provider_model_id="model-a")
-    first_run = await run(alice, duration=60, model_id=model, tokens=4)
-    await run(alice, duration=120, model_id=model, tokens=7)
-    await run(alice, duration=-1, tokens=3)
-    await run(alice, tokens=6)
+    first_thread = uuid4()
+    second_thread = uuid4()
+    first_run = await run(
+        alice,
+        duration=60,
+        model_id=model,
+        configured_effort="high",
+        tokens=4,
+        thread_id=first_thread,
+    )
+    await run(
+        alice,
+        duration=120,
+        model_id=model,
+        configured_effort="high",
+        tokens=7,
+        thread_id=first_thread,
+    )
+    await run(alice, duration=-1, tokens=3, thread_id=second_thread)
+    await run(alice, tokens=6, thread_id=second_thread)
     await run(alice, age=8, duration=10000, tokens=9999)
     await run(alice, age=-1, duration=10000, tokens=9999)
     await run(stale, age=8)
@@ -150,17 +175,26 @@ async def test_usage_ranks_run_and_pr_cohorts_with_cost_coverage(usage_db):
     await run(outsider, workspace_id=foreign)
     await pr(outsider, state="merged", additions=10000, workspace_id=foreign)
 
-    result = await report(limit=1, current_login=" ALICE ")
+    result = await report(limit=2, current_login=" ALICE ")
     assert result["total_members"] == 3
     assert result["current_user_rank"] == 2
     assert [r["rank"] for r in result["rows"]] == [1, 2]
     row = result["rows"][1]
-    assert row["user"] == {"name": "alice", "github_login": "alice", "email": "alice@example.com"}
+    assert row["user"] == {
+        "name": "Alice Example",
+        "github_login": "alice",
+        "email": "alice@example.com",
+        "avatar_url": "https://github.com/alice.png?size=80",
+    }
     assert row["invocations"] == row["agent_runs"] == 4
+    assert row["threads"] == 2
     assert row["avg_invocation_seconds"] == row["avg_run_seconds"] == 90
+    assert row["avg_thread_seconds"] == 180
     assert row["favorite_model"] == "model-a"
+    assert row["favorite_model_effort"] == "high"
     assert row["prs_opened"] == 1
     assert row["merged_prs"] == 0
+    assert row["merged_prs_per_thread"] == 0
     assert row["agent_loc"] == 20
     assert row["additions"] == 12
     assert row["deletions"] == 8
@@ -172,6 +206,33 @@ async def test_usage_ranks_run_and_pr_cohorts_with_cost_coverage(usage_db):
     assert result["rows"][0]["user"]["email"] is None
     assert result["rows"][0]["user"]["github_login"] is None
     assert (await report(limit=0))["rows"][0]["rank"] == 1
+    assert [row["rank"] for row in (await report(limit=1, offset=1))["rows"]] == [2]
+
+
+async def test_usage_sorting_happens_before_pagination(usage_db):
+    alice = await person("alice", display_name="Alice")
+    bob = await person("bob", display_name="bob")
+    carol = await person("carol", display_name="Carol")
+    await run(alice, tokens=10)
+    await run(bob, tokens=30)
+    await run(carol, tokens=20)
+
+    first = await report(limit=2, sort="total_tokens", direction="desc")
+    assert [row["user"]["name"] for row in first["rows"]] == ["bob", "Carol"]
+    second = await report(
+        limit=2,
+        cursor=first["next_cursor"],
+        sort="total_tokens",
+        direction="desc",
+    )
+    assert [row["user"]["name"] for row in second["rows"]] == ["Alice"]
+    with pytest.raises(ValueError, match="invalid usage leaderboard cursor"):
+        await report(
+            limit=2,
+            cursor=first["next_cursor"],
+            sort="user",
+            direction="asc",
+        )
 
 
 async def test_aliases_and_pr_only_members_preserve_privacy(usage_db):
@@ -188,11 +249,12 @@ async def test_aliases_and_pr_only_members_preserve_privacy(usage_db):
     assert ordinary["rows"][0]["invocations"] == 2
     assert ordinary["rows"][0]["prs_opened"] == 1
     assert ordinary["rows"][1]["user"] == {
-        "name": "Alephat user",
+        "name": "Open SWE user",
         "github_login": None,
         "email": None,
+        "avatar_url": None,
     }
-    own = await report(limit=1, current_email=" PRIVATE@EXAMPLE.COM ")
+    own = await report(limit=2, current_email=" PRIVATE@EXAMPLE.COM ")
     assert own["current_user_rank"] == 2
     assert own["rows"][1]["user"]["name"] == "private"
     assert own["rows"][1]["user"]["email"] == "private@example.com"
@@ -200,6 +262,53 @@ async def test_aliases_and_pr_only_members_preserve_privacy(usage_db):
     assert admin["rows"][0]["user"]["github_login"] == "named"
     assert admin["rows"][1]["user"]["name"] == "private"
     assert all(row["user"]["email"] is None for row in admin["rows"])
+
+
+@pytest.mark.parametrize("direction", ["asc", "desc"])
+async def test_feedback_sort_preserves_snapshot_and_ties_across_pages(
+    usage_db: UUID, monkeypatch: pytest.MonkeyPatch, direction: queries.SortDirection
+) -> None:
+    first = await person("first", display_name="Same")
+    second = await person("second", display_name="Same")
+    zero = await person("zero")
+    await feedback(first, age=7)
+    withdrawn = await feedback(second, age=7)
+    await run(zero)
+    expected = await report(sort="feedback_given", direction=direction)
+    first_page = await report(limit=1, sort="feedback_given", direction=direction)
+
+    class LaterDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW + timedelta(days=2)
+
+    monkeypatch.setattr(queries, "datetime", LaterDatetime)
+    await feedback(first, age=-1)
+    await feedback(await person("new"), age=-1)
+    async with postgres.transaction() as conn:
+        await conn.execute(
+            text(
+                "UPDATE feedback_projection SET withdrawn_at = :withdrawn WHERE feedback_id = :id"
+            ),
+            {"withdrawn": NOW + timedelta(days=1), "id": withdrawn},
+        )
+    actual = first_page["rows"]
+    cursor = first_page["next_cursor"]
+    while cursor:
+        page = await report(limit=1, cursor=cursor, sort="feedback_given", direction=direction)
+        assert page["as_of"] == first_page["as_of"]
+        assert page["total_members"] == 3
+        actual.extend(page["rows"])
+        cursor = page["next_cursor"]
+    assert actual == expected["rows"]
+    assert [row["is_top_feedback_contributor"] for row in actual] == (
+        [False, True, True] if direction == "asc" else [True, True, False]
+    )
+    assert [row["feedback_given"] for row in actual] == (
+        [0, 1, 1] if direction == "asc" else [1, 1, 0]
+    )
+    with pytest.raises(queries.InvalidUsageCursor):
+        await report(cursor=first_page["next_cursor"], sort="rank", direction=direction)
 
 
 async def test_reviewer_uses_publication_recording_and_surfacing_cohorts(usage_db):
@@ -303,7 +412,7 @@ async def test_reports_require_activation_and_exclude_pre_cutover_facts(usage_db
             observed_at=NOW,
             event_id=uuid4(),
         )
-    async with database.transaction() as conn:
+    async with postgres.transaction() as conn:
         await conn.execute(
             text("UPDATE deployment_metadata SET reporting_cutover_at = :cutover"),
             {"cutover": NOW - timedelta(days=1)},
@@ -318,8 +427,8 @@ async def test_reports_require_activation_and_exclude_pre_cutover_facts(usage_db
     assert result["reviewer_stats"]["human_replies"] == 1
     assert result["reporting_cutover_at"] == (NOW - timedelta(days=1)).isoformat()
     outcomes = await queries.pr_merge_rate_by_model(period="all", admin=True)
-    assert outcomes["cohorts"][0]["cohort_size"] == 1
-    async with database.transaction() as conn:
+    assert outcomes["cohorts"] == []
+    async with postgres.transaction() as conn:
         await conn.execute(text("UPDATE deployment_metadata SET reporting_cutover_at = NULL"))
     with pytest.raises(RuntimeError, match="not been activated"):
         await report()
@@ -352,7 +461,7 @@ async def test_reused_handles_do_not_transfer_an_immutable_owners_usage(usage_db
     assert sorted(row["invocations"] for row in result["rows"]) == [1, 2]
     own = next(row for row in result["rows"] if row["rank"] == result["current_user_rank"])
     assert own["invocations"] == 1
-    async with database.connection() as conn:
+    async with postgres.connection() as conn:
         assert (
             await conn.scalar(
                 text("SELECT person_id FROM identity_aliases WHERE alias_person_id = :alias"),
@@ -361,3 +470,38 @@ async def test_reused_handles_do_not_transfer_an_immutable_owners_usage(usage_db
             == original
         )
     assert await directory.resolve_person(immutable_person_key=123) == original
+
+
+async def test_review_only_members_are_included_and_sortable(usage_db):
+    await person("reviewer")
+    other = await person("other")
+    await run(other)
+    user_id = uuid4()
+    async with postgres.transaction() as conn:
+        await conn.execute(text("INSERT INTO users (id) VALUES (:id)"), {"id": user_id})
+        await conn.execute(
+            text(
+                "INSERT INTO user_identity (provider, external_id, user_id, login) "
+                "VALUES ('github', '123', :id, 'reviewer')"
+            ),
+            {"id": user_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO completed_review (id, user_id, repository_key, pr_number, reviewed_at) "
+                "VALUES (:id, :user_id, 'org/repo', 1, :now), "
+                "(:old_id, :user_id, 'org/repo', 2, :old)"
+            ),
+            {
+                "id": uuid4(),
+                "old_id": uuid4(),
+                "user_id": user_id,
+                "now": NOW,
+                "old": NOW - timedelta(days=8),
+            },
+        )
+    result = await report(sort="prs_reviewed", direction="desc", current_login="reviewer")
+    assert result["total_members"] == 2
+    assert result["rows"][0]["user"]["github_login"] == "reviewer"
+    assert result["rows"][0]["prs_reviewed"] == 1
+    assert result["rows"][1]["prs_reviewed"] == 0

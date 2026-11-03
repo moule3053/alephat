@@ -7,13 +7,14 @@
       "env": [
         "DASHBOARD_API_URL",
         "DASHBOARD_BASE_PATH",
-        "ALEPHAT_DEV_SESSION",
+        "OPEN_SWE_DEV_SESSION",
         "PORT",
         "E2E_HARNESS",
         "VITE_*"
       ]
     },
     "build": {
+      "dependsOn": ["^build"],
       "outputs": [
         ".output/**",
         ".vercel/output/**",
@@ -21,14 +22,20 @@
       ],
       "env": [
         "DASHBOARD_API_URL",
+        "SOURCE_COMMIT",
         "VERCEL",
         "E2E_HARNESS",
         "VITE_*"
       ]
     },
-    "typecheck": {},
-    "test": {},
+    "typecheck": {
+      "dependsOn": ["^build"]
+    },
+    "test": {
+      "dependsOn": ["^build"]
+    },
     "check": {
+      "dependsOn": ["^build"],
       "cache": false
     }
   }

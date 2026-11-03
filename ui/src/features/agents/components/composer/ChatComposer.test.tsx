@@ -1,5 +1,6 @@
 /** @vitest-environment jsdom */
 
+import { TooltipProvider } from "@langchain/macaw-components/Tooltip"
 import {
   cleanup,
   fireEvent,
@@ -11,20 +12,41 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { ChatComposer, buildCommandItems } from "./ChatComposer"
+import { api } from "@/lib/api"
+import { AgentWorkspaceProvider } from "@/features/agents/lib/agentWorkspace"
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions"
 import { replaceTextRange } from "./composerTrigger"
 import type { ChatComposerProps } from "./ChatComposer"
 import { AgentThreadStreamBoundary } from "@/features/agents/lib/provider/useIsInAgentThreadStream"
+import { ThreadSourceProvider } from "@/features/agents/lib/threadSource/ThreadSourceProvider"
 
 const stream = {
   isLoading: false,
   threadId: "thread-1",
-  stop: vi.fn(),
+  messages: [],
+  toolCalls: [],
+  isThreadLoading: false,
+  hydrationPromise: Promise.resolve(),
+  error: null,
+  submit: vi.fn(),
   disconnect: vi.fn(),
+  getThread: () => null,
 }
 
-vi.mock("@/features/agents/lib/stream/AgentStreamProvider", () => ({
-  useAgentStream: () => stream,
+vi.mock("@langchain/react", () => ({
+  useStream: () => stream,
+  useChannelEffect: () => {},
+  useSubmissionQueue: () => ({
+    entries: [],
+    size: 0,
+    cancel: vi.fn(),
+    clear: vi.fn(),
+  }),
+}))
+
+vi.mock("@/lib/langgraph-client", () => ({
+  createDashboardClient: () => ({}),
+  dashboardFetch: fetch,
 }))
 
 const cancelThread = vi.fn((threadId: string) =>
@@ -44,14 +66,14 @@ afterEach(() => cleanup())
 
 beforeEach(() => {
   stream.isLoading = false
-  stream.stop.mockClear()
   stream.disconnect.mockClear()
   cancelThread.mockClear()
 })
 
 function renderComposer(
   running: boolean,
-  props: Partial<ChatComposerProps> = {}
+  props: Partial<ChatComposerProps> = {},
+  workspace = false
 ) {
   const client = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
@@ -59,12 +81,17 @@ function renderComposer(
   render(
     <QueryClientProvider client={client}>
       <AgentThreadStreamBoundary>
-        <ChatComposer
-          activeRun={{ threadId: "thread-1", running }}
-          {...props}
-        />
+        <ThreadSourceProvider threadId="thread-1" transcript={false}>
+          <AgentWorkspaceProvider enabled={workspace}>
+            <ChatComposer
+              activeRun={{ threadId: "thread-1", running }}
+              {...props}
+            />
+          </AgentWorkspaceProvider>
+        </ThreadSourceProvider>
       </AgentThreadStreamBoundary>
-    </QueryClientProvider>
+    </QueryClientProvider>,
+    { wrapper: TooltipProvider }
   )
 }
 
@@ -131,14 +158,14 @@ describe("ChatComposer stop button", () => {
     renderComposer(true)
 
     expect(screen.getByRole("button", { name: "Stop run" })).toBeTruthy()
-    expect(screen.queryByRole("button", { name: "Steer agent" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Queue message" })).toBeNull()
   })
 
   it("shows the send button when no run is live", () => {
     renderComposer(false)
 
     expect(screen.getByRole("button", { name: "Send message" })).toBeTruthy()
-    expect(screen.queryByRole("button", { name: "Steer agent" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Queue message" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull()
   })
 
@@ -149,7 +176,8 @@ describe("ChatComposer stop button", () => {
         onStop={vi.fn()}
         onSubmit={vi.fn()}
         submitting
-      />
+      />,
+      { wrapper: TooltipProvider }
     )
 
     expect(screen.getByRole("button", { name: "Stop run" })).toBeTruthy()
@@ -164,13 +192,198 @@ describe("ChatComposer stop button", () => {
         onStop={onStop}
         onSubmit={vi.fn()}
         submitting={false}
-      />
+      />,
+      { wrapper: TooltipProvider }
     )
 
-    expect(screen.getByRole("button", { name: "Steer agent" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Queue message" })).toBeTruthy()
     fireEvent.keyDown(document.body, { key: "Escape" })
 
     expect(onStop).toHaveBeenCalledOnce()
+  })
+})
+
+describe("ChatComposer drafts", () => {
+  it("restores independent mode drafts and attachments across remounts, but not after sending", async () => {
+    Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () => new DOMRect(),
+    })
+    const image = {
+      kind: "image" as const,
+      base64: "aGVsbG8=",
+      mimeType: "image/png",
+      fileName: "draft.png",
+    }
+    renderComposer(
+      false,
+      {
+        draftKey: "draft-user:new:home",
+        restoreDraft: { key: 1, text: "Home draft", images: [image] },
+      },
+      true
+    )
+    await waitFor(() =>
+      expect(screen.getByRole("textbox").textContent).toContain("Home draft")
+    )
+    cleanup()
+    renderComposer(false, {
+      draftKey: "draft-user:new:code",
+      restoreDraft: { key: 2, text: "Code draft", images: [] },
+    })
+    await waitFor(() =>
+      expect(screen.getByRole("textbox").textContent).toContain("Code draft")
+    )
+    cleanup()
+    renderComposer(false, { draftKey: "other-user:new:home" }, true)
+    expect(screen.getByRole("textbox").textContent).toBe("")
+    cleanup()
+    const onSubmit = vi.fn()
+    renderComposer(false, { draftKey: "draft-user:new:home", onSubmit }, true)
+    expect(screen.getByRole("textbox").textContent).toContain("Home draft")
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" })
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith(
+        { text: "Home draft", images: [image], replies: [] },
+        expect.anything()
+      )
+    )
+    cleanup()
+    renderComposer(false, { draftKey: "draft-user:new:code" })
+    expect(screen.getByRole("textbox").textContent).toContain("Code draft")
+    cleanup()
+    renderComposer(false, { draftKey: "draft-user:new:home" }, true)
+    expect(screen.getByRole("textbox").textContent).toBe("")
+  })
+})
+
+describe("ChatComposer options", () => {
+  it("keeps local setup reachable in workspace mode without taking Escape from the context popover", async () => {
+    const onTargetChange = vi.fn()
+    renderComposer(
+      true,
+      {
+        runTarget: "local",
+        onRunTargetChange: onTargetChange,
+        onSelectLocalRepo: vi.fn(),
+        onAddLocalRepo: vi.fn(),
+        onRemoveLocalRepo: vi.fn(),
+        onSelectLocalRepoBranch: vi.fn(),
+        onRefreshLocalRepoBranch: vi.fn(),
+        onLocalWorkspaceModeChange: vi.fn(),
+      },
+      true
+    )
+
+    expect(screen.getByRole("button", { name: "This Mac" })).toBeTruthy()
+    expect(
+      screen.queryByRole("button", { name: "Select repository" })
+    ).toBeNull()
+    fireEvent.click(
+      screen.getByRole("button", { name: "Task context: Use a folder" })
+    )
+    const dialog = await screen.findByRole("dialog", { name: "Task context" })
+    expect(
+      screen.getByRole("button", { name: "Automatic task folder" })
+    ).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "No branch" })).toBeNull()
+    expect(
+      screen.queryByRole("button", { name: "Current checkout" })
+    ).toBeNull()
+    fireEvent.keyDown(dialog, { key: "Escape" })
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Task context" })).toBeNull()
+    )
+    expect(cancelThread).not.toHaveBeenCalled()
+  })
+
+  it("keeps an existing local thread's branch controls in task context", async () => {
+    renderComposer(
+      false,
+      {
+        runTarget: "local",
+        selectedLocalRepoPath: "/projects/demo",
+        selectedLocalRepoBranch: "main",
+        localRepoBranches: [
+          { name: "main", current: true, isDefault: true, worktreePath: null },
+        ],
+        onSelectLocalRepoBranch: vi.fn(),
+        onRefreshLocalRepoBranch: vi.fn(),
+      },
+      true
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Task context: demo" }))
+    expect(await screen.findByRole("button", { name: "main" })).toBeTruthy()
+  })
+
+  it("offers attachments without a plan-mode toggle", async () => {
+    renderComposer(false)
+
+    fireEvent.keyDown(
+      screen.getByRole("button", { name: "More composer options" }),
+      { key: "Enter" }
+    )
+
+    expect(
+      await screen.findByRole("menuitem", { name: "Attach images" })
+    ).toBeTruthy()
+    expect(screen.queryByRole("menuitem", { name: /plan mode/i })).toBeNull()
+  })
+})
+
+describe("ChatComposer people autocomplete", () => {
+  it("dismisses an empty people menu with Escape without stopping a run", async () => {
+    vi.spyOn(api, "listSlackUsers").mockResolvedValue({ users: [] })
+    renderComposer(true, {
+      restoreDraft: { key: 1, text: "@nobody", images: [] },
+    })
+    await screen.findByText("No matching people or files.")
+    fireEvent.keyDown(screen.getByTestId("composer-editor"), {
+      key: "Escape",
+      code: "Escape",
+    })
+    await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull())
+    expect(cancelThread).not.toHaveBeenCalled()
+    vi.restoreAllMocks()
+  })
+
+  it("inserts a canonical Slack mention by keyboard and submits it", async () => {
+    Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () => new DOMRect(),
+    })
+    Object.defineProperty(Range.prototype, "getClientRects", {
+      configurable: true,
+      value: () => [],
+    })
+    vi.spyOn(api, "listSlackUsers").mockResolvedValue({
+      users: [
+        {
+          id: "U123BOB",
+          name: "bob",
+          display_name: "Bob",
+          real_name: "Bob Smith",
+        },
+      ],
+    })
+    vi.spyOn(api, "slackUserName").mockResolvedValue({ name: "Bob" })
+    const onSubmit = vi.fn()
+    renderComposer(false, {
+      onSubmit,
+      restoreDraft: { key: 1, text: "Ask @bob", images: [] },
+    })
+    await screen.findByRole("option", { name: /@Bob .*@bob/ })
+    const editor = screen.getByTestId("composer-editor")
+    fireEvent.keyDown(editor, { key: "Tab", code: "Tab" })
+    await screen.findByText("@Bob")
+    fireEvent.keyDown(editor, { key: "Enter", code: "Enter" })
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({ text: "Ask <@U123BOB>" }),
+        expect.anything()
+      )
+    )
+    vi.restoreAllMocks()
   })
 })
 
@@ -234,27 +447,27 @@ describe("ChatComposer skill autocomplete", () => {
   it("prefers a colliding skill and preserves surrounding prompt text", () => {
     const trigger = {
       kind: "slash-command" as const,
-      query: "plan",
+      query: "model",
       rangeStart: 7,
-      rangeEnd: 12,
+      rangeEnd: 13,
     }
     const items = buildCommandItems(
       trigger,
       [],
       [
         {
-          name: "plan",
-          description: "Create an implementation plan",
+          name: "model",
+          description: "Inspect a model",
           instructions: "",
         },
       ]
     )
 
     expect(items).toEqual([
-      expect.objectContaining({ type: "skill", name: "plan" }),
+      expect.objectContaining({ type: "skill", name: "model" }),
     ])
-    expect(replaceTextRange("Please /plan this", 7, 12, "/plan ").text).toBe(
-      "Please /plan  this"
+    expect(replaceTextRange("Please /model this", 7, 13, "/model ").text).toBe(
+      "Please /model  this"
     )
   })
 })

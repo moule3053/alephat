@@ -13,7 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml uv.lock README.md ./
-COPY agent ./agent
+COPY openswe ./openswe
+COPY packages ./packages
+COPY vendor ./vendor
 COPY alephat_platform ./alephat_platform
 COPY migrations ./migrations
 

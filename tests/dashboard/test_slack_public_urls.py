@@ -1,13 +1,15 @@
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid7
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from agent.dashboard import routes
-from agent.dashboard.oauth import COOKIE_NAME, issue_session
-from agent.slack import oauth
+from openswe.dashboard import routes
+from openswe.dashboard.oauth import COOKIE_NAME, issue_session
+from openswe.slack import connect, oauth
+from openswe.users import User
 
 
 @pytest.mark.parametrize("public_url", [None, "https://example.ngrok-free.dev/"])
@@ -26,9 +28,9 @@ def test_slack_public_url_applies_to_manifest_and_oauth_without_changing_local_c
     monkeypatch.setattr(oauth, "SLACK_CLIENT_SECRET", "test-secret")
     monkeypatch.setattr(oauth, "SLACK_TEAM_ID", "")
     exchange = AsyncMock(return_value="slack-test-token")
-    monkeypatch.setattr(routes, "exchange_slack_code", exchange)
+    monkeypatch.setattr(connect, "exchange_slack_code", exchange)
     monkeypatch.setattr(
-        routes,
+        connect,
         "fetch_slack_identity",
         AsyncMock(
             return_value=oauth.SlackIdentity(
@@ -40,14 +42,19 @@ def test_slack_public_url_applies_to_manifest_and_oauth_without_changing_local_c
             )
         ),
     )
-    save = AsyncMock()
-    monkeypatch.setattr(routes, "upsert_mapping", save)
+    user = User()
+    link = AsyncMock(return_value=user)
+    monkeypatch.setattr(user, "link", link)
+    monkeypatch.setattr(User, "for_session", AsyncMock(return_value=user))
     app = FastAPI()
     app.include_router(routes.router)
     expected_base = (public_url or local_url).rstrip("/")
     expected_callback = f"{expected_base}/dashboard/api/slack/callback"
     with TestClient(app, base_url=local_url) as client:
-        client.cookies.set(COOKIE_NAME, issue_session(login="alice", email=None, avatar_url=None))
+        client.cookies.set(
+            COOKIE_NAME,
+            issue_session(login="alice", email=None, avatar_url=None, user_id=str(uuid7())),
+        )
         settings = client.get("/dashboard/api/me").json()
         assert settings["api_base_url"] == local_url
         assert settings.get("slack_base_url") == expected_base
@@ -63,8 +70,73 @@ def test_slack_public_url_applies_to_manifest_and_oauth_without_changing_local_c
             follow_redirects=False,
         )
         assert callback.status_code == 302, callback.text
-        assert callback.headers["location"] == f"{local_url}/my-settings"
+        assert callback.headers["location"] == f"{local_url}/my-settings/connections"
     exchange.assert_awaited_once_with("code", expected_callback)
-    assert save.await_args is not None
-    assert save.await_args.kwargs["github_login"] == "alice"
-    assert save.await_args.kwargs["slack_user_id"] == "U123"
+    link.assert_awaited_once_with("slack", "U123", email="alice@example.com", team_id="T123")
+
+
+@pytest.mark.parametrize(
+    ("redirect_to", "expected_path"),
+    [
+        (None, "/my-settings/connections"),
+        ("/agents?view=mine#recent", "/agents?view=mine#recent"),
+        ("/my-settings/connections", "/my-settings/connections"),
+        ("https://evil.example/steal", ""),
+        ("/dashboard/api/slack/login", ""),
+    ],
+)
+def test_slack_callback_links_the_slack_identity_to_the_session_user(
+    monkeypatch: pytest.MonkeyPatch, redirect_to: str | None, expected_path: str
+) -> None:
+    local_url = "http://localhost:2024"
+    monkeypatch.setenv("DASHBOARD_BASE_URL", local_url)
+    monkeypatch.setenv("DASHBOARD_API_BASE_URL", local_url)
+    monkeypatch.setenv("DASHBOARD_JWT_SECRET", "test-session-signing-key-at-least-32-bytes")
+    monkeypatch.delenv("SLACK_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.setattr(oauth, "SLACK_CLIENT_ID", "test-client")
+    monkeypatch.setattr(oauth, "SLACK_CLIENT_SECRET", "test-secret")
+    monkeypatch.setattr(oauth, "SLACK_TEAM_ID", "")
+    monkeypatch.setattr(connect, "exchange_slack_code", AsyncMock(return_value="slack-test-token"))
+    monkeypatch.setattr(
+        connect,
+        "fetch_slack_identity",
+        AsyncMock(
+            return_value=oauth.SlackIdentity(
+                user_id="U123",
+                team_id="T123",
+                email="alice@example.com",
+                email_verified=True,
+                name="Alice",
+            )
+        ),
+    )
+
+    user = User()
+    link = AsyncMock(return_value=user)
+    monkeypatch.setattr(user, "link", link)
+    for_session = AsyncMock(return_value=user)
+    monkeypatch.setattr(User, "for_session", for_session)
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    with TestClient(app, base_url=local_url) as client:
+        client.cookies.set(
+            COOKIE_NAME,
+            issue_session(login="alice", email=None, avatar_url=None, user_id=str(user.id)),
+        )
+        login = client.get(
+            "/dashboard/api/slack/login",
+            params={"redirect_to": redirect_to} if redirect_to is not None else {},
+            follow_redirects=False,
+        )
+        state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
+        callback = client.get(
+            "/dashboard/api/slack/callback",
+            params={"code": "code", "state": state},
+            follow_redirects=False,
+        )
+        assert callback.status_code == 302, callback.text
+        assert callback.headers["location"] == f"{local_url}{expected_path}"
+
+    for_session.assert_awaited_once_with(user.id, "alice")
+    link.assert_awaited_once_with("slack", "U123", email="alice@example.com", team_id="T123")

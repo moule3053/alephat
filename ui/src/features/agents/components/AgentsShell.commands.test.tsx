@@ -1,11 +1,17 @@
 /** @vitest-environment jsdom */
 
-import { cleanup, render } from "@testing-library/react"
+import { TooltipProvider } from "@langchain/macaw-components/Tooltip"
+import { cleanup, render, screen, fireEvent } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { afterEach, expect, it, vi } from "vitest"
 
+import { SidebarThreadRow } from "./SidebarThreadRow"
+import { cloudSidebarThread } from "../lib/sidebarThreads"
+import type { AgentThread } from "../lib/types"
+
 import { AgentsShell } from "./AgentsSidebar"
 import { AppCommandProvider, useAppCommand } from "@/lib/appCommands"
+import type { SessionUser } from "@/lib/api"
 
 // Every mocked hook must return a stable reference, the way the real hooks do.
 // A factory that rebuilds its result each render reintroduces the very churn
@@ -19,8 +25,8 @@ const stub = vi.hoisted(() => {
       title: "Thread",
       status: "idle",
       resolved: false,
-      repoFullName: "langchain-ai/alephat",
-      repo: "alephat",
+      repoFullName: "langchain-ai/open-swe",
+      repo: "open-swe",
       updatedAt: "2026-09-10T00:00:00Z",
     },
     pinned: { data: [] },
@@ -47,16 +53,41 @@ const stub = vi.hoisted(() => {
       addProject: fn(),
       removeProject: fn(),
     },
-    localThreads: { data: [] },
-    activity: {},
     session: { data: { login: "octocat" } },
     theme: { toggleTheme: fn() },
   }
 })
 
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children }: { children?: React.ReactNode }) => <a>{children}</a>,
+  Link: ({
+    children,
+    to,
+    params,
+    search,
+    ...props
+  }: {
+    children?: React.ReactNode
+    to?: string
+    params?: { threadId?: string }
+    search?: { subagent?: string }
+  }) => (
+    <a
+      {...props}
+      href={`${to?.replace("$threadId", params?.threadId ?? "")}${search?.subagent ? `?subagent=${search.subagent}` : ""}`}
+    >
+      {children}
+    </a>
+  ),
   useNavigate: () => stub.noop,
+  useRouterState: ({
+    select,
+  }: {
+    select: (state: {
+      location: { pathname: string; search: Record<string, unknown> }
+    }) => unknown
+  }) => select({ location: { pathname: "/agents/thread-1", search: {} } }),
+  useSearch: () => undefined,
+  useRouter: () => ({ options: { parseSearch: () => ({}) } }),
 }))
 
 vi.mock("@/lib/session", () => ({ useSession: () => stub.session }))
@@ -67,8 +98,8 @@ vi.mock("@/features/agents/lib/queries", async (actual) => ({
   useSidebarActiveThread: () => stub.activeThread,
   useSidebarPinnedThreads: () => stub.pinned,
   useSidebarRecents: () => stub.emptyList,
-  useSidebarProjects: () => stub.emptyList,
-  useSidebarProjectThreads: () => stub.emptyList,
+  useSidebarRepos: () => stub.emptyList,
+  useSidebarRepoThreads: () => stub.emptyList,
   useInfiniteThreadsPages: () => stub.pages,
   useSeedAgentThreadDetails: () => stub.noop,
   // Faithful to TanStack Query: a fresh wrapper object every render, with a
@@ -85,14 +116,6 @@ vi.mock("@/features/agents/lib/prChecks", () => ({
 
 vi.mock("@/features/agents/lib/useRunCompletionNotifier", () => ({
   useRunCompletionNotifier: () => {},
-}))
-
-vi.mock("@/features/agents/lib/desktopLocal", async (actual) => ({
-  ...((await actual()) as object),
-  useDesktopLocalThreads: () => stub.localThreads,
-  useLocalThreadActivity: () => stub.activity,
-  useRefreshLocalThreads: () => stub.noop,
-  useMarkLocalThreadViewed: () => stub.noop,
 }))
 
 vi.mock("@/features/agents/lib/desktopProjects", () => ({
@@ -112,6 +135,12 @@ afterEach(() => cleanup())
 // the run rather than fail it. The probe re-renders on every change to the
 // command list, so it aborts the loop itself once the count is clearly wrong.
 const RENDER_BUDGET = 25
+const USER: SessionUser = {
+  login: "alice",
+  email: null,
+  avatar_url: null,
+  is_admin: false,
+}
 let probeRenders = 0
 function Probe() {
   useAppCommand("archive-thread")
@@ -129,7 +158,7 @@ it("registers the active thread's commands once and then stops", async () => {
   render(
     <QueryClientProvider client={client}>
       <AppCommandProvider>
-        <AgentsShell user={null} activeThreadId="thread-1">
+        <AgentsShell user={USER} activeThreadId="thread-1">
           <Probe />
         </AgentsShell>
       </AppCommandProvider>
@@ -137,4 +166,77 @@ it("registers the active thread's commands once and then stops", async () => {
   )
 
   expect(probeRenders).toBeLessThanOrEqual(RENDER_BUDGET)
+})
+
+it("opens asynchronous workers as real conversations and expands the selected worker separately from synchronous subagents", () => {
+  const worker = {
+    id: "worker",
+    title: "Implement change",
+    subagents: [
+      {
+        toolCallId: "worker-sync",
+        title: "Worker inspection",
+        status: "in_progress",
+        subagentType: "general-purpose",
+        startedAt: 0,
+        endedAt: null,
+      },
+    ],
+    status: "finished",
+    viewed: true,
+  } as AgentThread
+  const parent = {
+    id: "parent",
+    title: "Coordinate change",
+    status: "idle",
+    viewed: true,
+    repo: "",
+    repoFullName: "",
+    taskWorkers: [worker],
+    subagents: [
+      {
+        toolCallId: "sync-tool",
+        title: "Inspect code",
+        status: "in_progress",
+        subagentType: "general-purpose",
+        startedAt: 0,
+        endedAt: null,
+      },
+    ],
+  } as AgentThread
+  const client = new QueryClient()
+  render(
+    <QueryClientProvider client={client}>
+      <TooltipProvider>
+        <SidebarThreadRow
+          item={cloudSidebarThread(parent)}
+          isActive={false}
+          activeThreadId="worker"
+          pinned={false}
+          archived={false}
+          onTogglePin={stub.noop}
+          onToggleArchived={stub.noop}
+        />
+      </TooltipProvider>
+    </QueryClientProvider>
+  )
+  const workerLink = screen.getByRole("link", { name: /Implement change/ })
+  expect(workerLink.getAttribute("href")).toBe("/agents/worker")
+  expect(workerLink.getAttribute("aria-current")).toBe("page")
+  fireEvent.click(screen.getByRole("button", { name: "Hide task workers" }))
+  expect(screen.queryByRole("link", { name: /Implement change/ })).toBeNull()
+  fireEvent.click(screen.getByRole("button", { name: "Show task workers" }))
+  expect(screen.getByRole("link", { name: /Implement change/ })).toBeTruthy()
+  const workerSyncToggle = screen.queryByRole("button", {
+    name: "Show worker subagents",
+  })
+  if (workerSyncToggle) fireEvent.click(workerSyncToggle)
+  expect(
+    screen.getByRole("link", { name: /Worker inspection/ }).getAttribute("href")
+  ).toBe("/agents/worker?subagent=worker-sync")
+  const syncToggle = screen.queryByRole("button", { name: "Show subagents" })
+  if (syncToggle) fireEvent.click(syncToggle)
+  expect(
+    screen.getByRole("link", { name: /Inspect code/ }).getAttribute("href")
+  ).toBe("/agents/parent?subagent=sync-tool")
 })

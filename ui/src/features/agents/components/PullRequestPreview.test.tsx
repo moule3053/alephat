@@ -6,9 +6,9 @@ describe("parseGitHubPullRequestUrl", () => {
   it("parses GitHub pull request links anywhere in text renderers", () => {
     expect(
       parseGitHubPullRequestUrl(
-        "https://github.com/langchain-ai/alephat/pull/123?diff=split#discussion"
+        "https://github.com/langchain-ai/open-swe/pull/123?diff=split#discussion"
       )
-    ).toEqual({ repoFullName: "langchain-ai/alephat", number: 123 })
+    ).toEqual({ repoFullName: "langchain-ai/open-swe", number: 123 })
     expect(
       parseGitHubPullRequestUrl("https://www.github.com/org/repo/pull/7/")
     ).toEqual({ repoFullName: "org/repo", number: 7 })

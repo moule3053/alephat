@@ -1,0 +1,318 @@
+"""Tool that schedules a one-shot re-trigger of the current agent thread."""
+
+import asyncio
+import logging
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from weakref import WeakValueDictionary
+
+from langgraph_sdk import get_client
+from langgraph_sdk.errors import NotFoundError
+from langgraph_sdk.schema import Config
+from pydantic import JsonValue, TypeAdapter
+
+from openswe.dispatch import COMPLETION_WEBHOOK_URL, prepare_run_config
+from openswe.input_messages import RunInput, build_run_input
+from openswe.jobs import queue
+from openswe.prompts import prompt
+from openswe.run_config import RunConfig
+from openswe.slack.client import get_active_slack_thread
+from openswe.threads.wake_budget import THREAD_WAKEUPS
+from openswe.utils.thread_ops import langgraph_url
+
+logger = logging.getLogger(__name__)
+
+_json = TypeAdapter(dict[str, JsonValue])
+_run_config = TypeAdapter(Config)
+_run_input = TypeAdapter(RunInput)
+
+_AGENT_ASSISTANT_ID = "agent"
+_MIN_DELAY_SECONDS = 60
+_MAX_DELAY_SECONDS = 86_400
+_END_TIME_PADDING_SECONDS = 90
+
+_WAKEUP_KIND = "thread_wakeup"
+WAKE_THREAD_JOB = "thread_wakeup"
+_WAKEUP_SENDER_ID = "system:thread-wakeup"
+_WAKEUP_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+_PURGE_PAGE_SIZE = 100
+
+_DEFAULT_WAKEUP_PROMPT = prompt("runs/thread-wakeup")
+
+
+def _ceil_to_next_minute(value: datetime) -> datetime:
+    """Round a datetime up to the next whole minute."""
+    rounded = value.replace(second=0, microsecond=0)
+    if rounded == value:
+        return rounded
+    return rounded + timedelta(minutes=1)
+
+
+def _build_one_shot_cron(fire_time: datetime) -> str:
+    """Build a 5-field cron expression that fires at ``fire_time`` (UTC)."""
+    return " ".join(
+        [
+            str(fire_time.minute),
+            str(fire_time.hour),
+            str(fire_time.day),
+            str(fire_time.month),
+            "*",
+        ]
+    )
+
+
+def _parse_iso(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _wakeup_lock(thread_id: str) -> asyncio.Lock:
+    lock = _WAKEUP_LOCKS.get(thread_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _WAKEUP_LOCKS[thread_id] = lock
+    return lock
+
+
+async def find_expired_wakeup_cron_ids(client: Any, *, now: datetime) -> list[str]:
+    """Return the ids of ``thread_wakeup`` crons whose ``end_time`` has passed.
+
+    Conservative: matches solely on ``metadata.kind == "thread_wakeup"`` AND a
+    past ``end_time``, so other crons are never selected. Paginates
+    fully before returning so the result is stable to delete afterwards.
+    """
+    expired_ids: list[str] = []
+    offset = 0
+    while True:
+        page = await client.crons.search(
+            metadata={"kind": _WAKEUP_KIND},
+            limit=_PURGE_PAGE_SIZE,
+            offset=offset,
+        )
+        if not page:
+            break
+        for cron in page:
+            if not isinstance(cron, dict):
+                continue
+            end_time = _parse_iso(cron.get("end_time"))
+            cron_id = cron.get("cron_id")
+            if end_time is not None and end_time < now and isinstance(cron_id, str) and cron_id:
+                expired_ids.append(cron_id)
+        if len(page) < _PURGE_PAGE_SIZE:
+            break
+        offset += len(page)
+    return expired_ids
+
+
+async def purge_expired_wakeup_crons(client: Any, *, now: datetime) -> int:
+    """Delete ``thread_wakeup`` crons whose ``end_time`` has already passed.
+
+    Each wakeup is a thread-bound cron with an ``end_time`` (~90s past its fire)
+    that stops it re-firing, but the cron row itself is never removed, so dead
+    rows accumulate. This deletes only those dead rows. Returns the count deleted.
+    """
+    expired_ids = await find_expired_wakeup_cron_ids(client, now=now)
+    deleted = 0
+    for cron_id in expired_ids:
+        await client.crons.delete(cron_id)
+        deleted += 1
+    return deleted
+
+
+async def cancel_thread_wakeups(thread_id: str) -> None:
+    await queue.cancel_matching({"kind": _WAKEUP_KIND, "thread_id": thread_id})
+    # Wakeups scheduled before the job queue are Agent Server crons.
+    client = get_client(url=langgraph_url())
+    cron_ids: list[str] = []
+    offset = 0
+    while True:
+        page = await client.crons.search(
+            thread_id=thread_id,
+            metadata={"kind": _WAKEUP_KIND},
+            limit=_PURGE_PAGE_SIZE,
+            offset=offset,
+        )
+        cron_ids.extend(cron["cron_id"] for cron in page)
+        if len(page) < _PURGE_PAGE_SIZE:
+            break
+        offset += len(page)
+    for cron_id in cron_ids:
+        try:
+            await client.crons.delete(cron_id)
+        except NotFoundError:
+            logger.info("Thread wakeup already removed", extra={"cron_id": cron_id})
+
+
+async def _purge_expired_wakeups_best_effort() -> None:
+    """Opportunistically purge expired wakeup crons; never raises."""
+    try:
+        client = get_client(url=langgraph_url())
+        deleted = await purge_expired_wakeup_crons(client, now=datetime.now(UTC))
+        if deleted:
+            logger.info("Purged %d expired thread_wakeup cron(s)", deleted)
+    except Exception:
+        logger.warning("Failed to purge expired thread_wakeup crons", exc_info=True)
+
+
+async def _schedule_wakeup(
+    *, thread_id: str, fire_time: datetime, prompt: str, configurable: dict[str, Any]
+) -> dict[str, Any]:
+    run_config = prepare_run_config(
+        {"configurable": configurable},
+        {"kind": _WAKEUP_KIND, "thread_id": thread_id},
+    )
+    run_input = build_run_input(
+        prompt,
+        {"sender_id": _WAKEUP_SENDER_ID, "surface": "automation", "kind": "system"},
+        systems=[
+            {
+                "id": _WAKEUP_SENDER_ID,
+                "display_name": "Thread wakeup scheduler",
+                "platform": "open-swe",
+            }
+        ],
+    )
+    expires_at = fire_time + timedelta(seconds=_END_TIME_PADDING_SECONDS)
+    job = await queue.schedule(
+        WAKE_THREAD_JOB,
+        _json.validate_python(
+            {
+                "thread_id": thread_id,
+                "input": run_input,
+                "config": run_config,
+                "metadata": run_config["metadata"],
+                "expires_at": expires_at.isoformat(),
+            }
+        ),
+        due_at=fire_time,
+        metadata={"kind": _WAKEUP_KIND, "thread_id": thread_id},
+    )
+    return {
+        "success": True,
+        "cron_id": str(job.id),
+        "scheduled_for": fire_time.isoformat(),
+        "thread_id": thread_id,
+    }
+
+
+def _object(value: JsonValue | None) -> dict[str, JsonValue] | None:
+    return value if isinstance(value, dict) else None
+
+
+async def run_thread_wakeup(
+    payload: Mapping[str, JsonValue], *, job_id: str, due_at: datetime
+) -> str | None:
+    """Wake the queued thread, noting delays beyond the wakeup's padding interval."""
+    thread_id = payload.get("thread_id")
+    if not isinstance(thread_id, str):
+        return None
+    raw_input, config = _object(payload.get("input")), _object(payload.get("config"))
+    run_input = None if raw_input is None else _run_input.validate_python(raw_input)
+    lateness_seconds = (datetime.now(UTC) - due_at).total_seconds()
+    if lateness_seconds > _END_TIME_PADDING_SECONDS:
+        late_input = build_run_input(
+            prompt("runs/thread-wakeup-late", lateness_minutes=f"{lateness_seconds / 60:.1f}"),
+            {"sender_id": _WAKEUP_SENDER_ID, "surface": "automation", "kind": "system"},
+        )
+        if run_input is None:
+            run_input = late_input
+        else:
+            run_input["messages"] = late_input["messages"] + run_input["messages"]
+        logger.warning(
+            "Thread wakeup is running late",
+            extra={"thread_id": thread_id, "job_id": job_id, "lateness_seconds": lateness_seconds},
+        )
+    run = await get_client(url=langgraph_url()).runs.create(
+        thread_id,
+        _AGENT_ASSISTANT_ID,
+        # ty does not match a TypedDict against the SDK's TypedDict-like protocol.
+        input=run_input,  # ty: ignore[invalid-argument-type]
+        config=None if config is None else _run_config.validate_python(config),
+        metadata=_object(payload.get("metadata")),
+        multitask_strategy="enqueue",
+        webhook=COMPLETION_WEBHOOK_URL or None,
+    )
+    return run["run_id"]
+
+
+async def schedule_thread_wakeup(delay_minutes: int, prompt: str | None = None) -> dict[str, Any]:
+    """Implement the `schedule_thread_wakeup` tool."""
+    if not isinstance(delay_minutes, int) or delay_minutes < 1:
+        return {"success": False, "error": "delay_minutes must be a positive integer (>= 1)"}
+    delay_seconds = delay_minutes * 60
+    if delay_seconds < _MIN_DELAY_SECONDS:
+        return {"success": False, "error": "delay must be at least 1 minute"}
+    if delay_seconds > _MAX_DELAY_SECONDS:
+        return {"success": False, "error": "delay must be at most 1440 minutes (24 hours)"}
+
+    cfg = RunConfig.from_runtime()
+    thread_id = cfg.thread_id
+    if not thread_id:
+        return {"success": False, "error": "No thread_id in current run config"}
+
+    client = get_client(url=langgraph_url())
+    fire_time = _ceil_to_next_minute(datetime.now(UTC) + timedelta(seconds=delay_seconds))
+    wakeup_prompt = (
+        prompt.strip() if isinstance(prompt, str) and prompt.strip() else _DEFAULT_WAKEUP_PROMPT
+    )
+
+    passthrough_keys = (
+        "repo",
+        "source",
+        "slack_thread",
+        "linear_issue",
+        "github_login",
+        "user_email",
+        "schedule_id",
+    )
+    dumped = cfg.dump()
+    wakeup_configurable: dict[str, Any] = {"thread_id": thread_id}
+    for key in passthrough_keys:
+        value = dumped.get(key)
+        if value is not None:
+            wakeup_configurable[key] = value
+    active = await get_active_slack_thread(
+        client,
+        thread_id,
+        cfg.slack_thread.dump() if cfg.slack_thread else None,
+    )
+    if active:
+        wakeup_configurable["slack_thread"] = active
+
+    await _purge_expired_wakeups_best_effort()
+
+    async with _wakeup_lock(thread_id):
+        try:
+            generation, wakeup_count = await THREAD_WAKEUPS.used(client, thread_id)
+        except Exception:
+            logger.exception("Failed to verify thread wakeup budget for %s", thread_id)
+            return {"success": False, "error": "Unable to verify the thread wakeup limit"}
+        if wakeup_count >= THREAD_WAKEUPS.limit:
+            return {
+                "success": False,
+                "error": (
+                    f"Thread wakeup limit reached: at most "
+                    f"{THREAD_WAKEUPS.limit} wakeups may be scheduled between "
+                    "user messages. Wait for a new user message before scheduling another."
+                ),
+            }
+        try:
+            await THREAD_WAKEUPS.record(client, thread_id, generation, wakeup_count + 1)
+        except Exception:
+            logger.exception("Failed to record thread wakeup budget for %s", thread_id)
+            return {"success": False, "error": "Unable to record the thread wakeup limit"}
+        try:
+            return await _schedule_wakeup(
+                thread_id=thread_id,
+                fire_time=fire_time,
+                prompt=wakeup_prompt,
+                configurable=wakeup_configurable,
+            )
+        except Exception as exc:
+            logger.exception("Failed to schedule thread wakeup for %s", thread_id)
+            return {"success": False, "error": str(exc)}

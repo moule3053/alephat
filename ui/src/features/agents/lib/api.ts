@@ -1,63 +1,85 @@
+import type { Experience } from "@/lib/experience"
 import type {
   AgentPullRequestContextResponse,
+  ThreadFixScope,
   AgentPullRequestStatusResponse,
+  AgentBackgroundOutput,
+  AgentBackgroundWork,
+  AgentQueuedMessage,
   AgentSchedule,
   AgentThread,
-  ImageChunk,
   Message,
-  SlackNotificationMode,
+  AutomationTriggerConfig,
   WorkflowPushApprovalsResponse,
 } from "./types"
+import type { WorkspaceFileIndex, WorkspacePath } from "./workspaceFiles"
 import { dashboardApiBase } from "@/lib/api-base"
 import {
+  DashboardRequestError,
+  REQUEST_ID_HEADER,
   dashboardApiUrl,
   dashboardForwardedHeaders,
+  networkError,
+  newRequestId,
 } from "@/lib/dashboard-fetch"
+import { withRequestTiming } from "@/lib/perf/fetchTiming"
 
-export type { AgentSchedule, AgentThread, Message, SlackNotificationMode }
+export type { AgentSchedule, AgentThread, Message }
 
-export class AgentsApiError extends Error {
-  constructor(
-    public readonly status: number,
-    message: string
-  ) {
-    super(message)
+export class AgentsApiError extends DashboardRequestError {
+  constructor(status: number, message: string, requestId?: string) {
+    super(status, message, requestId)
     this.name = "AgentsApiError"
+  }
+
+  /** A failed response, named by its `detail` when the body has one. */
+  static async fromResponse(
+    response: Response,
+    requestId?: string
+  ): Promise<AgentsApiError> {
+    let message = response.statusText
+    try {
+      const body: unknown = await response.json()
+      const detail =
+        body !== null && typeof body === "object" && "detail" in body
+          ? (body as { detail: unknown }).detail
+          : undefined
+      if (typeof detail === "string" && detail) message = detail
+      else if (detail !== undefined) message = JSON.stringify(detail)
+    } catch {
+      // Not a JSON error body; the status text is all we have.
+    }
+    return new AgentsApiError(response.status, message, requestId)
   }
 }
 
-export interface ThreadMessageRequest {
-  content: string
-  images?: Array<ImageChunk>
-  model_id?: string | null
-  effort?: string | null
-  plan_mode?: boolean
-  client_message_id?: string
-}
+/** Where a thread moves: onto this Mac through its bridge, or to the cloud. */
+export type ThreadMoveDestination =
+  | { sandbox_bridge_id: string }
+  | { target: "cloud" }
 
 export interface ScheduleCreateRequest {
   prompt: string
-  schedule: string
+  /** Every trigger, any of which fires the automation; replaces them all on update. */
+  triggers?: Array<AutomationTriggerConfig>
   name?: string | null
-  repo?: string | null
-  slack_channel_id?: string | null
-  slack_notification_mode?: SlackNotificationMode
   admin_thread?: boolean
   model_id?: string | null
   effort?: string | null
+  /** Slug of the workspace every run launches in. */
+  workspace: string
 }
 
 export interface ScheduleUpdateRequest {
   prompt?: string | null
-  schedule?: string | null
+  /** Every trigger, any of which fires the automation; replaces them all on update. */
+  triggers?: Array<AutomationTriggerConfig>
   name?: string | null
-  repo?: string | null
-  slack_channel_id?: string | null
-  slack_notification_mode?: SlackNotificationMode
   admin_thread?: boolean
   model_id?: string | null
   effort?: string | null
   enabled?: boolean | null
+  workspace?: string | null
 }
 
 export interface ScheduleTriggerResult {
@@ -112,10 +134,26 @@ export interface CloudTerminalConnection {
   ticket: string
 }
 
-export type ThreadScope = "all" | "interactive" | "automation"
+export interface ThreadBrowserTab {
+  id: string
+  title: string
+  url: string
+}
+
+/** The window of its LangSmith browser a thread's agent drives, as the dashboard embeds it. */
+export interface ThreadBrowser {
+  tabs: Array<ThreadBrowserTab>
+  /** LangSmith's page for the window, minted for the dashboard to frame. */
+  act_url: string
+  expires_at: string
+}
+
+export type ThreadScope = "all" | "interactive" | "automation" | "bot"
 export type ThreadSortBy = "created_at" | "updated_at"
 
 export interface ThreadsPageParams {
+  experience?: Experience
+  hierarchy?: boolean
   limit?: number
   offset?: number
   all?: boolean
@@ -126,8 +164,13 @@ export interface ThreadsPageParams {
   q?: string
   scope?: ThreadScope
   automationId?: string
+  /** An allowed Slack bot's `team_id:bot_id`, with `scope: "bot"`. */
+  bot?: string
   repo?: string
   ownerless?: boolean
+  owned?: boolean
+  /** Thread sources to leave out, such as `claude_code`. */
+  excludeSources?: Array<string>
   sortBy?: ThreadSortBy
 }
 
@@ -139,46 +182,93 @@ export interface ThreadsPage {
   hasMore?: boolean
 }
 
-export interface SidebarProject {
+export interface SidebarRepo {
   repoFullName: string
   name: string
   updatedAt: number
+  /** Slug of the workspace that owns this repository; `"default"` when unassigned. */
+  workspace: string
 }
 
 const API_BASE = dashboardApiBase()
 
 export const agentsLangGraphApiUrl = `${API_BASE}/dashboard/api`
 
-async function agentsRequest<T>(
+const timedFetch = withRequestTiming((input, init) => fetch(input, init))
+
+function errorDetailMessage(detail: unknown): string {
+  if (typeof detail === "string") return detail
+  if (Array.isArray(detail)) {
+    const messages = detail.flatMap((issue: unknown) => {
+      if (
+        !issue ||
+        typeof issue !== "object" ||
+        !("msg" in issue) ||
+        typeof issue.msg !== "string"
+      )
+        return []
+      const field =
+        "loc" in issue && Array.isArray(issue.loc)
+          ? issue.loc
+              .slice(1)
+              .filter(
+                (part: unknown) =>
+                  typeof part === "string" || typeof part === "number"
+              )
+              .join(".")
+          : ""
+      if (
+        field === "name" &&
+        "type" in issue &&
+        issue.type === "string_too_long" &&
+        "ctx" in issue &&
+        issue.ctx &&
+        typeof issue.ctx === "object" &&
+        "max_length" in issue.ctx &&
+        typeof issue.ctx.max_length === "number"
+      )
+        return [
+          `Please use a shorter name (${issue.ctx.max_length} characters or fewer)`,
+        ]
+      return [field ? `${field}: ${issue.msg}` : issue.msg]
+    })
+    if (messages.length) return messages.join("; ")
+  }
+  return JSON.stringify(detail) ?? "Request failed"
+}
+
+export async function agentsRequest<T>(
   path: string,
   init: RequestInit = {}
 ): Promise<T> {
-  const res = await fetch(dashboardApiUrl(path), {
+  const requestId = newRequestId()
+  const res = await timedFetch(dashboardApiUrl(path), {
     ...init,
     credentials: "include",
     headers: {
       "Content-Type": "application/json",
+      [REQUEST_ID_HEADER]: requestId,
       ...dashboardForwardedHeaders(),
       ...init.headers,
     },
+  }).catch((cause: unknown) => {
+    throw networkError(cause, requestId)
   })
   if (!res.ok) {
     let message = res.statusText
     try {
       const body = await res.json()
       if (body?.detail) {
-        message =
-          typeof body.detail === "string"
-            ? body.detail
-            : JSON.stringify(body.detail)
+        message = errorDetailMessage(body.detail)
       }
     } catch {
       /* ignore */
     }
-    throw new AgentsApiError(res.status, message)
+    throw new AgentsApiError(res.status, message, requestId)
   }
-  if (res.status === 204) return undefined as T
-  return (await res.json()) as T
+  // A proxied cancel comes back 202 with no body; only parse what is there.
+  const text = await res.text()
+  return (text ? JSON.parse(text) : undefined) as T
 }
 
 function filenameFromContentDisposition(value: string | null): string | null {
@@ -187,35 +277,42 @@ function filenameFromContentDisposition(value: string | null): string | null {
 }
 
 async function agentsBlobRequest(path: string): Promise<ThreadRecoveryPatch> {
+  const requestId = newRequestId()
   const res = await fetch(dashboardApiUrl(path), {
     credentials: "include",
-    headers: { Accept: "text/x-diff", ...dashboardForwardedHeaders() },
+    headers: {
+      Accept: "text/x-diff",
+      [REQUEST_ID_HEADER]: requestId,
+      ...dashboardForwardedHeaders(),
+    },
+  }).catch((cause: unknown) => {
+    throw networkError(cause, requestId)
   })
   if (!res.ok) {
     let message = res.statusText
     try {
       const body = await res.json()
       if (body?.detail) {
-        message =
-          typeof body.detail === "string"
-            ? body.detail
-            : JSON.stringify(body.detail)
+        message = errorDetailMessage(body.detail)
       }
     } catch {
       /* ignore */
     }
-    throw new AgentsApiError(res.status, message)
+    throw new AgentsApiError(res.status, message, requestId)
   }
   return {
     blob: await res.blob(),
     filename:
       filenameFromContentDisposition(res.headers.get("content-disposition")) ??
-      "alephat-recovery.patch",
+      "open-swe-recovery.patch",
   }
 }
 
 function buildThreadsPageQuery(params: ThreadsPageParams): string {
   const search = new URLSearchParams()
+  if (params.experience) search.set("experience", params.experience)
+  if (params.hierarchy != null)
+    search.set("hierarchy", String(params.hierarchy))
   if (params.limit != null) search.set("limit", String(params.limit))
   if (params.offset != null) search.set("offset", String(params.offset))
   if (params.all != null) search.set("all", String(params.all))
@@ -226,24 +323,35 @@ function buildThreadsPageQuery(params: ThreadsPageParams): string {
   if (params.q) search.set("q", params.q)
   if (params.scope) search.set("scope", params.scope)
   if (params.automationId) search.set("automation_id", params.automationId)
+  if (params.bot) search.set("bot", params.bot)
   if (params.repo) search.set("repo", params.repo)
   if (params.ownerless != null)
     search.set("ownerless", String(params.ownerless))
+  if (params.owned) search.set("owned", "true")
+  for (const source of params.excludeSources ?? [])
+    search.append("exclude_source", source)
   if (params.sortBy) search.set("sort_by", params.sortBy)
   const query = search.toString()
   return query ? `?${query}` : ""
 }
 
-function buildProjectsQuery(params: {
+function buildReposQuery(params: {
+  experience?: Experience
   includeResolved?: boolean
   includeAutomations?: boolean
+  owned?: boolean
+  excludeSources?: Array<string>
 }): string {
   const search = new URLSearchParams()
+  if (params.experience) search.set("experience", params.experience)
   if (params.includeResolved != null)
     search.set("include_resolved", String(params.includeResolved))
   if (params.includeAutomations != null) {
     search.set("include_automations", String(params.includeAutomations))
   }
+  if (params.owned) search.set("owned", "true")
+  for (const source of params.excludeSources ?? [])
+    search.append("exclude_source", source)
   const query = search.toString()
   return query ? `?${query}` : ""
 }
@@ -262,45 +370,36 @@ export interface PullRequestSnapshot {
   state: PullRequestLiveState | null
 }
 
-export type ThreadFeedbackRating = "bad" | "good"
-
-export type ThreadFeedbackSubmission =
-  | { action?: "submit"; rating: ThreadFeedbackRating; comment?: string }
-  | { action: "comment"; comment: string }
-  | { action: "dismiss" }
-
-export interface ThreadFeedback {
-  status: "unavailable" | "ready" | "completed" | "dismissed"
-  rating: ThreadFeedbackRating | "other" | null
-  comment: string
-}
-
 export const agentsApi = {
   langGraphApiUrl: agentsLangGraphApiUrl,
-  getThreadFeedback: (threadId: string) =>
-    agentsRequest<ThreadFeedback>(
-      `/threads/${encodeURIComponent(threadId)}/feedback`
-    ),
-  submitThreadFeedback: (threadId: string, body: ThreadFeedbackSubmission) =>
-    agentsRequest<ThreadFeedback>(
-      `/threads/${encodeURIComponent(threadId)}/feedback`,
-      {
-        method: "POST",
-        body: JSON.stringify(body),
-      }
-    ),
-  listThreadProjects: (
+  listThreadRepos: (
     params: {
+      experience?: Experience
       includeResolved?: boolean
       includeAutomations?: boolean
+      owned?: boolean
+      excludeSources?: Array<string>
     } = {}
   ) =>
-    agentsRequest<Array<SidebarProject>>(
-      `/threads/projects${buildProjectsQuery(params)}`
+    agentsRequest<Array<SidebarRepo>>(
+      `/threads/repos${buildReposQuery(params)}`
     ),
-  listPinnedThreads: () => agentsRequest<Array<AgentThread>>("/threads/pinned"),
+  listPinnedThreads: (experience?: Experience) =>
+    agentsRequest<Array<AgentThread>>(
+      `/threads/pinned${experience ? `?experience=${experience}` : ""}`
+    ),
   listThreadsPage: (params: ThreadsPageParams = {}) =>
     agentsRequest<ThreadsPage>(`/threads/page${buildThreadsPageQuery(params)}`),
+  shareThreadWithWorkspace: (threadId: string) =>
+    agentsRequest<AgentThread>(
+      `/threads/${encodeURIComponent(threadId)}/share-to-workspace`,
+      { method: "POST" }
+    ),
+  moveThread: (threadId: string, destination: ThreadMoveDestination) =>
+    agentsRequest<AgentThread>(
+      `/threads/${encodeURIComponent(threadId)}/move`,
+      { method: "POST", body: JSON.stringify(destination) }
+    ),
   continueThreadPrivately: (threadId: string) =>
     agentsRequest<AgentThread>(
       `/threads/${encodeURIComponent(threadId)}/continue-private`,
@@ -356,6 +455,15 @@ export const agentsApi = {
         options?.markViewed === false ? "?mark_viewed=false" : ""
       }`
     ),
+  markThreadViewed: (threadId: string, runId: string) =>
+    agentsRequest<{
+      runId: string | null
+      viewed: boolean
+      viewedAt: number | null
+    }>(`/threads/${encodeURIComponent(threadId)}/viewed`, {
+      method: "POST",
+      body: JSON.stringify({ run_id: runId }),
+    }),
   getPullRequestChecks: (
     pullRequests: Array<{ repoFullName: string; number: number }>
   ) =>
@@ -367,14 +475,28 @@ export const agentsApi = {
     agentsRequest<AgentPullRequestStatusResponse>(
       `/threads/${encodeURIComponent(threadId)}/pull-request-status`
     ),
+  getThreadBackgroundWork: (threadId: string) =>
+    agentsRequest<AgentBackgroundWork>(
+      `/threads/${encodeURIComponent(threadId)}/background-work`
+    ),
+  getThreadBackgroundOutput: (threadId: string, taskId: string) =>
+    agentsRequest<AgentBackgroundOutput>(
+      `/threads/${encodeURIComponent(threadId)}/background-work/${encodeURIComponent(taskId)}/output`
+    ),
+  getThreadQueuedMessages: (threadId: string) =>
+    agentsRequest<Array<AgentQueuedMessage>>(
+      `/threads/${encodeURIComponent(threadId)}/queued-messages`
+    ),
   getThreadPullRequestContext: (
     threadId: string,
     repoFullName: string,
-    number: number
+    number: number,
+    scope: ThreadFixScope
   ) => {
     const query = new URLSearchParams({
       repo_full_name: repoFullName,
       number: String(number),
+      scope,
     })
     return agentsRequest<AgentPullRequestContextResponse>(
       `/threads/${encodeURIComponent(threadId)}/pull-request-context?${query}`
@@ -394,13 +516,10 @@ export const agentsApi = {
       `/workflow-approval/${encodeURIComponent(threadId)}/${encodeURIComponent(fingerprint)}/reject`,
       { method: "POST" }
     ),
-  queueMessage: (threadId: string, body: ThreadMessageRequest) =>
-    agentsRequest<AgentThread>(
-      `/threads/${encodeURIComponent(threadId)}/messages`,
-      {
-        method: "POST",
-        body: JSON.stringify(body),
-      }
+  cancelRun: (threadId: string, runId: string) =>
+    agentsRequest<unknown>(
+      `/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/cancel`,
+      { method: "POST" }
     ),
   cancelThread: (threadId: string) =>
     agentsRequest<AgentThread>(
@@ -428,6 +547,14 @@ export const agentsApi = {
     agentsRequest<ThreadTurnDiff>(
       `/threads/${encodeURIComponent(threadId)}/working-tree-diff`
     ),
+  getThreadPath: (threadId: string, path: string) =>
+    agentsRequest<WorkspacePath>(
+      `/threads/${encodeURIComponent(threadId)}/files?path=${encodeURIComponent(path)}`
+    ),
+  getThreadFileIndex: (threadId: string) =>
+    agentsRequest<WorkspaceFileIndex>(
+      `/threads/${encodeURIComponent(threadId)}/file-index`
+    ),
   downloadThreadRecoveryPatch: (threadId: string) =>
     agentsBlobRequest(
       `/threads/${encodeURIComponent(threadId)}/recovery.patch`
@@ -437,40 +564,13 @@ export const agentsApi = {
       `/threads/${encodeURIComponent(threadId)}/terminal/connect`,
       { method: "POST" }
     ),
-}
-
-export type ThreadGroup = "today" | "last7" | "last30" | "older"
-
-export function groupThreads(
-  threads: Array<AgentThread>,
-  timestampField: "createdAt" | "updatedAt" = "updatedAt"
-): Record<ThreadGroup, Array<AgentThread>> {
-  const todayStart = new Date()
-  todayStart.setHours(0, 0, 0, 0)
-  const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000
-  const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000
-
-  const groups: Record<ThreadGroup, Array<AgentThread>> = {
-    today: [],
-    last7: [],
-    last30: [],
-    older: [],
-  }
-
-  for (const thread of [...threads].sort(
-    (a, b) => b[timestampField] - a[timestampField]
-  )) {
-    const timestamp = thread[timestampField]
-    if (timestamp >= todayStart.getTime()) {
-      groups.today.push(thread)
-    } else if (timestamp >= sevenDaysAgo) {
-      groups.last7.push(thread)
-    } else if (timestamp >= thirtyDaysAgo) {
-      groups.last30.push(thread)
-    } else {
-      groups.older.push(thread)
-    }
-  }
-
-  return groups
+  getThreadBrowser: (threadId: string) =>
+    agentsRequest<ThreadBrowser>(
+      `/threads/${encodeURIComponent(threadId)}/browser`
+    ),
+  openThreadBrowser: (threadId: string) =>
+    agentsRequest<ThreadBrowser>(
+      `/threads/${encodeURIComponent(threadId)}/browser`,
+      { method: "POST" }
+    ),
 }

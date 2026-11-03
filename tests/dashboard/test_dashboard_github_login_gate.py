@@ -1,16 +1,19 @@
 """Tests for the dashboard GitHub login allowlists."""
 
+import asyncio
 from unittest.mock import AsyncMock, call
 
+import httpx2
 import pytest
 from fastapi import HTTPException
 
-from agent.dashboard import oauth
+from openswe.dashboard import oauth
+from openswe.github import org_membership
+from openswe.users import authorization
 
 
 @pytest.mark.parametrize("value", [None, "  ,  "])
 def test_startup_rejects_missing_allowlists(monkeypatch, caplog, value: str | None) -> None:
-    monkeypatch.delenv("ALEPHAT_LOCAL_AUTH_TOKEN", raising=False)
     if value is None:
         monkeypatch.delenv("ALLOWED_GITHUB_ORGS", raising=False)
         monkeypatch.delenv("ALLOWED_GITHUB_USERS", raising=False)
@@ -28,11 +31,10 @@ def test_startup_rejects_missing_allowlists(monkeypatch, caplog, value: str | No
 
 @pytest.mark.asyncio
 async def test_app_lifespan_exits_when_allowlists_are_missing(monkeypatch) -> None:
-    from agent.api.app import app, lifespan
+    from openswe.api.app import app, lifespan
 
     monkeypatch.delenv("ALLOWED_GITHUB_ORGS", raising=False)
     monkeypatch.delenv("ALLOWED_GITHUB_USERS", raising=False)
-    monkeypatch.delenv("ALEPHAT_LOCAL_AUTH_TOKEN", raising=False)
 
     with pytest.raises(
         RuntimeError, match="ALLOWED_GITHUB_ORGS or ALLOWED_GITHUB_USERS must be configured"
@@ -50,20 +52,12 @@ def test_startup_accepts_either_allowlist(monkeypatch, variable: str) -> None:
     oauth.validate_github_login_allowlist()
 
 
-def test_desktop_local_backend_accepts_missing_allowlists(monkeypatch) -> None:
-    monkeypatch.delenv("ALLOWED_GITHUB_ORGS", raising=False)
-    monkeypatch.delenv("ALLOWED_GITHUB_USERS", raising=False)
-    monkeypatch.setenv("ALEPHAT_LOCAL_AUTH_TOKEN", "local-token")
-
-    oauth.validate_github_login_allowlist()
-
-
 @pytest.mark.asyncio
 async def test_gate_allows_explicit_user_case_insensitively(monkeypatch) -> None:
     monkeypatch.setenv("ALLOWED_GITHUB_USERS", " Alice, bob ")
     monkeypatch.delenv("ALLOWED_GITHUB_ORGS", raising=False)
     membership = AsyncMock()
-    monkeypatch.setattr(oauth, "is_user_active_org_member", membership)
+    monkeypatch.setattr(authorization, "is_user_active_org_member", membership)
 
     await oauth.enforce_github_login_gate("ALICE")
 
@@ -75,7 +69,7 @@ async def test_gate_allows_member_of_any_configured_org(monkeypatch) -> None:
     monkeypatch.delenv("ALLOWED_GITHUB_USERS", raising=False)
     monkeypatch.setenv("ALLOWED_GITHUB_ORGS", "primary, secondary")
     membership = AsyncMock(side_effect=[False, True])
-    monkeypatch.setattr(oauth, "is_user_active_org_member", membership)
+    monkeypatch.setattr(authorization, "is_user_active_org_member", membership)
 
     await oauth.enforce_github_login_gate("Insider")
 
@@ -90,7 +84,7 @@ async def test_gate_uses_union_when_both_allowlists_are_set(
     monkeypatch.setenv("ALLOWED_GITHUB_USERS", "alice")
     monkeypatch.setenv("ALLOWED_GITHUB_ORGS", "primary")
     membership = AsyncMock(return_value=authorized_by == "org")
-    monkeypatch.setattr(oauth, "is_user_active_org_member", membership)
+    monkeypatch.setattr(authorization, "is_user_active_org_member", membership)
 
     login = "alice" if authorized_by == "user" else "insider"
     await oauth.enforce_github_login_gate(login)
@@ -101,11 +95,44 @@ async def test_gate_uses_union_when_both_allowlists_are_set(
         membership.assert_awaited_once_with("insider", "primary")
 
 
+@pytest.mark.parametrize("retry_after", ["0", "60"])
+async def test_gate_retries_membership_lookup_within_deadline(
+    monkeypatch: pytest.MonkeyPatch, retry_after: str
+) -> None:
+    monkeypatch.setenv("ALLOWED_GITHUB_USERS", "")
+    monkeypatch.setenv("ALLOWED_GITHUB_ORGS", "primary")
+    monkeypatch.setattr(
+        org_membership, "get_github_app_installation_id_for_org", AsyncMock(return_value=1)
+    )
+    monkeypatch.setattr(
+        org_membership, "get_github_app_installation_token", AsyncMock(return_value="token")
+    )
+    monkeypatch.setattr(org_membership, "_MEMBERSHIP_REQUEST_TIMEOUT", 0.1)
+    monkeypatch.setattr(
+        httpx2.AsyncClient,
+        "request",
+        AsyncMock(
+            side_effect=[
+                httpx2.Response(503, headers={"Retry-After": retry_after}),
+                httpx2.Response(200, json={"state": "active"}),
+            ]
+        ),
+    )
+
+    async with asyncio.timeout(1):
+        if retry_after == "0":
+            await oauth.enforce_github_login_gate("insider")
+        else:
+            with pytest.raises(HTTPException) as exc:
+                await oauth.enforce_github_login_gate("insider")
+            assert exc.value.status_code == 403
+
+
 @pytest.mark.asyncio
 async def test_gate_rejects_user_outside_both_allowlists(monkeypatch) -> None:
     monkeypatch.setenv("ALLOWED_GITHUB_USERS", "alice")
     monkeypatch.setenv("ALLOWED_GITHUB_ORGS", "primary")
-    monkeypatch.setattr(oauth, "is_user_active_org_member", AsyncMock(return_value=False))
+    monkeypatch.setattr(authorization, "is_user_active_org_member", AsyncMock(return_value=False))
 
     with pytest.raises(HTTPException) as exc:
         await oauth.enforce_github_login_gate("stranger")

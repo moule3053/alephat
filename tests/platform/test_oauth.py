@@ -7,10 +7,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from agent.dashboard.oauth import COOKIE_NAME, decode_session, issue_session
 from alephat_platform.api import routes_oauth
 from alephat_platform.api.deps import get_auth
 from alephat_platform.common.config import clear_settings_cache
+from openswe.dashboard.oauth import COOKIE_NAME, decode_session, issue_session
 
 
 def _configure_oauth(monkeypatch: pytest.MonkeyPatch) -> None:
