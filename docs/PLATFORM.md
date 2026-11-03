@@ -118,6 +118,19 @@ OPENAI_API_KEY=...     # upstream keys for the proxy
 docker-compose -f deploy/docker-compose.yml --env-file deploy/.env --profile with-litellm up -d
 ```
 
+### Running the local stack with Gemini 4 Argon
+
+To run the local stack against Gemini 4 Argon with the local sandbox provider, set the following in `deploy/.env`:
+
+```bash
+DEFAULT_LLM_PROVIDER=google
+GOOGLE_API_KEY=...
+DEFAULT_MODEL=google:gemini-4-argon
+DEFAULT_SANDBOX_PROVIDER=local
+```
+
+Then start the stack with `make platform-up`.
+
 ## Host processes (deps in Docker only)
 
 ```bash
