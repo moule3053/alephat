@@ -38,8 +38,8 @@ docker-compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --scale
 | LLM providers | env on harness | Direct OpenAI/Anthropic/Fireworks/Google (**default**) |
 | LiteLLM | `litellm` (profile `with-litellm`) | **Optional** proxy when `LITELLM_ENABLED=true` |
 
-Sandboxes: `agent_sandbox` (default), `daytona`, `opensandbox`.
-Real Daytona handles and the Kubernetes Agent Sandbox backend run through `deepagents.create_deep_agent`.
+Sandboxes: `agent_sandbox` (default), `local`, `daytona`, `opensandbox`.
+Real Daytona handles, host-local sandboxes (`local`), and the Kubernetes Agent Sandbox backend (`agent_sandbox`, using Kata `kata-qemu` or `gvisor`) run through `deepagents.create_deep_agent`.
 The Agent Sandbox backend confines file operations to `/app/repo` and implements shell execution plus upload/download over the Python runtime service.
 Stub sandboxes are fail-closed by default and can only be enabled explicitly with `ALLOW_STUB_SANDBOXES=true` for local control-plane/UI testing.
 
@@ -148,18 +148,36 @@ deploy/
   docker-compose.yml
   .env.example
   litellm_config.yaml
-  k8s/          # cluster deploy + KEDA (not used by compose)
+  gke-deploy.sh     # End-to-end GKE cluster, Kata/gVisor, ESO, LiteLLM, KEDA & Traefik deploy
+  gke-teardown.sh   # GKE cluster, static IP, DNS, Artifact Registry, IAM & GSM teardown
+  k8s/              # Cluster manifests, ExternalSecrets, SandboxTemplate, KEDA & Traefik
 ```
 
-## Kubernetes
+## Kubernetes (GKE)
 
-KEDA, the schema migration Job, and multi-replica API/webhook/harness/UI Deployments live under `deploy/k8s/` (not used by Compose):
+Automated end-to-end GKE provisioning (choosing `kata` or `gvisor` for Agent Sandbox, installing External Secrets Operator `2.14.0` backed by Google Cloud Secret Manager, KEDA `2.21.0`, LiteLLM `1.106.6`, and optional Traefik `42.3.0` HTTPS ingress) is provided by `deploy/gke-deploy.sh` and `deploy/gke-teardown.sh`:
 
 ```bash
-kubectl apply -k deploy/k8s/
+# Deploy with Kata or gVisor, External Secrets Operator + Google Cloud Secret Manager, and Traefik HTTPS
+./deploy/gke-deploy.sh \
+  --project your-gcp-project-id \
+  --region us-central1 \
+  --sandbox-runtime gvisor \
+  --node-size e2-standard-4 \
+  --models "google:gemini-4-argon,openai:gpt-4o-mini,anthropic:claude-3-5-sonnet" \
+  --with-traefik
+
+# Tear down cluster, static IP, images, IAM service accounts, and Secret Manager secrets
+./deploy/gke-teardown.sh \
+  --project your-gcp-project-id \
+  --region us-central1 \
+  --delete-images \
+  --delete-iam \
+  --delete-secrets
 ```
+
+See the [Standalone GKE deployment guide in `README.md`](../README.md#standalone-gke-deployment-kata-or-gvisor-agent-sandbox-litellm-and-keda) for full details and Google Cloud Secret Manager rotation commands.
 
 ## Legacy monolith
 
-The existing `agent/` LangGraph app (`make dev`) remains available during the strangler migration.
-New multi-service traffic uses `alephat_platform.*`.
+The `openswe/` LangGraph app (`make dev`) remains available alongside `alephat_platform.*`.

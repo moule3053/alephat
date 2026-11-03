@@ -123,19 +123,25 @@ The checked-in configuration uses the open-source editions of Agent Sandbox (`v1
   --node-size n2-standard-4 \
   --models "google:gemini-4-argon,google_genai:gemini-4-argon,openai:gpt-4o-mini,anthropic:claude-3-5-sonnet"
 
-# Or deploy with gVisor instead of Kata
+# Or deploy with gVisor instead of Kata and public Traefik HTTPS (auto sslip.io or --host)
 ./deploy/gke-deploy.sh \
   --project your-gcp-project-id \
   --region us-central1 \
   --sandbox-runtime gvisor \
   --node-size e2-standard-4 \
-  --models "google:gemini-4-argon,openai:gpt-4o-mini"
+  --models "google:gemini-4-argon,openai:gpt-4o-mini" \
+  --with-traefik
 
 # Preview rendered SandboxTemplate and LiteLLM config without applying
 ./deploy/gke-deploy.sh --dry-run --sandbox-runtime gvisor --region europe-west1
 
-# Tear down the cluster, static IP, and optional Artifact Registry / IAM resources
-./deploy/gke-teardown.sh --project your-gcp-project-id --region us-central1 --delete-images --delete-iam
+# Tear down the cluster, static IP, and optional Artifact Registry / IAM / Secret Manager resources
+./deploy/gke-teardown.sh \
+  --project your-gcp-project-id \
+  --region us-central1 \
+  --delete-images \
+  --delete-iam \
+  --delete-secrets
 ```
 
 You still pay for GKE and model usage, and you must supply normal authentication credentials: a GitHub App plus an API key for each model provider you enable.
@@ -189,7 +195,8 @@ gcloud services enable \
   compute.googleapis.com \
   container.googleapis.com \
   dns.googleapis.com \
-  iamcredentials.googleapis.com
+  iamcredentials.googleapis.com \
+  secretmanager.googleapis.com
 ```
 
 These instructions use Vertex AI through Workload Identity for the default Gemini alias.
