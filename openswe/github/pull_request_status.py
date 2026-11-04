@@ -436,7 +436,7 @@ class PullRequestClient:
     @classmethod
     @asynccontextmanager
     async def as_app(cls, owner: str, repo: str, number: int) -> AsyncIterator[Self]:
-        """This pull request as the Open SWE GitHub App's installation on ``owner/repo`` reads it.
+        """This pull request as the Alephat GitHub App's installation on ``owner/repo`` reads it.
 
         Raises ``GitHubAppUnavailable`` when no installation token can be minted.
         """
@@ -657,7 +657,7 @@ class PullRequestClient:
         keep_commit: str | None = None,
         scope_to_review_id: int | None = None,
     ) -> list[int]:
-        """Dismiss Open SWE's standing approvals other than the kept ones; the ids GitHub refused.
+        """Dismiss Alephat's standing approvals other than the kept ones; the ids GitHub refused.
 
         ``scope_to_review_id`` limits this to that review's login. An unknown review dismisses nothing.
         """
@@ -685,7 +685,7 @@ class PullRequestClient:
                 if exc.response.status_code == 404:
                     continue
                 logger.warning(
-                    "GitHub refused to dismiss a stale Open SWE approval",
+                    "GitHub refused to dismiss a stale Alephat approval",
                     extra={
                         **self._log_extra,
                         "github_review_id": review.id,
@@ -696,7 +696,7 @@ class PullRequestClient:
                 refused.append(review.id)
             except httpx2.HTTPError:
                 logger.warning(
-                    "Failed to dismiss a stale Open SWE approval",
+                    "Failed to dismiss a stale Alephat approval",
                     extra={**self._log_extra, "github_review_id": review.id},
                     exc_info=True,
                 )

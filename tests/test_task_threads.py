@@ -932,7 +932,7 @@ async def test_async_subagent_becomes_one_ordinary_worker_of_its_coordinators_ta
     assert metadata["sandbox_id"] == "shared-sandbox"
     assert metadata["owner_login"] == OWNER
     assert metadata[MDA_GRAPH_METADATA_KEY] == MDA_WORKER_GRAPH_ID
-    # MDA started the assignment; Open SWE queued nothing to start it again.
+    # MDA started the assignment; Alephat queued nothing to start it again.
     assert client.created_runs == []
     assert await TaskMessage.owed(worker) == []
 

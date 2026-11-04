@@ -1,4 +1,4 @@
-"""What starting an Open SWE agent run works out, and what preparing its turns does.
+"""What starting an Alephat agent run works out, and what preparing its turns does.
 
 Resolves the run's models, builds the curated tool list plus optional integrations,
 and sets the rules MDA's middleware follows around each model call (``agent_catalog``).

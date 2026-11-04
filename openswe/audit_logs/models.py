@@ -1,4 +1,4 @@
-"""LangSmith's audit envelope adapted to Open SWE identities."""
+"""LangSmith's audit envelope adapted to Alephat identities."""
 
 from datetime import UTC, datetime
 from typing import Literal, TypedDict

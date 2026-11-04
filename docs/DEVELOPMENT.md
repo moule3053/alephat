@@ -1,6 +1,6 @@
 # Local Development
 
-Run Open SWE on your machine: the backend and the dashboard on `http://localhost:2024`, with GitHub and Slack webhooks arriving through a tunnel.
+Run Alephat on your machine: the backend and the dashboard on `http://localhost:2024`, with GitHub and Slack webhooks arriving through a tunnel.
 Deploying it for a team is the [installation guide](INSTALLATION.md).
 
 ## Prerequisites
@@ -35,7 +35,7 @@ Use a name of your own (GitHub App names are unique), and give it a distinct men
 
 ## 3. Tunnel for webhooks
 
-Always run an ngrok tunnel when starting Open SWE locally.
+Always run an ngrok tunnel when starting Alephat locally.
 GitHub and Slack need a public HTTPS hostname that stays the same across restarts.
 Reuse an existing tunnel and its exact configured domain, forwarding to the active backend (normally localhost:2024).
 If no tunnel is running, recover the domain from configuration or prior local runtime notes in the primary checkout before starting one; an automatically assigned hostname will not match existing webhook settings.
@@ -109,7 +109,7 @@ MDA_RUNTIME_URL="http://localhost:2025"   # `make dev-mda`; the backend refuses 
 REMOTE_RUNTIME_TOKEN_SECRET=""  # openssl rand -hex 32     (signs the run tokens Managed Deep Agents calls back with)
 ```
 
-Every Open SWE thread runs its model loop on Managed Deep Agents, from the project in `mda/`.
+Every Alephat thread runs its model loop on Managed Deep Agents, from the project in `mda/`.
 Locally that is `make dev-mda` on port 2025, which reads its own `mda/.env`: set `OPEN_SWE_BACKEND_URL=http://localhost:2024` there, plus `LANGSMITH_API_KEY` and the same model key as above ([mda/README.md](../mda/README.md#run-locally)).
 
 `LANGGRAPH_URL` defaults to `http://localhost:2024`, and `DASHBOARD_BASE_URL` / `DASHBOARD_API_BASE_URL` default to it, so none of the three is needed locally.
@@ -118,8 +118,8 @@ You only need one model credential: either a provider key or a gateway key if yo
 How the running model is chosen is covered in the same section.
 Linear, if you use it, comes from the [Linear](INSTALLATION.md#linear) section of the installation guide, with your ngrok domain as the URL.
 
-Open SWE needs a PostgreSQL database for its own tables, and `langgraph dev` does not provide one: it keeps LangGraph's threads and Store in memory, so the platform's Postgres is not there locally.
-In LangGraph's `local_dev` runtime, Open SWE defaults `POSTGRES_URI` to `postgresql://postgres:postgres@127.0.0.1:5433/postgres`; `make dev` and `make dev-ui` run the matching `postgres:16` container named `open-swe-postgres` when no explicit value is set.
+Alephat needs a PostgreSQL database for its own tables, and `langgraph dev` does not provide one: it keeps LangGraph's threads and Store in memory, so the platform's Postgres is not there locally.
+In LangGraph's `local_dev` runtime, Alephat defaults `POSTGRES_URI` to `postgresql://postgres:postgres@127.0.0.1:5433/postgres`; `make dev` and `make dev-ui` run the matching `postgres:16` container named `open-swe-postgres` when no explicit value is set.
 Docker Compose binds the container to loopback only and keeps its data in the `open-swe-postgres` volume, so stopping or removing the container preserves your local users, workspaces, and settings.
 `make postgres` starts it on its own; use `docker compose down` to stop it.
 Set `POSTGRES_URI` to skip the container and use any database you can create schemas in — see [Analytics storage](INSTALLATION.md#1-create-the-deployment) for what startup migrations create there, including the `repository`, `users`, and `workspace` tables.
@@ -142,7 +142,7 @@ Prepare the [worktree state](#langgraph-state-across-worktrees) before startup.
 ```bash
 make build-dashboard   # pnpm install + Vite build into ui/.output/public
 make dev               # langgraph dev on http://localhost:2024, serving the API and the dashboard (starts the Postgres container first)
-make dev-mda           # in a second terminal: Managed Deep Agents on http://localhost:2025, where every Open SWE thread runs
+make dev-mda           # in a second terminal: Managed Deep Agents on http://localhost:2025, where every Alephat thread runs
 ```
 
 `langgraph dev` serves the graphs, the FastAPI app, and the dashboard build together on port 2024.
@@ -201,7 +201,7 @@ Create additional workspaces from the **Workspaces** page to exercise routing lo
 
 **Incidents.**
 Follow [Incidents setup](INSTALLATION.md#incidents) to enroll Slack channels.
-Set `SLACK_APP_ID`; anyone in a channel can pause or complete its incident, and asking the agent requires a connected Open SWE account.
+Set `SLACK_APP_ID`; anyone in a channel can pause or complete its incident, and asking the agent requires a connected Alephat account.
 Incident turns run on the main `agent` graph and are dispatched straight from the Slack webhook, so `make dev` or `make dev-ui` is all that is needed.
 
 Record the worktree, process IDs, fixed tunnel domain, and state location in ignored `logs/local-dev/` notes in the primary checkout so the next session can reuse them.
@@ -319,7 +319,7 @@ The shared [preview environment](https://open-swe-preview-cc53e8fbe667565d843d08
 1. Open [preview](https://open-swe-preview-cc53e8fbe667565d843d0843f84ee92c.us.langgraph.app/agents) and test with non-production tasks and repositories.
    For local UI iteration against that backend, see [Dashboard against a deployed backend](#dashboard-against-a-deployed-backend).
 
-When PRs conflict with the preview tree, the run makes one `oswe` call (an Open SWE agent on the backend in the `OPEN_SWE_BACKEND_URL` repository variable) that merges all of them; the summary marks those PRs `conflicts resolved by oswe`, and later runs replay the resolution from a git rerere cache.
+When PRs conflict with the preview tree, the run makes one `oswe` call (an Alephat agent on the backend in the `OPEN_SWE_BACKEND_URL` repository variable) that merges all of them; the summary marks those PRs `conflicts resolved by oswe`, and later runs replay the resolution from a git rerere cache.
 PRs the agent cannot resolve are skipped, unlabeled, and receive resolution instructions for the shared `preview-manual` branch.
 Resolve the conflict before reapplying the label.
 Use **force** only to rebuild an unchanged preview tree.
@@ -385,7 +385,7 @@ Ask users to attach that file to a report.
 | Target | What it does |
 |---|---|
 | `make dev` | `langgraph dev` on port 2024: graphs, webhooks, dashboard API, and the bundled dashboard when a build exists |
-| `make dev-mda` | `mda dev` on port 2025: the Managed Deep Agents runtime every Open SWE thread runs on |
+| `make dev-mda` | `mda dev` on port 2025: the Managed Deep Agents runtime every Alephat thread runs on |
 | `make mda-cli` | Build the `mda` CLI from the vendored SDK (`make dev-mda` does it first) |
 | `make dev-ui` | `make web` and `make dev` together, the backend fronting Vite so the UI hot-reloads on port 2024 |
 | `make web` | The Vite dev server alone on port 3000 |

@@ -155,7 +155,7 @@ def format_github_comment_body_for_prompt(
 ) -> str:
     """Format a GitHub comment body for prompt inclusion.
 
-    ``trusted`` is the lowercased GitHub logins of known Open SWE users; anyone
+    ``trusted`` is the lowercased GitHub logins of known Alephat users; anyone
     else's words are fenced as untrusted.
     """
     return fence_github_comment_body(body, registered=author.strip().lower() in trusted)

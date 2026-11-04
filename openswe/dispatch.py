@@ -437,7 +437,7 @@ async def create_durable_run(
     source_context: SourceContext | None = None,
     as_sender: bool = False,
 ) -> Run:
-    """Create a run with Open SWE's durable LangGraph defaults.
+    """Create a run with Alephat's durable LangGraph defaults.
 
     ``thread_title`` names a thread the system owns, creating it if needed; ``None``
     means the caller already created and titled the thread. Agent and reviewer

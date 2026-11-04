@@ -65,9 +65,9 @@ test("renamed app retains original production and isolated development profiles"
   const appDataPath = path.join("/tmp", "open-swe-app-data");
   const expected = {
     isDevelopment: true,
-    name: "Open SWE Development",
+    name: "Alephat Development",
     appUserModelId: "com.langchain.openswe.dev",
-    userDataPath: path.join(appDataPath, "Open SWE Development"),
+    userDataPath: path.join(appDataPath, "Alephat Development"),
   };
   assert.deepEqual(
     resolveAppRuntime({ argv: [], isPackaged: false, appDataPath }),
@@ -81,9 +81,9 @@ test("renamed app retains original production and isolated development profiles"
     resolveAppRuntime({ argv: [], isPackaged: true, appDataPath }),
     {
       isDevelopment: false,
-      name: "Open SWE",
+      name: "Alephat",
       appUserModelId: "com.langchain.openswe",
-      userDataPath: path.join(appDataPath, "Open SWE"),
+      userDataPath: path.join(appDataPath, "Alephat"),
     },
   );
 });

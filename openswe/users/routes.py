@@ -1,4 +1,4 @@
-"""Dashboard routes for people: the admin listing of who Open SWE knows."""
+"""Dashboard routes for people: the admin listing of who Alephat knows."""
 
 from typing import Any
 

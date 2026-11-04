@@ -1,6 +1,6 @@
 # Reviewer Eval
 
-Offline LangSmith eval for the Open SWE Reviewer graph against the 50 PRs and 173 categorized golden comments from `withmartian/code-review-benchmark` (`offline/golden_comments` at `e616e84`, the 2026-08 golden refresh).
+Offline LangSmith eval for the Alephat Reviewer graph against the 50 PRs and 173 categorized golden comments from `withmartian/code-review-benchmark` (`offline/golden_comments` at `e616e84`, the 2026-08 golden refresh).
 The `openswe-reviewer-v1` dataset holds the earlier 136 uncategorized goldens; scores across the two datasets are not comparable.
 
 ## Layout

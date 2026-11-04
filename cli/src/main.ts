@@ -29,7 +29,7 @@ import {
   type RunOutcome,
 } from "./stream.ts"
 
-const USAGE = `oswe — run a cloud Open SWE agent against this directory
+const USAGE = `oswe — run a cloud Alephat agent against this directory
 
 Usage:
   oswe login [--backend <url>]      Sign in; --backend also repoints the desktop app

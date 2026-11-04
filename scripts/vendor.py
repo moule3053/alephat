@@ -12,7 +12,7 @@ the code mode mda/ runs, from the deepagents repository.
     uv run scripts/vendor.py <sha>     # update to a commit on upstream main
     uv run scripts/vendor.py --branch <branch> [<sha>]
                                        # a commit on another upstream branch, such as a
-                                       # release branch Open SWE needs before it lands
+                                       # release branch Alephat needs before it lands
     uv run scripts/vendor.py --pr <n>  # carry upstream pull request <n>, or move it to its head
     uv run scripts/vendor.py --diff    # our changes: the tree against UPSTREAM's commit
     uv run scripts/vendor.py --project langchain-quickjs ...

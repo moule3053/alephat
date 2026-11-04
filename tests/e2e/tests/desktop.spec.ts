@@ -139,7 +139,7 @@ test("Desktop runs a This Mac thread on the cloud agent through its bridge", asy
     const work = page.getByRole("button", { name: "Home", exact: true });
     const coding = page.getByRole("button", { name: "Code", exact: true });
     await expect(work).toHaveAttribute("aria-pressed", "true");
-    await expect(page).toHaveTitle(/Open SWE/);
+    await expect(page).toHaveTitle(/Alephat/);
     const workBounds = await work.boundingBox();
     const codingBounds = await coding.boundingBox();
     expect(workBounds).not.toBeNull();

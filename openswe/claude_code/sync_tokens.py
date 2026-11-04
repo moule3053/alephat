@@ -1,4 +1,4 @@
-"""The token a person's Claude Code hooks present to mirror their sessions into Open SWE.
+"""The token a person's Claude Code hooks present to mirror their sessions into Alephat.
 
 The secret is returned once, by :meth:`ClaudeCodeSyncToken.create`, and never
 stored: the row keeps its SHA-256 digest and last characters. A token only

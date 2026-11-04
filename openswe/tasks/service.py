@@ -49,7 +49,7 @@ from openswe.workspaces.routing import resolve_workspace
 
 logger = logging.getLogger(__name__)
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
-# The async subagent Open SWE runs its workers as.
+# The async subagent Alephat runs its workers as.
 ASYNC_WORKER_SUBAGENT = "general-purpose"
 
 
@@ -95,7 +95,7 @@ class Actor:
         user = await user_for_login(self.login)
         if user is None:
             raise PermissionError(
-                "Task operations require the thread owner to have an Open SWE account"
+                "Task operations require the thread owner to have an Alephat account"
             )
         owner = await metadata.owner()
         is_owner = owner.id == user.id

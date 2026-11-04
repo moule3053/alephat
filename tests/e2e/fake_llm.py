@@ -101,7 +101,7 @@ HUMAN_REVIEW_PICK = "bob"
 _UNCLAIMED_MARKER = "Nobody has signed up to review"
 _DECLINED_MARKER = "declined the review of"
 _PICK_REQUEST = "reviewer for it"
-_SUGGESTED_REVIEWER = re.compile(r"Open SWE suggests @(\S+): (.+?) Unless this Slack thread")
+_SUGGESTED_REVIEWER = re.compile(r"Alephat suggests @(\S+): (.+?) Unless this Slack thread")
 
 # The spec seeds config.py (VALUE_1..VALUE_30) and CHANGELOG.md on main. Drawn:
 # greet.py and config.py's VALUE_2 hunk, four lines. Excluded: 40 more.
@@ -438,7 +438,7 @@ def _script_humans(messages: list[BaseMessage]) -> list[HumanMessage]:
     A Slack dispatch replays whatever the thread has not been handed yet ahead of
     the message it was triggered by, and that message is always last, so a Slack
     envelope is a turn only when nothing else follows it in the same dispatch. An
-    instruction Open SWE dispatches to itself — a plan decision, a scheduled
+    instruction Alephat dispatches to itself — a plan decision, a scheduled
     wake-up — carries no Slack timestamp and is always a turn.
     """
     selected: list[HumanMessage] = []
@@ -655,7 +655,7 @@ def _human_review_dismiss_step(messages: list[BaseMessage]) -> AIMessage:
 
 
 def _human_review_assign_step(messages: list[BaseMessage]) -> AIMessage:
-    """Nobody signed up: take Open SWE's suggestion, else the reviewer CODEOWNERS names.
+    """Nobody signed up: take Alephat's suggestion, else the reviewer CODEOWNERS names.
 
     Notes queued for the thread can land after the pick request, so find the request itself.
     """
@@ -1200,7 +1200,7 @@ SCRIPT_LIBRARY: dict[str, tuple[StepSpec, ...]] = {
             "Continuing the task in its dedicated code channel.",
             "slack_reply",
             {
-                "message": "I created this code channel for the investigation. All updates and follow-ups stay in this one Open SWE session."
+                "message": "I created this code channel for the investigation. All updates and follow-ups stay in this one Alephat session."
             },
             "call-code-channel-reply",
         ),
@@ -1216,7 +1216,7 @@ SCRIPT_LIBRARY: dict[str, tuple[StepSpec, ...]] = {
             "Replying to the unmentioned code-channel follow-up.",
             "slack_reply",
             {
-                "message": "Status: the investigation is active, and this unmentioned follow-up reached the same Open SWE session."
+                "message": "Status: the investigation is active, and this unmentioned follow-up reached the same Alephat session."
             },
             "call-code-channel-followup",
         ),
@@ -1589,7 +1589,7 @@ SCRIPT_LIBRARY: dict[str, tuple[StepSpec, ...]] = {
             "Moving the Slack thread to its destination channel.",
             "slack_move_thread",
             {
-                "message": "Continue the existing Open SWE task in this channel.",
+                "message": "Continue the existing Alephat task in this channel.",
                 "channel_id": "C_TARGET",
             },
             "call-move",

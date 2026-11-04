@@ -258,15 +258,15 @@ export function ModelDefaultsSection({
         <ModelRow
           settings={settings}
           models={models}
-          label="Open SWE Agent"
-          description="Model used for code-writing runs triggered from Slack, Linear, GitHub, and the Open SWE Agent."
+          label="Alephat Agent"
+          description="Model used for code-writing runs triggered from Slack, Linear, GitHub, and the Alephat Agent."
           modelField="default_agent_model"
           effortField="default_agent_reasoning_effort"
         />
         <ModelRow
           settings={settings}
           models={models}
-          label="Open SWE Agent subagents"
+          label="Alephat Agent subagents"
           description="Model used by delegated main-agent tasks."
           modelField="default_agent_subagent_model"
           effortField="default_agent_subagent_reasoning_effort"
@@ -306,7 +306,7 @@ export function ModelDefaultsSection({
         <ModelRow
           settings={settings}
           models={models}
-          label="Open SWE Reviewer"
+          label="Alephat Reviewer"
           description="Model used for PR review runs."
           modelField="default_reviewer_model"
           effortField="default_reviewer_reasoning_effort"
@@ -314,7 +314,7 @@ export function ModelDefaultsSection({
         <ModelRow
           settings={settings}
           models={models}
-          label="Open SWE Reviewer subagents"
+          label="Alephat Reviewer subagents"
           description="Model used by delegated reviewer tasks."
           modelField="default_reviewer_subagent_model"
           effortField="default_reviewer_subagent_reasoning_effort"
@@ -325,7 +325,7 @@ export function ModelDefaultsSection({
 }
 
 interface ModelPairControlProps {
-  /** Names the pickers for assistive tech, e.g. "Open SWE Agent model". */
+  /** Names the pickers for assistive tech, e.g. "Alephat Agent model". */
   label: string
   models: Array<ModelOption>
   model: string | null

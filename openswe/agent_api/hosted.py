@@ -1,4 +1,4 @@
-"""The kinds of run Open SWE starts on Managed Deep Agents, by assistant id."""
+"""The kinds of run Alephat starts on Managed Deep Agents, by assistant id."""
 
 from collections.abc import Mapping
 from functools import cache

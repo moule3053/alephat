@@ -23,7 +23,7 @@ _HEAD_METADATA_KEY = "scout_head_sha"
 
 
 class RepositoryNotAllowed(Exception):
-    """A scout asked for a repository outside Open SWE's allowlist."""
+    """A scout asked for a repository outside Alephat's allowlist."""
 
 
 class _ScoutRun(BaseModel):

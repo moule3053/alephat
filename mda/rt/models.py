@@ -1,4 +1,4 @@
-"""Chat models for the models Open SWE picked when it dispatched a run.
+"""Chat models for the models Alephat picked when it dispatched a run.
 
 The backend sends model ids and provider settings, never credentials; keys come
 from this deployment's environment, and gateway routing mirrors the backend's.

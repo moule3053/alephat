@@ -190,9 +190,9 @@ class IndexedThread(BaseModel):
 
 
 class ThreadSearch(BaseModel):
-    """The Agent Server's ``POST /threads/search`` body, as far as Open SWE uses it.
+    """The Agent Server's ``POST /threads/search`` body, as far as Alephat uses it.
 
-    ``text`` is Open SWE's own: it keeps threads whose searchable metadata holds
+    ``text`` is Alephat's own: it keeps threads whose searchable metadata holds
     it and ranks them by :data:`_RANK` ahead of ``sort_by``.
     """
 

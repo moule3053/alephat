@@ -894,7 +894,7 @@ class ReviewCard:
 def _idle(
     reviewers: list[HumanReviewParticipant], reviewed: set[str]
 ) -> list[HumanReviewParticipant]:
-    """Reviewers Open SWE picked whose lowercased login is not among ``reviewed``."""
+    """Reviewers Alephat picked whose lowercased login is not among ``reviewed``."""
     return [
         reviewer
         for reviewer in reviewers
@@ -904,7 +904,7 @@ def _idle(
 
 @dataclass
 class ReviewPicks:
-    """The reviewers Open SWE picked for a request, as GitHub and their pick DMs show them."""
+    """The reviewers Alephat picked for a request, as GitHub and their pick DMs show them."""
 
     request: HumanReviewRequest
 
@@ -979,7 +979,7 @@ class ReviewPicks:
         )
 
     async def release(self, reason: str) -> HumanReviewRequest:
-        """Take reviewers Open SWE picked who have not reviewed off the pull request, and tell them."""
+        """Take reviewers Alephat picked who have not reviewed off the pull request, and tell them."""
         request = self.request
         if not any(reviewer.assigned_by_agent for reviewer in request.reviewers + request.picks):
             return request
@@ -989,7 +989,7 @@ class ReviewPicks:
                 return await self._release(pull, reason)
         except GitHubAppUnavailable:
             logger.warning(
-                "No GitHub App token to release Open SWE's reviewer picks",
+                "No GitHub App token to release Alephat's reviewer picks",
                 extra={"request_id": str(request.id)},
             )
             return request
@@ -1000,7 +1000,7 @@ class ReviewPicks:
         reviewed = await review_authors(pull)
         if reviewed is None:
             logger.warning(
-                "Could not read reviews to release Open SWE's reviewer picks",
+                "Could not read reviews to release Alephat's reviewer picks",
                 extra={"request_id": str(request.id)},
             )
             return request
@@ -1019,14 +1019,14 @@ class ReviewPicks:
         label = f"<{pr.url}|{pr.label}>"
         for reviewer in released:
             logger.info(
-                "Released a reviewer Open SWE picked",
+                "Released a reviewer Alephat picked",
                 extra={"request_id": str(request.id), "github_login": reviewer.github_login},
             )
             await self._unrequest(pull, reviewer.github_login)
             await self._close(
                 reviewer,
                 f"You no longer need to review {label} *{escape(pr.title)}*: {reason}. "
-                "Open SWE removed you as a reviewer.",
+                "Alephat removed you as a reviewer.",
             )
         return await HumanReviewRequest.get(request.id) or current
 

@@ -85,10 +85,10 @@ class ThreadMentions:
                     await AppNotification.send_to_slack(
                         recipient,
                         key=f"mention:{self.thread_id}:{self.message_id}",
-                        title=f"{self.login} mentioned you in Open SWE",
+                        title=f"{self.login} mentioned you in Alephat",
                         body="Open the conversation with an account that has access.",
                         url=url,
-                        fallback_text=f"{self.login} mentioned you in Open SWE. <{url}|Open conversation> "
+                        fallback_text=f"{self.login} mentioned you in Alephat. <{url}|Open conversation> "
                         "(sign in with an account that has access).",
                         origin=origin,
                         by=sender.id if sender is not None else None,

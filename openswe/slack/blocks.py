@@ -1,6 +1,6 @@
-"""Typed Block Kit payloads Open SWE sends to Slack.
+"""Typed Block Kit payloads Alephat sends to Slack.
 
-Only the surfaces Open SWE actually builds are declared. Each ``TypedDict``
+Only the surfaces Alephat actually builds are declared. Each ``TypedDict``
 mirrors one Block Kit object, so a malformed card is a type error here rather
 than a ``invalid_blocks`` error from Slack at runtime.
 

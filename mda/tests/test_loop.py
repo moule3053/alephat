@@ -210,7 +210,7 @@ async def test_each_model_call_is_assembled_here_from_the_rules_and_named_calls(
     state = _state(
         HumanMessage(content="Fix the login", id="human-1"),
         rendered_system_prompt=(
-            "You are Open SWE.\n\nWe deploy on Fridays.\n\nThis thread's artifacts are here."
+            "You are Alephat.\n\nWe deploy on Fridays.\n\nThis thread's artifacts are here."
         ),
         rendered_workspace_prompt="We deploy on Fridays.",
         rendered_thread_prompt="This thread's artifacts are here.",
@@ -238,7 +238,7 @@ async def test_each_model_call_is_assembled_here_from_the_rules_and_named_calls(
     assert planned.call is not None
     # What the workspace's threads and this thread alone say go apart, after what every
     # thread shares.
-    assert planned.call.system_prompt == "This is a preview deployment.\n\nYou are Open SWE."
+    assert planned.call.system_prompt == "This is a preview deployment.\n\nYou are Alephat."
     assert planned.call.workspace_prompt == "We deploy on Fridays."
     assert planned.call.thread_prompt == "This thread's artifacts are here."
     assert planned.call.hidden_tools == ["grep", "record_human_input"]
@@ -261,7 +261,7 @@ async def test_each_model_call_is_assembled_here_from_the_rules_and_named_calls(
     seen = _state(
         HumanMessage(content=role, id="task-role:1"),
         HumanMessage(content=context, id="task-context:1"),
-        rendered_system_prompt="You are Open SWE.",
+        rendered_system_prompt="You are Alephat.",
         model_route="fast",
         github_proxy_refresh_at=planned.update["github_proxy_refresh_at"],
     )

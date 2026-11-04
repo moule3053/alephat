@@ -1,7 +1,7 @@
 """Code reviews people complete on GitHub, assigned or not, for the usage leaderboard.
 
 A review counts once per person per pull request: the first one they submit, with
-any verdict, on someone else's pull request, while they have an Open SWE account.
+any verdict, on someone else's pull request, while they have an Alephat account.
 """
 
 import logging
@@ -100,7 +100,7 @@ class CompletedReview(Base):
         }
         user = await User.for_identity("github", str(reviewer.id))
         if user is None:
-            logger.info("Not counting a review by someone without an Open SWE account", extra=extra)
+            logger.info("Not counting a review by someone without an Alephat account", extra=extra)
             return
         statement = (
             insert(cls)

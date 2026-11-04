@@ -33,12 +33,12 @@ DEMO_CHANNEL = "C_DEMO"
 # Shaped like a real channel id, so a repository's `reviewChannel` resolves without a name search.
 REVIEW_CHANNEL = "CREVIEWS01"
 HUMAN_USER = "U_HUMAN"
-# A Slack account with no Open SWE side: never signed in, never linked.
+# A Slack account with no Alephat side: never signed in, never linked.
 UNLINKED_USER = "U_CAROL"
 
 PORT = os.environ.setdefault("E2E_PORT", "2024")
 BASE_URL = os.environ.setdefault("E2E_BASE", f"http://127.0.0.1:{PORT}")
-# The Managed Deep Agents server (mda-dev.sh) every Open SWE thread runs on.
+# The Managed Deep Agents server (mda-dev.sh) every Alephat thread runs on.
 MDA_PORT = os.environ.setdefault("E2E_MDA_PORT", "2025")
 
 # Where a browser reaches the dashboard: the app's own server, not this harness.

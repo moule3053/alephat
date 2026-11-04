@@ -1,4 +1,4 @@
-"""Durable Open SWE analytics."""
+"""Durable Alephat analytics."""
 
 from openswe.analytics.events import EventEnvelope, EventName
 

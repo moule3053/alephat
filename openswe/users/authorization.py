@@ -1,4 +1,4 @@
-"""Who is allowed to use Open SWE, and therefore to have a user record.
+"""Who is allowed to use Alephat, and therefore to have a user record.
 
 A GitHub login qualifies by being listed in ``ALLOWED_GITHUB_USERS`` or by being
 an active member of one of ``ALLOWED_GITHUB_ORGS``. Membership is resolved

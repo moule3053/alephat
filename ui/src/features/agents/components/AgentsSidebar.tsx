@@ -663,7 +663,7 @@ export function AgentsSidebar({
           className="flex min-w-0 items-center gap-space-2 font-heading text-sm font-medium tracking-tight text-primary"
         >
           <LogoMark alt="" className="size-5 shrink-0" />
-          Open SWE
+          Alephat
         </Link>
         <div className="flex shrink-0 items-center gap-space-1">
           <IconButton

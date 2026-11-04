@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "Open SWE Desktop can only be installed with this command on macOS." >&2
+  echo "Alephat Desktop can only be installed with this command on macOS." >&2
   exit 1
 fi
 
@@ -35,14 +35,14 @@ cd "$repo_root"
 rm -rf desktop/dist
 "${pnpm[@]}" --dir desktop run pack
 
-apps=(desktop/dist/mac*/"Open SWE.app")
+apps=(desktop/dist/mac*/"Alephat.app")
 if [[ ${#apps[@]} -ne 1 || ! -d "${apps[0]}" ]]; then
-  echo "Could not find the packaged Open SWE application." >&2
+  echo "Could not find the packaged Alephat application." >&2
   exit 1
 fi
 
-system_app="/Applications/Open SWE.app"
-user_app="$HOME/Applications/Open SWE.app"
+system_app="/Applications/Alephat.app"
+user_app="$HOME/Applications/Alephat.app"
 if [[ -w /Applications ]]; then
   target="$system_app"
 else
@@ -58,4 +58,4 @@ rm -rf "$target"
 mv "$staged" "$target"
 trap - EXIT
 open "$target"
-echo "Open SWE Desktop installed at $target"
+echo "Alephat Desktop installed at $target"

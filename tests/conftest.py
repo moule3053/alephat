@@ -154,7 +154,7 @@ def grant_tool_access(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
 
 
 def register_github_logins(monkeypatch: pytest.MonkeyPatch, *logins: str) -> None:
-    """Treat ``logins`` as registered Open SWE users."""
+    """Treat ``logins`` as registered Alephat users."""
     from openswe.users import User
 
     registered = {login.lower() for login in logins}

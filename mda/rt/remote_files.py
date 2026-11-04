@@ -1,4 +1,4 @@
-"""The thread's files on the Open SWE backend, as a deepagents sandbox backend.
+"""The thread's files on the Alephat backend, as a deepagents sandbox backend.
 
 The backend serves the paths it holds (skills, offloaded images) and the files of
 a thread whose sandbox is not MDA's, such as one bridged to a person's machine. This

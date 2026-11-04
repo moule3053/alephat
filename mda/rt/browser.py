@@ -36,7 +36,7 @@ class ReportedBrowserMiddleware(BrowserMiddleware):
         # Every graph has the middleware, so all of them share one shape; only the
         # coding agent's has a browser.
         self._enabled = enabled
-        # No browser_handoff: Open SWE runs only what its backend signs, so MDA's watcher
+        # No browser_handoff: Alephat runs only what its backend signs, so MDA's watcher
         # cannot start the run that tells the agent the user handed the browser back.
         self.tools = [tool for tool in self.tools if enabled and tool.name != "browser_handoff"]
         self._arguments.pop("browser_handoff", None)

@@ -6,7 +6,7 @@ to arrive as a readable text diff, and those files together have to fit in
 gates — CI judges them — which is what lets a two-line fix arrive with the
 tests that prove it. So are hunks the agent excludes as qualifying under the
 target repository's ``.open-swe/APPROVALS.md``; the card summarizes them. When
-Open SWE's review would approve the PR subject to human approval of a stated condition,
+Alephat's review would approve the PR subject to human approval of a stated condition,
 the card shows that condition instead of the diff, so a PR of any size qualifies.
 """
 
@@ -267,7 +267,7 @@ class Exclusion(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class ApprovalCondition:
-    """The one statement a person approves when Open SWE's review would approve everything else.
+    """The one statement a person approves when Alephat's review would approve everything else.
 
     It comes from the reviewer's conditional assessment of ``head_sha``, never from the
     agent asking for the card, so the agent cannot widen what the card hides.

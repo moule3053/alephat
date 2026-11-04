@@ -1,4 +1,4 @@
-"""The kinds of Open SWE run this graph plays, and the rules each follows whatever the run.
+"""The kinds of Alephat run this graph plays, and the rules each follows whatever the run.
 
 A run's catalog names what the backend resolves for that run alone: its tools, models,
 sandbox and grants, and the coding agent's loop rules, which depend on where it was asked

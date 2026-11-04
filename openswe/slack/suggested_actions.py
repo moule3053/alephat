@@ -1,4 +1,4 @@
-"""Actions Open SWE suggests privately after noticing what someone posted in Slack.
+"""Actions Alephat suggests privately after noticing what someone posted in Slack.
 
 A suggestion is an ephemeral message only that person sees, with one button to
 accept it and one to dismiss it. Accepting hands the Slack thread's agent thread,

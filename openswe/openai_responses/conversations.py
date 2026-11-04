@@ -1,4 +1,4 @@
-"""Which Open SWE thread a Responses request continues, and starting its run."""
+"""Which Alephat thread a Responses request continues, and starting its run."""
 
 import logging
 import uuid

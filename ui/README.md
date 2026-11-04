@@ -1,4 +1,4 @@
-# Open SWE dashboard
+# Alephat dashboard
 
 TanStack Start + React 19 app styled with the [Macaw design system](https://github.com/langchain-ai/macaw-design-system).
 

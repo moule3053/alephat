@@ -6,7 +6,7 @@ import { plannedCalls } from "./helpers/dashboard";
 //   user asks in Slack -> real agent implements in a local sandbox -> opens a PR
 //   on the fake GitHub -> replies with the PR link in the SAME Slack thread.
 // Only the LLM is faked; all agent code runs for real via langgraph dev.
-test.describe("Open SWE full flow", () => {
+test.describe("Alephat full flow", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/mock/slack");
     await page.locator("#reset").click();
@@ -88,7 +88,7 @@ test.describe("Open SWE full flow", () => {
     await expect(reply.locator('a[href*="/pull/"]')).toBeVisible();
   });
 
-  test("Slack breakout request starts a new top-level Open SWE thread", async ({
+  test("Slack breakout request starts a new top-level Alephat thread", async ({
     page,
   }) => {
     await page

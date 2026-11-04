@@ -1,4 +1,4 @@
-"""Open SWE's agent tools as a remote MCP server for agents running elsewhere.
+"""Alephat's agent tools as a remote MCP server for agents running elsewhere.
 
 A person connects an MCP client (Claude Code, Claude.ai, Cursor) to ``/oswe/mcp``
 and signs in with GitHub through the dashboard's GitHub App. Each request lists
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 PREFIX: Final = "/oswe"
 _MCP_PATH: Final = "/mcp"
-_SERVER_NAME: Final = "Open SWE"
+_SERVER_NAME: Final = "Alephat"
 _GITHUB_CACHE_SECONDS: Final = 300
 
 

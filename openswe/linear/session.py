@@ -4,7 +4,7 @@ MDA's Linear channel receives the event and starts the run on the session's own
 thread, so the conversation's reply, Stop and errors reach Linear. Each agent
 session is its own thread, so a second session on the same issue is a new
 conversation, with the issue's title. The backend decides everything else, as it
-does for its own runs: whether the author has signed in to Open SWE, which acts
+does for its own runs: whether the author has signed in to Alephat, which acts
 on GitHub as them; the repository, the workspace, the input, and the signed run
 token the run calls back with. The run carries the backend's run-complete
 webhook, which completes it as it does the backend's own runs; the channel reports
@@ -64,35 +64,35 @@ class LinearDecline(TypedDict):
 NO_REPOSITORY: LinearDecline = {
     "decline": (
         "Which repository should I work in? Mention it as `repo:owner/name` or link it on "
-        "GitHub, or set a default repository in Open SWE settings."
+        "GitHub, or set a default repository in Alephat settings."
     )
 }
 UNREADABLE_SESSION: LinearDecline = {
     "decline": (
         "I couldn't read this Linear session, so I didn't start. Mention me on the issue "
-        "again; if it keeps happening, let your Open SWE admin know."
+        "again; if it keeps happening, let your Alephat admin know."
     )
 }
 
 
 def _sign_in(reason: common.AccountLinkReason) -> LinearDecline:
-    """Ask the author to sign in to Open SWE, which acts on GitHub as them.
+    """Ask the author to sign in to Alephat, which acts on GitHub as them.
 
     Without a dashboard URL configured the text names the settings page instead
     of linking it, since the session must still be told why nothing started.
     """
     settings_url = build_settings_url()
-    settings = f"[your Open SWE settings]({settings_url})" if settings_url else "Open SWE"
+    settings = f"[your Alephat settings]({settings_url})" if settings_url else "Alephat"
     if reason == "revoked":
         return {
             "decline": (
-                "Your GitHub sign-in to Open SWE is no longer valid, so I can't work as you. "
+                "Your GitHub sign-in to Alephat is no longer valid, so I can't work as you. "
                 f"Sign in with GitHub again in {settings}, then mention me again."
             )
         }
     return {
         "decline": (
-            "I don't know who you are in Open SWE yet, so I can't work as you. Sign in "
+            "I don't know who you are in Alephat yet, so I can't work as you. Sign in "
             f"with GitHub in {settings}, using the same email as your Linear account, "
             "then mention me again."
         )
@@ -103,7 +103,7 @@ def _not_allowed(repo: Mapping[str, str]) -> LinearDecline:
     return {
         "decline": (
             f"I'm not allowed to work in `{repo['owner']}/{repo['name']}`. Name a repository "
-            "Open SWE may work in, or ask your Open SWE admin to allow this one."
+            "Alephat may work in, or ask your Alephat admin to allow this one."
         )
     }
 
@@ -283,10 +283,10 @@ class LinearSessionTurn:
         return await author.default_repo(), None
 
     async def _signed_in_author(self) -> User | LinearDecline:
-        """The Open SWE user who wrote the turn, if they can run as themselves on GitHub.
+        """The Alephat user who wrote the turn, if they can run as themselves on GitHub.
 
         Linear only says who wrote it by email, so an author without one, or whose
-        email no Open SWE sign-in carries, is asked to sign in, as Slack asks.
+        email no Alephat sign-in carries, is asked to sign in, as Slack asks.
         """
         user = await User.for_email(self.author.email) if self.author.email else None
         reason: common.AccountLinkReason = "unlinked"

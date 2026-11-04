@@ -1,4 +1,4 @@
-"""Instance-wide opt-in list of repos that Open SWE Review may auto-review.
+"""Instance-wide opt-in list of repos that Alephat Review may auto-review.
 
 Repos default to **disabled** — webhooks for repos absent from the list are
 ignored, so an operator who installs the GitHub App into a new org doesn't get

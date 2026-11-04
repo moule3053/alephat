@@ -260,7 +260,7 @@ async def reconcile_findings_with_review_threads(
     reviewer_thread_id: str,
     review_threads: list[ReviewThread],
 ) -> list[Finding]:
-    """Sync tracked Open SWE findings with the current GitHub review-thread state."""
+    """Sync tracked Alephat findings with the current GitHub review-thread state."""
     by_thread_id, by_comment_id, by_marker_id = _index_review_threads(review_threads)
     states = {
         thread_id: resolved

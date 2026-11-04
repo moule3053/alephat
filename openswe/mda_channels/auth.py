@@ -1,4 +1,4 @@
-"""Only Open SWE's MDA deployment may call the routes its channels hand events to.
+"""Only Alephat's MDA deployment may call the routes its channels hand events to.
 
 The deployment and the backend share ``MDA_SERVICE_SECRET``: MDA signs every call
 its channels make to an endpoint with it, as Standard Webhooks does. MDA already

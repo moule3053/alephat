@@ -1,4 +1,4 @@
-"""Append-only log of verified GitHub, Slack, Linear, and deployment deliveries, and Open SWE's own workspace events.
+"""Append-only log of verified GitHub, Slack, Linear, and deployment deliveries, and Alephat's own workspace events.
 
 Sources in ``ADMIN_ONLY_SOURCES`` are listed and subscribable only from admin threads.
 """

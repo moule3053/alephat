@@ -1,6 +1,6 @@
 """One person's To Review list.
 
-First the pull requests Open SWE assigned them, then those its unclaimed deadline
+First the pull requests Alephat assigned them, then those its unclaimed deadline
 may pick them for, then those linked in Slack threads that mention them, either by
 their GitHub URL or by this deployment's review page. A pull request they already
 approved or requested changes on drops off.

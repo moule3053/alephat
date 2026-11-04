@@ -1555,7 +1555,7 @@ export function useMoveThread(
       if (to === "local") {
         if (!window.openSweDesktop)
           throw new Error(
-            "Open this thread in the Open SWE app to move it here"
+            "Open this thread in the Alephat app to move it here"
           )
         destination = {
           sandbox_bridge_id: await window.openSweDesktop.takeOverThread({

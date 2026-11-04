@@ -418,7 +418,7 @@ async function diffThread(threadId) {
 
 /** Whether the backend has a run in flight on this thread. */
 async function threadRunning(threadId) {
-  if (!backendUrl) throw new Error("Open SWE is not connected to a backend");
+  if (!backendUrl) throw new Error("Alephat is not connected to a backend");
   const response = await backendFetch(
     new URL(
       `/dashboard/api/threads/${encodeURIComponent(threadId)}?mark_viewed=false`,
@@ -438,7 +438,7 @@ async function threadRunning(threadId) {
  * brings its own abort signal; anything else gives up rather than hold a quit.
  */
 async function sendBridgeRequest(method, apiPath, { body, signal }) {
-  if (!backendUrl) throw new Error("Open SWE is not connected to a backend");
+  if (!backendUrl) throw new Error("Alephat is not connected to a backend");
   const response = await backendFetch(
     new URL(`/dashboard/api${apiPath}`, backendUrl).toString(),
     {
@@ -526,7 +526,7 @@ async function followCheckedOutBranch(thread, repo, ref) {
   const target = ref.worktreePath ? managedWorktree(ref.worktreePath) : null;
   if (ref.worktreePath && !target)
     throw new Error(
-      `“${ref.name}” is checked out in ${ref.worktreePath}, which Open SWE does not manage.`,
+      `“${ref.name}” is checked out in ${ref.worktreePath}, which Alephat does not manage.`,
     );
   await moveThreadWorkspace(thread, target);
   sendLocalThreadsChanged();
@@ -621,7 +621,7 @@ function configureDesktopIpc() {
   });
   ipcMain.handle("desktop:copy-page-link", (event) => {
     requireTrustedDesktopIpc(event);
-    if (!backendUrl) throw new Error("Open SWE is not connected to a backend");
+    if (!backendUrl) throw new Error("Alephat is not connected to a backend");
     const source = new URL(event.sender.getURL());
     const target = new URL(backendUrl);
     target.pathname = source.pathname;
@@ -741,7 +741,7 @@ function configureDesktopIpc() {
     const options = {
       type: "warning",
       title: "Remove project",
-      message: `Remove “${project.name}” from Open SWE?`,
+      message: `Remove “${project.name}” from Alephat?`,
       detail: `${project.cwd}\n\nThis does not delete files from your Mac.`,
       buttons: ["Cancel", "Remove"],
       defaultId: 0,
@@ -857,7 +857,7 @@ function configureDesktopIpc() {
     }
     const cwd = await projectForRepo(input.repo);
     if (!cwd)
-      throw new Error(`Add a checkout of ${input?.repo} to Open SWE first`);
+      throw new Error(`Add a checkout of ${input?.repo} to Alephat first`);
     let thread = localThreadStore.create({ id: input?.threadId, cwd });
     try {
       thread = await createThreadWorktree(thread, null);
@@ -928,7 +928,7 @@ function configureDesktopIpc() {
     if (ref?.worktreePath) {
       if (!managedWorktree(ref.worktreePath))
         throw new Error(
-          `“${branch}” is checked out in ${ref.worktreePath}, which Open SWE does not manage.`,
+          `“${branch}” is checked out in ${ref.worktreePath}, which Alephat does not manage.`,
         );
       return moveThreadWorkspace(thread, ref.worktreePath);
     }

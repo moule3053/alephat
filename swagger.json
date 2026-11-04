@@ -508,7 +508,7 @@
         "type": "object"
       },
       "AppUser": {
-        "description": "MDA's ``ResolvedAppUser``: run as this Open SWE user. The only answer besides ``None``.",
+        "description": "MDA's ``ResolvedAppUser``: run as this Alephat user. The only answer besides ``None``.",
         "properties": {
           "id": {
             "title": "Id",
@@ -7733,7 +7733,7 @@
         "type": "object"
       },
       "SlackTrigger": {
-        "description": "Fires on messages in one Slack channel Open SWE is a member of.",
+        "description": "Fires on messages in one Slack channel Alephat is a member of.",
         "properties": {
           "channel": {
             "maxLength": 40,
@@ -14866,7 +14866,7 @@
     },
     "/dashboard/api/repos": {
       "get": {
-        "description": "List repos where Open SWE is installed and the user has access.\n\nServed from the per-login cache (stale-while-revalidate) unless\n``refresh=true``, because the fan-out over every installation takes 10s+\nfor users with hundreds of accessible repos.",
+        "description": "List repos where Alephat is installed and the user has access.\n\nServed from the per-login cache (stale-while-revalidate) unless\n``refresh=true``, because the fan-out over every installation takes 10s+\nfor users with hundreds of accessible repos.",
         "operationId": "list_repos_dashboard_api_repos_get",
         "parameters": [
           {
@@ -23608,7 +23608,7 @@
     },
     "/github/channel/events": {
       "post": {
-        "description": "The run an @openswe mention on an issue starts on the channel's thread, or ``None``.\n\nWhile the thread waits on an interrupt nothing starts: a non-null answer only\ntells the channel Open SWE would act, so it points the issue to the decision.",
+        "description": "The run an @openswe mention on an issue starts on the channel's thread, or ``None``.\n\nWhile the thread waits on an interrupt nothing starts: a non-null answer only\ntells the channel Alephat would act, so it points the issue to the decision.",
         "operationId": "github_channel_event_github_channel_events_post",
         "requestBody": {
           "content": {
@@ -23727,7 +23727,7 @@
     },
     "/mda/resolve-user": {
       "post": {
-        "description": "The Open SWE user a channel's verified sender is, or ``None`` for MDA's default.",
+        "description": "The Alephat user a channel's verified sender is, or ``None`` for MDA's default.",
         "operationId": "resolve_user_mda_resolve_user_post",
         "requestBody": {
           "content": {

@@ -36,7 +36,7 @@ from openswe.webhooks.event_matches import EventMatch, MultitaskStrategy
 
 logger = logging.getLogger(__name__)
 
-# CI results describe a commit, so they matter even when Open SWE pushed it.
+# CI results describe a commit, so they matter even when Alephat pushed it.
 _CI_EVENT_TYPES = frozenset({"check_run", "check_suite", "workflow_run"})
 _MAX_BODY_CHARS = 8_000
 
@@ -260,7 +260,7 @@ class EventSummary(BaseModel):
 
     @classmethod
     def _workspace(cls, event: LoggedEvent, payload: dict[str, JsonValue]) -> Self:
-        """Open SWE's own workspace activity, e.g. a snapshot refresh settling."""
+        """Alephat's own workspace activity, e.g. a snapshot refresh settling."""
         slug = payload.get("workspace_slug")
         return cls(
             source="workspace",

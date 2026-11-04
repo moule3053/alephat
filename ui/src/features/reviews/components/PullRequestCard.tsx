@@ -32,7 +32,7 @@ const assignmentLabels: Partial<
 > = {
   tentative: [
     "May be assigned",
-    "Open SWE may assign you this review if nobody claims it in time",
+    "Alephat may assign you this review if nobody claims it in time",
   ],
   mentioned: ["Mentioned", "Linked in a Slack thread that mentions you"],
 }

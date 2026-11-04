@@ -2,7 +2,7 @@
   "name": "open-swe-cli",
   "version": "0.1.0",
   "private": true,
-  "description": "Open SWE command-line client: runs a cloud agent against a local checkout",
+  "description": "Alephat command-line client: runs a cloud agent against a local checkout",
   "type": "module",
   "scripts": {
     "build": "bun run compile --outfile dist/oswe",

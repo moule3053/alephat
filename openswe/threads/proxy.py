@@ -371,7 +371,7 @@ async def proxy_dashboard_thread_commands(
 async def _sender_user_id(
     principal: Principal, login: str, metadata: Mapping[str, object]
 ) -> str | None:
-    """The Open SWE user a person's own command on a channel's thread acts as there.
+    """The Alephat user a person's own command on a channel's thread acts as there.
 
     The one ``_run_user_metadata`` attributes the person's dashboard runs to, so a
     follow-up has the principal their channel runs have. ``None`` for a machine,

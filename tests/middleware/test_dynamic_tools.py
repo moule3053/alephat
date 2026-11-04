@@ -128,7 +128,7 @@ class _Thread:
         self.loaded = sorted(loaded)
 
 
-_SYSTEM_PROMPT = "You are Open SWE."
+_SYSTEM_PROMPT = "You are Alephat."
 
 
 def _payload(request: _Request) -> dict[str, Any]:

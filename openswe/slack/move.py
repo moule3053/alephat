@@ -1,4 +1,4 @@
-"""Rebind an Open SWE thread from one Slack location to another."""
+"""Rebind an Alephat thread from one Slack location to another."""
 
 import logging
 from collections.abc import Mapping

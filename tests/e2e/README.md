@@ -2,7 +2,7 @@
 
 This drives the **whole happy path** through two mock UIs:
 
-1. A user asks Open SWE to implement something in a **mock Slack** thread.
+1. A user asks Alephat to implement something in a **mock Slack** thread.
 1. The **real agent** runs: its model loop on a local **Managed Deep Agents** server (the real `mda/` project), its tools and middleware on the backend (`langgraph dev`).
    It implements the change in a **sandbox MDA creates**, which a stand-in for LangSmith's sandbox service roots in a local temp dir, pushes a branch, and opens a PR on a **fake GitHub**.
 1. It posts the PR link back to the **same Slack thread** — visible in the mock UI.
@@ -44,7 +44,7 @@ The fake GitHub/Slack stores are the single source of truth the mock UIs render,
 - `sandbox_service.py` — the stand-in for LangSmith's sandbox service, which both the MDA server and the backend open sandboxes through.
 - `patches.py` — monkeypatches the boundaries (LLM, GitHub/Slack URLs, token mint).
 - `agent_entrypoint.py` — langgraph `agent` graph: applies patches in the backend worker, re-exports the read-only `traced_agent`.
-  Every Open SWE thread runs on Managed Deep Agents, whose hooks the backend answers from `agent_catalog`.
+  Every Alephat thread runs on Managed Deep Agents, whose hooks the backend answers from `agent_catalog`.
 - `mda-dev.sh` + `mda_entrypoint.py` — the Managed Deep Agents server: `mda build` output served by `langgraph dev` as `mda dev` serves it, with the fake model and loopback completion webhooks.
 - `harness.py` — langgraph `http.app`: the real `openswe.webapp` plus the fake GitHub/Slack APIs, the mock UIs, and the control/compose endpoints.
 - `fakes.py` — in-memory PR/Slack stores + git seeding of the bare remote.

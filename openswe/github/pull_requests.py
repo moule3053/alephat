@@ -1,6 +1,6 @@
 """Pull requests, owned by a repository and pointing at their threads.
 
-A pull request is the thing Open SWE actually works on across many threads: the
+A pull request is the thing Alephat actually works on across many threads: the
 agent thread that opened it, later threads that repair it, and the reviewer
 thread that reviews it. Before these tables the only way back from a PR to its
 threads was a paginated ``threads.search`` over ``pr_url``/``pr_urls`` metadata
@@ -202,7 +202,7 @@ class PullRequest(Base):
 
     @classmethod
     async def author_user_id_of(cls, pull_request_id: UUID) -> UUID | None:
-        """The Open SWE person who opened that stored PR, or ``None``."""
+        """The Alephat person who opened that stored PR, or ``None``."""
         if not postgres.configured():
             return None
         async with postgres.session() as session:
@@ -305,7 +305,7 @@ class PullRequest(Base):
         )
 
     async def is_authored_by(self, login: str) -> bool:
-        """Whether ``login`` resolves to the same Open SWE user as this PR's author."""
+        """Whether ``login`` resolves to the same Alephat user as this PR's author."""
         commenter = await User.for_login("github", login)
         if commenter is None:
             return False

@@ -15,7 +15,7 @@ export interface ConversationAuthor {
   login: string
   avatar_url: string
   bot: boolean
-  /** Set when Open SWE posted through this person's GitHub account; `login` is then Open SWE. */
+  /** Set when Alephat posted through this person's GitHub account; `login` is then Alephat. */
 }
 
 interface Posted {

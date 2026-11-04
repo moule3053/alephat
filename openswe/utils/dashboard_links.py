@@ -78,7 +78,7 @@ def _dashboard_origins() -> set[str]:
 
 
 def dashboard_thread_id(locator: str) -> str | None:
-    """Extract a thread id from a raw id or Open SWE dashboard URL."""
+    """Extract a thread id from a raw id or Alephat dashboard URL."""
     value = locator.strip().strip("<>")
     if "|" in value:
         value = value.split("|", 1)[0]

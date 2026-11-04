@@ -1,6 +1,6 @@
 """Slack thread and run mappings moved out of the LangGraph Store.
 
-``slack_thread_mapping`` binds a Slack thread to its Open SWE thread, or holds
+``slack_thread_mapping`` binds a Slack thread to its Alephat thread, or holds
 the nonce a detached one is resolved with next. ``slack_run_mapping`` holds the
 runs started for each Slack thread, the latest ``started_at`` being the thread's
 current run, and ``slack_message_mapping`` the run behind each bot message.

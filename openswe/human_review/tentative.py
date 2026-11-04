@@ -16,7 +16,7 @@ _KEY = "tentative_reviewers"
 
 
 class TentativeReviewers:
-    """The people Open SWE may pick for ``request``, by ``users.id``, cached in its run config."""
+    """The people Alephat may pick for ``request``, by ``users.id``, cached in its run config."""
 
     def __init__(self, request: HumanReviewRequest) -> None:
         self.request = request

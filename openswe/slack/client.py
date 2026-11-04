@@ -170,7 +170,7 @@ def slack_message_bot_name(message: dict[str, Any]) -> str:
 
 
 def is_own_slack_message(message: dict[str, Any], bot_user_id: str) -> bool:
-    """Whether Open SWE itself posted this Slack message.
+    """Whether Alephat itself posted this Slack message.
 
     Only the authoring user id proves it. A display name cannot: any app may post
     under our configured username, and treating that as proof would hide a third
@@ -486,7 +486,7 @@ def format_slack_messages_for_prompt(
         text = text or ("[forwarded message]" if forwarded else "[non-text message]")
         user_id = message.get("user")
         if is_own_slack_message(message, bot_user_id):
-            author = f"@{bot_username or 'Open SWE'}(self)"
+            author = f"@{bot_username or 'Alephat'}(self)"
         elif slack_message_bot_id(message):
             author = f"@{slack_message_bot_name(message)}(bot)"
         else:
@@ -2001,7 +2001,7 @@ async def get_active_slack_thread(
     thread_id: str | None,
     fallback: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Return the active Slack location stored on an Open SWE thread."""
+    """Return the active Slack location stored on an Alephat thread."""
     if thread_id:
         try:
             thread = await langgraph_client.threads.get(thread_id)

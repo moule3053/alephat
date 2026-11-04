@@ -393,7 +393,7 @@ test.afterEach(async ({ request }) => {
 });
 
 test.describe("threads workspace", () => {
-  test("LangSmith Agent Workspace uses Open SWE threads without a mode switch", async ({
+  test("LangSmith Agent Workspace uses Alephat threads without a mode switch", async ({
     page,
     request,
   }) => {

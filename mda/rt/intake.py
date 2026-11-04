@@ -1,8 +1,8 @@
-"""Where this deployment's channels ask the Open SWE backend what each event starts.
+"""Where this deployment's channels ask the Alephat backend what each event starts.
 
 MDA's channels verify each delivery and own their conversations: they start the
 runs on their threads. Each channel's ``on_event`` names the backend's endpoint for
-it, which decides the rest, as for any Open SWE run, and answers with the run to
+it, which decides the rest, as for any Alephat run, and answers with the run to
 start, or nothing. MDA signs every call with the deployment's
 ``MDA_SERVICE_SECRET``, and the backend verifies it.
 """

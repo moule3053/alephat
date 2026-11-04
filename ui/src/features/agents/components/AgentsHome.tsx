@@ -510,7 +510,7 @@ export function AgentsHome({
     }
     if (localRun && !localCheckout && !desktop?.taskWorkspaces) {
       setLocalError(
-        "Update Open SWE Desktop to start without selecting a folder."
+        "Update Alephat Desktop to start without selecting a folder."
       )
       return
     }
@@ -614,7 +614,7 @@ export function AgentsHome({
           setLocalError(
             error instanceof Error
               ? error.message
-              : "Could not start the Open SWE agent"
+              : "Could not start the Alephat agent"
           )
         }
         return

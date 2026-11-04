@@ -896,7 +896,7 @@ async def test_the_model_the_backend_names_gets_a_replayable_history(
         invocation_id="invocation-1",
         catalog=_models(ModelSpec(model_id="anthropic:claude-opus-5-5", kwargs={})),
     )
-    _answering(monkeypatch, backend, _preparing(rendered_system_prompt="You are Open SWE."))
+    _answering(monkeypatch, backend, _preparing(rendered_system_prompt="You are Alephat."))
     # As the agent orders them: the guards inside the middleware that names the model.
     middleware = cast(
         list[AgentMiddleware],
@@ -946,7 +946,7 @@ async def test_the_anthropic_model_the_backend_names_caches_for_an_hour(
         monkeypatch,
         backend,
         _preparing(
-            rendered_system_prompt="You are Open SWE.\n\nThis thread is yours.",
+            rendered_system_prompt="You are Alephat.\n\nThis thread is yours.",
             rendered_thread_prompt="This thread is yours.",
         ),
     )
@@ -1010,7 +1010,7 @@ async def test_a_stalled_model_call_goes_to_the_fallback_model(
         fallback=ModelSpec(model_id="anthropic:claude-sonnet-5-5", kwargs={}),
     )
     backend = _run_backend(invocation_id="invocation-1", catalog=_models(model))
-    _answering(monkeypatch, backend, _preparing(rendered_system_prompt="You are Open SWE."))
+    _answering(monkeypatch, backend, _preparing(rendered_system_prompt="You are Alephat."))
     middleware = cast(
         list[AgentMiddleware],
         [
@@ -1694,7 +1694,7 @@ async def test_a_run_without_an_mda_sandbox_offloads_a_large_result_to_its_own_f
     async def no_inputs(_runtime: ManagedServerRuntime) -> NoInputs:
         return NoInputs()
 
-    # A shared graph, as Open SWE's is: compiled for no one run.
+    # A shared graph, as Alephat's is: compiled for no one run.
     @shared_factory(no_inputs)
     def shared(_inputs: NoInputs) -> DeepAgentDefinition:
         return define_deep_agent(
@@ -1866,7 +1866,7 @@ async def _launch_worker(
         # The launch middleware reads this context, though it declares no context type.
         context={"graph": "agent", "__run_token": "coordinator-token"},  # ty: ignore[invalid-argument-type]
     )
-    # Open SWE's task messages report the worker; deepagents does not poll it too.
+    # Alephat's task messages report the worker; deepagents does not poll it too.
     assert not values.get("async_tasks")
     return [m for m in values["messages"] if isinstance(m, ToolMessage)], calls
 
@@ -1883,7 +1883,7 @@ async def test_a_launched_worker_carries_a_grant_never_its_coordinators_run_toke
         client,
         also=[
             {"name": "check_async_task", "args": {"task_id": "worker-thread"}, "id": "check-1"},
-            # An update would interrupt the worker; Open SWE queues messages instead.
+            # An update would interrupt the worker; Alephat queues messages instead.
             {
                 "name": "update_async_task",
                 "args": {"task_id": "worker-thread", "message": "Stop"},

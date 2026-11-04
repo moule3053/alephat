@@ -1,6 +1,6 @@
 """Add short links.
 
-A short link redirects a short Open SWE URL to a stored target URL, so the agent
+A short link redirects a short Alephat URL to a stored target URL, so the agent
 can hand people a URL it copies reliably in place of a long signed one.
 """
 

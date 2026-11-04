@@ -17,7 +17,7 @@ from openswe.github.http import GITHUB_API_BASE, github_client, github_request
 logger = logging.getLogger(__name__)
 _MEMBERSHIP_REQUEST_TIMEOUT = 5.0
 
-# The GitHub Apps Open SWE acts as; events they send are Open SWE's own.
+# The GitHub Apps Alephat acts as; events they send are Alephat's own.
 OPEN_SWE_GITHUB_LOGINS: frozenset[str] = frozenset(
     {"open-swe[bot]", "open-swe-preview[bot]", "openswe-dev[bot]"}
 )

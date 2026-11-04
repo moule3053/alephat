@@ -1,4 +1,4 @@
-"""Admin announcements: one message DMed to everyone Open SWE can reach on Slack.
+"""Admin announcements: one message DMed to everyone Alephat can reach on Slack.
 
 Recipients are fixed when the announcement is created, one
 ``announcement_delivery`` row each, so a send that is retried or resumed after a

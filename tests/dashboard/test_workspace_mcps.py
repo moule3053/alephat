@@ -220,7 +220,7 @@ def test_invalid_connection_is_rejected(fields):
         "mda/github-token",
         "mda/slack-bot-token",
         "mda/linear-token",
-        # Open SWE's own: web search's key and a person's GitHub App user token.
+        # Alephat's own: web search's key and a person's GitHub App user token.
         "open-swe-exa",
         "open-swe-github-prod",
     ],

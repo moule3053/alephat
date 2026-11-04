@@ -22,7 +22,7 @@ const focused = new WeakSet<CommentDraftTarget>()
 
 /**
  * The comment box on a line range. The same words can go to the author, as
- * part of your GitHub review, or to Open SWE.
+ * part of your GitHub review, or to Alephat.
  */
 export function Composer({
   pr,
@@ -75,7 +75,7 @@ export function Composer({
           rows={4}
           resize="vertical"
           value={body}
-          placeholder="Leave a comment, or ask Open SWE about these lines"
+          placeholder="Leave a comment, or ask Alephat about these lines"
           onChange={setBody}
           onKeyDown={(event) => {
             if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -119,7 +119,7 @@ export function Composer({
           </Button>
           <Button type="submit" size="sm">
             <AgentMark />
-            Ask Open SWE
+            Ask Alephat
             <Kbd variant="inherit">{askKey}</Kbd>
           </Button>
         </div>

@@ -51,7 +51,7 @@ READ_ONLY: Final = (
 
 
 def for_mda(metadata: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
-    """Metadata as MDA keeps it: there every Open SWE graph is ``open-swe``."""
+    """Metadata as MDA keeps it: there every Alephat graph is ``open-swe``."""
     copied = dict(metadata)
     if "graph_id" in copied:
         copied["graph_id"] = MDA_GRAPH_ID
@@ -221,7 +221,7 @@ class ThreadStore:
     ) -> CommandReply:
         """Answer one protocol v2 command as the thread's runtime does.
 
-        ``user_id`` is the Open SWE user who sent it, which a run or an answer on a
+        ``user_id`` is the Alephat user who sent it, which a run or an answer on a
         channel's thread acts as; without one it is the channel's own, for no person.
         """
         try:

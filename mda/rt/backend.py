@@ -1,4 +1,4 @@
-"""The Open SWE backend this deployment calls back into, as the current run.
+"""The Alephat backend this deployment calls back into, as the current run.
 
 MDA builds a thread's graph once for all its runs, so the graph holds no run of its
 own: each call finds the run in progress (``current_run``) in the context LangGraph
@@ -322,9 +322,7 @@ def current_run() -> Run:
     """The run in progress, which every call the graph makes acts as."""
     context = get_runtime().context
     if not isinstance(context, RunContext):
-        raise BackendCallError(
-            "This run carries no Open SWE run context; start it through Open SWE"
-        )
+        raise BackendCallError("This run carries no Alephat run context; start it through Alephat")
     return context.run()
 
 
@@ -339,7 +337,7 @@ class RunLocal[T]:
 
 
 class RunContext(BaseModel):
-    """What Open SWE dispatch passes as the run context.
+    """What Alephat dispatch passes as the run context.
 
     LangGraph hands every node of a run the same instance, so the run it describes
     (``run``) is found there by every call the run makes, its subagents' included.
@@ -368,7 +366,7 @@ class RunContext(BaseModel):
 
 
 class OpenSweBackend:
-    """The Open SWE backend, called as one run: ``run``, or else the run in progress."""
+    """The Alephat backend, called as one run: ``run``, or else the run in progress."""
 
     def __init__(self, run: Run | None = None) -> None:
         base = os.environ.get(BACKEND_URL_ENV, "").strip().rstrip("/")
@@ -430,7 +428,7 @@ class OpenSweBackend:
         bearer = self.run.bearer
         if bearer is None:
             raise BackendCallError(
-                "This run carries no Open SWE run token; start it through Open SWE"
+                "This run carries no Alephat run token; start it through Alephat"
             )
         headers = {
             **(TurnTrace.current_headers() if trace is None else trace),

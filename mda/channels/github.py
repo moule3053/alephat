@@ -1,4 +1,4 @@
-"""GitHub, through Open SWE's own App: @openswe mentions on issues.
+"""GitHub, through Alephat's own App: @openswe mentions on issues.
 
 The App's webhook stays at the backend's ``/webhooks/github``, which forwards the
 issue events that would start a run here as GitHub sent them. Pull requests,

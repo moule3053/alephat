@@ -1,4 +1,4 @@
-"""Open SWE's typed view of a LangGraph thread."""
+"""Alephat's typed view of a LangGraph thread."""
 
 import hashlib
 from typing import Self
@@ -27,7 +27,7 @@ class OsweThreadValues(BaseModel):
 
 
 class OsweThreadState(BaseModel):
-    """Open SWE's typed view of a LangGraph thread's saved state."""
+    """Alephat's typed view of a LangGraph thread's saved state."""
 
     model_config = ConfigDict(extra="ignore")
 

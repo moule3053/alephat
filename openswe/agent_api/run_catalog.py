@@ -55,7 +55,7 @@ from openswe.utils.model import provider_model_kwargs
 # MDA's own deep agent runs subagents and code.
 _SYNC_SUBAGENT_TOOL: Final = "task"
 _MDA_TOOLS: Final = frozenset({_SYNC_SUBAGENT_TOOL, "eval"})
-# deepagents' async subagent tools. Open SWE launches a task worker with the first,
+# deepagents' async subagent tools. Alephat launches a task worker with the first,
 # wherever the thread may delegate; its task tools track the worker from then on.
 _LAUNCH_WORKER_TOOL: Final = "start_async_task"
 _ASYNC_TASK_TOOLS: Final = frozenset(

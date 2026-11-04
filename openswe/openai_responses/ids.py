@@ -1,4 +1,4 @@
-"""Response and item ids that name the Open SWE thread they came from.
+"""Response and item ids that name the Alephat thread they came from.
 
 A client that resends its whole history instead of ``previous_response_id``
 still echoes these ids back, which is how a stateless request finds its thread.

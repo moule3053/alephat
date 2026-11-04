@@ -174,7 +174,7 @@ class McpServer:
         """The connection's credential now; a person who has not granted it is asked to."""
         connection = self.spec.connection
         if not connection.for_mcp_server:
-            # The backend names none other; this keeps a credential Open SWE or a channel
+            # The backend names none other; this keeps a credential Alephat or a channel
             # reads for itself from a URL an admin or a person picked, if it ever did.
             raise McpServerError("not a connection made for MCP servers")
         return await connections.get(connection.slug, {"type": connection.owner})
@@ -226,7 +226,7 @@ class McpServer:
         if isinstance(error, ConnectionNotFoundError):
             return (
                 f"MCP server {self.spec.name}'s connection {slug} is not set; create it with "
-                f"`mda connections create {slug}` from Open SWE's MDA project"
+                f"`mda connections create {slug}` from Alephat's MDA project"
             )
         if isinstance(error, CredentialAuthorizationRequiredError):
             return f"MCP server {self.spec.name} needs {slug}, which was not connected"

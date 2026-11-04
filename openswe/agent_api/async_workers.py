@@ -1,4 +1,4 @@
-"""Task workers launched as MDA async subagents, made ordinary Open SWE workers.
+"""Task workers launched as MDA async subagents, made ordinary Alephat workers.
 
 The coordinator's MDA run launches the worker itself, with deepagents'
 ``start_async_task``, as a run of the ``open-swe--general-purpose`` graph on a
@@ -153,7 +153,7 @@ async def adopt(grant: WorkerGrant, body: Adopt) -> Adopted:
 
 @dataclass(frozen=True)
 class LaunchedRun:
-    """A worker's first run, which MDA started with Open SWE's completion webhook."""
+    """A worker's first run, which MDA started with Alephat's completion webhook."""
 
     thread_id: str
     run_id: str

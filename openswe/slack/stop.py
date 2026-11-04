@@ -142,4 +142,4 @@ async def process_agent_session_stopped(
     try:
         await _process_agent_session_stopped(event, event_id, team_id)
     except Exception:  # noqa: BLE001
-        logger.exception("Failed to stop Open SWE from a Slack session stop event")
+        logger.exception("Failed to stop Alephat from a Slack session stop event")

@@ -123,7 +123,7 @@ class ChannelWrite:
 
     On a channel's thread, ``headers`` are MDA's trusted-backend ingress for its
     conversation (:meth:`MdaRuntime.channel_write`); on the backend's own threads there
-    are none, and the write is the backend key's. ``user_id`` is the Open SWE user whose
+    are none, and the write is the backend key's. ``user_id`` is the Alephat user whose
     principal the headers name, only when they name one.
     """
 
@@ -248,7 +248,7 @@ class MdaRuntime:
         messages still reach it. Raises ``ChannelThreadError`` without the secret or
         when MDA names no channel conversation as the thread's owner.
 
-        ``user_id`` is the Open SWE user the write is for, so a person's run here has
+        ``user_id`` is the Alephat user the write is for, so a person's run here has
         the principal their channel runs have (:meth:`user_principal`); without one, or
         when Agent Auth can't name it, the write is the channel's own, for no person, and
         acts as no one (:attr:`ChannelWrite.user_id`).
@@ -284,7 +284,7 @@ class MdaRuntime:
         return ChannelWrite(MappingProxyType(headers), user_id if principal else None)
 
     async def user_principal(self, user_id: str) -> str | None:
-        """The Agent Auth principal an Open SWE user's channel runs have, or ``None``.
+        """The Agent Auth principal an Alephat user's channel runs have, or ``None``.
 
         The backend's ``resolve_user`` names the user (``mda/identity.py``), and MDA
         resolves that as the ``trusted_backend`` identity of the user's id in its

@@ -11,7 +11,7 @@ _GUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F
 class CloudIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # Every Open SWE workspace shares one LangSmith workspace, so a `workspace` subject
+    # Every Alephat workspace shares one LangSmith workspace, so a `workspace` subject
     # would let any of them assume the role; only a governed tag separates them.
     subject_scope: str = Field(pattern=rf"^tag:{_GUID}$")
 
@@ -53,7 +53,7 @@ _UNDELEGATABLE = ("workspaces:manage", "organization:manage", "organization:pats
 class AccessDelegation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # The delegator is Open SWE's own sandbox-creating key, not the person running the
+    # The delegator is Alephat's own sandbox-creating key, not the person running the
     # thread, so a workspace grants a fixed list rather than everything that key holds.
     mode: Literal["EXPLICIT"]
     permissions: list[str] = Field(min_length=1)

@@ -215,7 +215,7 @@ async def test_a_server_read_through_an_mda_connection_is_the_mda_runs_by_tier_p
             "notes": record(
                 "notes", connection=ConnectionRef(slug="open-swe-mcp-notes", owner="user")
             ),
-            # Nor a credential Open SWE or a channel reads for itself, saved before the rule.
+            # Nor a credential Alephat or a channel reads for itself, saved before the rule.
             "github": record(
                 "github", connection=ConnectionRef(slug="mda/github-token", owner="agent")
             ),

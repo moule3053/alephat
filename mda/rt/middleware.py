@@ -1,4 +1,4 @@
-"""The run's middleware around Open SWE's model loop.
+"""The run's middleware around Alephat's model loop.
 
 Preparation is the backend's: it readies the run and writes the graph state the
 loop reads, which rides in ``open_swe_state`` and goes back with every call. Around
@@ -17,7 +17,7 @@ under the subagent, as an in-process run does. Those reports go alongside the
 calls; each phase and reply waits for the ones made before it.
 
 A task worker can run here as an async subagent of its coordinator: launched with
-``start_async_task``, it is an Open SWE worker thread with its own run token.
+``start_async_task``, it is an Alephat worker thread with its own run token.
 """
 
 import asyncio
@@ -119,7 +119,7 @@ _json_content = TypeAdapter(str | list[JsonValue])
 
 DISPLAY_DESCRIPTION: Final = "display_description"
 LAUNCH_WORKER_TOOL: Final = "start_async_task"
-# deepagents' tools for the tasks it tracks; Open SWE's task tools track its workers.
+# deepagents' tools for the tasks it tracks; Alephat's task tools track its workers.
 _TRACKED_BY_OPEN_SWE: Final = frozenset(
     {"check_async_task", "update_async_task", "cancel_async_task", "list_async_tasks"}
 )
@@ -874,12 +874,12 @@ def _transient(error: BaseException) -> bool:
 
 
 class AsyncWorkerLaunchMiddleware(AgentMiddleware):
-    """Launch task workers with deepagents' ``start_async_task``, each an Open SWE worker.
+    """Launch task workers with deepagents' ``start_async_task``, each an Alephat worker.
 
     The launch would hand the worker this run's context, run token included, so the
     worker would act as this run; and deepagents would wake this agent with the
     worker's context when the worker ends. Instead the worker gets a worker grant to
-    adopt a run token of its own, and no assistant of this agent's to wake. Open SWE
+    adopt a run token of its own, and no assistant of this agent's to wake. Alephat
     registers it under this agent's task and returns its results as task messages,
     so deepagents does not track the task here, and its own task tools stay unused.
 
@@ -905,7 +905,7 @@ class AsyncWorkerLaunchMiddleware(AgentMiddleware):
             return _refused(
                 tool_call["name"],
                 tool_call_id,
-                "Open SWE tracks its workers itself: use task_status, message_task_thread "
+                "Alephat tracks its workers itself: use task_status, message_task_thread "
                 "or control_worker instead.",
             )
         if tool_call["name"] != LAUNCH_WORKER_TOOL:
@@ -936,7 +936,7 @@ class AsyncWorkerLaunchMiddleware(AgentMiddleware):
                 return _worker_message(reply.worker, tool_call_id)
             if reply.grant is None or reply.assignment is None:
                 raise BackendCallError("launch_worker returned no grant")
-            # The worker is told its assignment as Open SWE words it, not the bare description.
+            # The worker is told its assignment as Alephat words it, not the bare description.
             launched_call = ToolCall(
                 name=tool_call["name"],
                 args={**tool_call["args"], "description": reply.assignment},

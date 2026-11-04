@@ -90,7 +90,7 @@ export function ReviewedPullRequests({
         )}
         {reviews.data && items.length === 0 && (
           <p className="px-space-4 py-space-3 text-xs text-secondary">
-            No reviews yet. Enable repositories under Open SWE Review settings
+            No reviews yet. Enable repositories under Alephat Review settings
             and open a PR.
           </p>
         )}

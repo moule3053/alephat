@@ -1,6 +1,6 @@
 """Typed views of what Slack posts to the webhooks.
 
-Only the fields Open SWE reads are declared; everything else is kept
+Only the fields Alephat reads are declared; everything else is kept
 (``extra="allow"``) so nothing Slack sends is lost on the way through.
 """
 
@@ -92,7 +92,7 @@ class SlackMessage(SlackPayload):
 
 
 class SlackEvent(SlackPayload):
-    """The ``event`` of an Events API callback, across every event type Open SWE subscribes to."""
+    """The ``event`` of an Events API callback, across every event type Alephat subscribes to."""
 
     type: str = ""
     subtype: str = ""
@@ -259,7 +259,7 @@ class SlackView(SlackPayload):
 
 
 class SlackModalOrigin(SlackPayload):
-    """The channel a modal was opened from, as Open SWE packs it into ``private_metadata``."""
+    """The channel a modal was opened from, as Alephat packs it into ``private_metadata``."""
 
     channel_id: str = ""
 
@@ -307,7 +307,7 @@ class SlackInteraction(SlackPayload):
 
 
 class SlackButtonValue(SlackPayload):
-    """The JSON Open SWE packs into a button's ``value`` to know what was clicked."""
+    """The JSON Alephat packs into a button's ``value`` to know what was clicked."""
 
     type: str = ""
     action: str = ""

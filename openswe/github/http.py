@@ -227,7 +227,7 @@ def github_reauth_message(login: str | None = None) -> str:
     person = f" for {login}" if login else ""
     url = f"{dashboard_base_url() or dashboard_api_base_url()}/my-settings/connections"
     return (
-        f"GitHub token unavailable{person}. Link GitHub again in Open SWE's connections "
+        f"GitHub token unavailable{person}. Link GitHub again in Alephat's connections "
         f"settings: {url}. Then retry the action."
     )
 
@@ -319,7 +319,7 @@ class GitHubClient:
         permissions: Mapping[str, str] | None = None,
         timeout: httpx2.Timeout | float | None = None,
     ) -> AsyncIterator[Self]:
-        """Acts as the Open SWE GitHub App: ``installation_id``, else its installation on
+        """Acts as the Alephat GitHub App: ``installation_id``, else its installation on
         ``owner/repo``, else the default installation.
 
         ``permissions`` narrows the token to them, and to ``repo`` alone.

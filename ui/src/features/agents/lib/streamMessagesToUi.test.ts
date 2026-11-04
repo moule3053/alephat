@@ -111,7 +111,7 @@ describe("streamMessagesToUi", () => {
       new HumanMessage({
         id: "self-entity",
         content:
-          '<dynamic-context kind="system" id="system:open-swe">\ndisplay_name: Open SWE\nsender_type: self\n</dynamic-context>',
+          '<dynamic-context kind="system" id="system:open-swe">\ndisplay_name: Alephat\nsender_type: self\n</dynamic-context>',
       }),
       new HumanMessage({
         id: "self-message",

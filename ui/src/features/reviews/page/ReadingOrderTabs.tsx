@@ -2,7 +2,7 @@ import { GroupedTabs } from "@langchain/macaw-components/GroupedTabs"
 
 import { useReviewPage } from "./store"
 
-/** Open SWE's walkthrough or plain tree order, for both the file list and the diff. */
+/** Alephat's walkthrough or plain tree order, for both the file list and the diff. */
 export function ReadingOrderTabs({
   steps,
   files,
@@ -24,7 +24,7 @@ export function ReadingOrderTabs({
         {
           value: "guide",
           display: `Walkthrough · ${steps}`,
-          tooltip: "Open SWE's reading order",
+          tooltip: "Alephat's reading order",
         },
         {
           value: "files",

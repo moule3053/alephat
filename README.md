@@ -24,7 +24,7 @@
 
 Alephat turns engineering work into a repeatable system: investigate a codebase, implement changes, validate them, and deliver a pull request.
 It also reviews pull requests, learns repository-specific review preferences, monitors CI, and responds to feedback.
-Built on Open SWE and Deep Agents by LangChain, it is open source and deployable in your infrastructure.
+Built on Alephat and Deep Agents by LangChain, it is open source and deployable in your infrastructure.
 
 > [!NOTE]
 > Alephat is under active development.
@@ -32,7 +32,7 @@ Built on Open SWE and Deep Agents by LangChain, it is open source and deployable
 
 ---
 
-Alephat is a fork of [Open SWE](https://github.com/langchain-ai/open-swe) with a standalone Kubernetes platform.
+Alephat is a fork of [Alephat](https://github.com/langchain-ai/open-swe) with a standalone Kubernetes platform.
 See [the platform guide](docs/PLATFORM.md) and the GKE deployment guide below.
 The current upstream runtime requires Python 3.14 or newer; the platform images and dependency lockfile use that runtime.
 
@@ -62,7 +62,7 @@ Cloud coding follow-ups reuse the thread’s context and sandbox; independent th
 
 [Deep Agents](https://github.com/langchain-ai/deepagents) supplies planning, filesystem, shell, skills, and subagent primitives.
 [LangGraph](https://github.com/langchain-ai/langgraph) provides durable execution and thread state.
-Open SWE adds engineering tools, integrations, authorization, and user interfaces.
+Alephat adds engineering tools, integrations, authorization, and user interfaces.
 The graph entrypoints are declared in [`langgraph.json`](langgraph.json), with an [architecture inventory](AGENTS.md#architecture).
 
 Cloud coding runs in persistent, per-thread Linux sandboxes with tooling supplied by workspace scripts or snapshots.

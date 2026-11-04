@@ -437,7 +437,7 @@ def repo_context_bar_items(
     pr_url: str = "",
     dashboard_url: str = "",
 ) -> list[dict[str, Any]]:
-    """Build the standard context bar for an Open SWE session."""
+    """Build the standard context bar for an Alephat session."""
     items: list[dict[str, Any]] = []
     owner = (repo or {}).get("owner", "")
     name = (repo or {}).get("name", "")

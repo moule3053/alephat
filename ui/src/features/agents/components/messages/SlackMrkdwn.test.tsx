@@ -7,13 +7,13 @@ import { SlackMrkdwn } from "./SlackMrkdwn"
 describe("SlackMrkdwn", () => {
   it("resolves bare user mentions without changing explicit labels or code", () => {
     const client = new QueryClient()
-    client.setQueryData(["slackUserName", "U0917JZ8NLB"], { name: "Open SWE" })
+    client.setQueryData(["slackUserName", "U0917JZ8NLB"], { name: "Alephat" })
     const html = renderToStaticMarkup(
       <QueryClientProvider client={client}>
         <SlackMrkdwn text="<@U0917JZ8NLB> <@U0917JZ8NLB|bot> `<@U0917JZ8NLB>`" />
       </QueryClientProvider>
     )
-    expect(html).toContain("@Open SWE")
+    expect(html).toContain("@Alephat")
     expect(html).toContain("bot")
     expect(html).toContain("&lt;@U0917JZ8NLB&gt;")
   })

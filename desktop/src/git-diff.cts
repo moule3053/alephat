@@ -428,9 +428,9 @@ async function captureCheckpoint(repo, ref) {
       ],
       {
         ...process.env,
-        GIT_AUTHOR_NAME: "Open SWE",
+        GIT_AUTHOR_NAME: "Alephat",
         GIT_AUTHOR_EMAIL: "open-swe@users.noreply.github.com",
-        GIT_COMMITTER_NAME: "Open SWE",
+        GIT_COMMITTER_NAME: "Alephat",
         GIT_COMMITTER_EMAIL: "open-swe@users.noreply.github.com",
       },
     ),

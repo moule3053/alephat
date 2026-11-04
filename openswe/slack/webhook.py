@@ -210,7 +210,7 @@ _SLACK_CONTEXT_SENDER_ID = "system:slack-context"
 async def _slack_accounts_by_user_id(
     user_ids: list[str],
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """GitHub logins and person entity ids of the linked Open SWE accounts behind Slack users."""
+    """GitHub logins and person entity ids of the linked Alephat accounts behind Slack users."""
     users = await User.for_identities("slack", user_ids)
     logins = {user_id: user.github_login for user_id, user in users.items() if user.github_login}
     person_ids = {user_id: f"user:{user.id}" for user_id, user in users.items()}
@@ -252,7 +252,7 @@ def _slack_sender(
 ) -> tuple[str, PersonIdentity | SystemIdentity, MessageKind]:
     """Resolve a thread message to its sender id, identity, and message kind.
 
-    Open SWE's own replies never reach here — the model wrote them and already has
+    Alephat's own replies never reach here — the model wrote them and already has
     them — so a message carrying a ``bot_id`` is somebody else's app.
     """
     bot_id = slack_utils.slack_message_bot_id(message)
@@ -351,7 +351,7 @@ def _slack_context_input(
 
     add_context(channel_introduction(channel))
     # An edit's `event_ts` matches no message, and the approve-button path passes
-    # the ts of Open SWE's own button message, so matching history attributes the
+    # the ts of Alephat's own button message, so matching history attributes the
     # run to nobody or to the bot. The caller already knows who triggered it.
     trigger_id = trigger_user_id or next(
         (
@@ -564,7 +564,7 @@ async def notify_slack_processing_error(
 
 @dataclass(frozen=True)
 class AccountLinkNeeded:
-    """A Slack user Open SWE can't start a run for until they connect their account."""
+    """A Slack user Alephat can't start a run for until they connect their account."""
 
     user_id: str
     user_email: str | None
@@ -1101,7 +1101,7 @@ async def _process_slack_mention_impl(
                 if image_block:
                     content_blocks.append(cast(dict[str, Any], image_block))
 
-    # Open SWE opens PRs as the triggering user, so a run only proceeds when we
+    # Alephat opens PRs as the triggering user, so a run only proceeds when we
     # have a valid user GitHub token. Users who have never signed in with
     # GitHub, and users whose stored authorization is no longer usable, are
     # blocked and prompted to set up via the dashboard. Bot-token-only
@@ -1180,7 +1180,7 @@ async def _process_slack_mention_impl(
         )
         if section
     )
-    # A thread started under a DM Open SWE sent for another thread is about that thread's work.
+    # A thread started under a DM Alephat sent for another thread is about that thread's work.
     dm_origin = (
         await DmOrigin.of(channel_id, thread_ts)
         if is_first_mention
@@ -1283,7 +1283,7 @@ async def _process_slack_mention_impl(
         static_title=concierge_mode,
         source_context=source_context,
         workspace=thread_workspace,
-        # Everyone who has spoken in the Slack thread keeps their Open SWE
+        # Everyone who has spoken in the Slack thread keeps their Alephat
         # participant credit, so a later message from any one of them refreshes
         # the whole set rather than only the latest sender.
         slack_participant_user_ids=slack_participant_ids(context_messages)
@@ -1324,7 +1324,7 @@ async def _process_slack_mention_impl(
             files_section = slack_files_section(staged_files)
             turn_context = f"{turn_context}\n\n{files_section}" if turn_context else files_section
 
-    # Anything said in a DM is said to Open SWE, and the person expects the next
+    # Anything said in a DM is said to Alephat, and the person expects the next
     # thing they type to redirect the work in front of them rather than queue
     # behind it. A review guide's turns wait instead: interrupting one mid-post
     # loses the chunk it was showing.

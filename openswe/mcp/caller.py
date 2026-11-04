@@ -1,4 +1,4 @@
-"""A person calling Open SWE's agent tools from outside any thread.
+"""A person calling Alephat's agent tools from outside any thread.
 
 The remote MCP server serves this catalog: every agent tool opted in with
 ``@expose_mcp``, plus the integration MCPs the person may use in a private
@@ -76,17 +76,15 @@ class ToolCaller:
 
     @classmethod
     async def for_github_account(cls, external_id: str) -> Self:
-        """The Open SWE user who owns this GitHub account, if they may still sign in."""
+        """The Alephat user who owns this GitHub account, if they may still sign in."""
         from openswe.users import User
         from openswe.users.authorization import is_authorized_github_login
 
         user = await User.for_identity("github", external_id)
         if user is None or not user.github_login:
-            raise PermissionError("Sign in to the Open SWE dashboard before connecting over MCP")
+            raise PermissionError("Sign in to the Alephat dashboard before connecting over MCP")
         if not await is_authorized_github_login(user.github_login):
-            raise PermissionError(
-                "Your GitHub account is not authorized for this Open SWE instance"
-            )
+            raise PermissionError("Your GitHub account is not authorized for this Alephat instance")
         return cls(login=user.github_login, email=user.email or None)
 
     @property

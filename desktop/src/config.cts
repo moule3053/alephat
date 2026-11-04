@@ -2,11 +2,11 @@ const path = require("node:path");
 
 const APP_ORIGIN = "open-swe://app";
 const APP_URL = `${APP_ORIGIN}/`;
-const APP_NAME = "Open SWE";
-const DEVELOPMENT_APP_NAME = "Open SWE Development";
+const APP_NAME = "Alephat";
+const DEVELOPMENT_APP_NAME = "Alephat Development";
 const APP_USER_MODEL_ID = "com.langchain.openswe";
 const DEVELOPMENT_APP_USER_MODEL_ID = "com.langchain.openswe.dev";
-const DEVELOPMENT_USER_DATA_DIRECTORY = "Open SWE Development";
+const DEVELOPMENT_USER_DATA_DIRECTORY = "Alephat Development";
 const { DEFAULT_DEVELOPMENT_BACKEND_URL } = require("./shared-config.js");
 const ALLOWED_PERMISSIONS = new Set([
   "clipboard-sanitized-write",
@@ -28,7 +28,7 @@ function resolveAppRuntime({ argv, isPackaged, appDataPath }) {
       : APP_USER_MODEL_ID,
     userDataPath: path.join(
       appDataPath,
-      isDevelopment ? DEVELOPMENT_USER_DATA_DIRECTORY : "Open SWE",
+      isDevelopment ? DEVELOPMENT_USER_DATA_DIRECTORY : "Alephat",
     ),
   };
 }

@@ -1,1 +1,1 @@
-"""Utility scripts for working with Open SWE thread and PR data."""
+"""Utility scripts for working with Alephat thread and PR data."""

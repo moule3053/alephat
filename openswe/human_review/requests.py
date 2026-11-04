@@ -5,7 +5,7 @@ a tiny pull request: it pins the head SHA the card was posted for and a fingerpr
 of the diff it drew, and one approval from someone other than the author completes
 it. A ``standard`` request is a card in the repository's review channel that people
 sign up to review on GitHub; it merges once they approve. A ``posted`` request is
-someone's own message linking the pull request in its review channel: Open SWE never
+someone's own message linking the pull request in its review channel: Alephat never
 edits it, only reacts to it when the pull request is approved or merged, and never
 merges.
 
@@ -55,7 +55,7 @@ RequestKind = Literal["expedited", "standard", "posted"]
 RequestState = Literal["open", "merged", "rejected", "superseded", "cancelled"]
 # ``approve`` and ``reject`` are Slack votes on an expedited card; ``review`` is a
 # person signed up to review a standard request on GitHub; ``picked`` is someone
-# Open SWE asked who has not accepted yet, so the request is still open to anyone;
+# Alephat asked who has not accepted yet, so the request is still open to anyone;
 # ``expired`` is a pick that was not accepted in time, kept so it is not picked again.
 ParticipantDecision = Literal["approve", "reject", "review", "picked", "expired"]
 SUPPLEMENTARY_REVIEWS_KEY = "supplementary_reviews"
@@ -168,7 +168,7 @@ class HumanReviewRequest(Base):
 
     @property
     def has_card(self) -> bool:
-        """Whether the Slack message is Open SWE's card rather than someone's own post."""
+        """Whether the Slack message is Alephat's card rather than someone's own post."""
         return self.kind != "posted"
 
     @property
@@ -193,12 +193,12 @@ class HumanReviewRequest(Base):
 
     @property
     def picks(self) -> list[HumanReviewParticipant]:
-        """People Open SWE asked to review who have not accepted yet."""
+        """People Alephat asked to review who have not accepted yet."""
         return [p for p in self.participants if p.decision == "picked"]
 
     @property
     def auto_assign_asked(self) -> bool:
-        """Someone asked Open SWE to find this request a reviewer."""
+        """Someone asked Alephat to find this request a reviewer."""
         return AUTO_ASSIGN_ASKED in self.run_config
 
     @property
@@ -232,7 +232,7 @@ class HumanReviewRequest(Base):
 
     @property
     def auto_approved(self) -> str:
-        """What Open SWE's review judged the approval criteria already cover besides the condition."""
+        """What Alephat's review judged the approval criteria already cover besides the condition."""
         return next((e["reason"] for e in self.excluded_hunks if e.get("approval_condition")), "")
 
     def participant(self, user_id: UUID) -> HumanReviewParticipant | None:
@@ -297,7 +297,7 @@ class HumanReviewRequest(Base):
 
     @classmethod
     async def assigned_to(cls, user_id: UUID) -> list[Self]:
-        """Open review requests for which Open SWE explicitly picked this person."""
+        """Open review requests for which Alephat explicitly picked this person."""
         async with postgres.session() as session:
             rows = await session.scalars(
                 cls._loaded(select(cls))
@@ -464,7 +464,7 @@ class HumanReviewRequest(Base):
 
     @classmethod
     async def card_in_thread(cls, channel_id: str, thread_ts: str) -> Self | None:
-        """The Open SWE review-request card this Slack thread holds, with its pull request."""
+        """The Alephat review-request card this Slack thread holds, with its pull request."""
         if not postgres.configured():
             return None
         async with postgres.session() as session:

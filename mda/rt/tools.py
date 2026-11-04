@@ -1,4 +1,4 @@
-"""The run's tools, each one calling an operation of the Open SWE backend for its work.
+"""The run's tools, each one calling an operation of the Alephat backend for its work.
 
 They carry the names, descriptions and argument schemas the backend gives its
 operations, so the prompts, the transcript and the dashboard see what an
@@ -57,11 +57,11 @@ logger = logging.getLogger(__name__)
 
 STATE_KEY: Final = "open_swe_state"
 _TIMED_OUT: Final = (
-    "Error: Open SWE did not answer this tool call in time. Whatever it started may "
+    "Error: Alephat did not answer this tool call in time. Whatever it started may "
     "still be running in the sandbox; check before running it again."
 )
 _UNREACHABLE: Final = (
-    "Error: The Open SWE backend could not be reached for this tool call. "
+    "Error: The Alephat backend could not be reached for this tool call. "
     "It may or may not have run; check state before retrying."
 )
 _NO_CONNECTION: Final = (

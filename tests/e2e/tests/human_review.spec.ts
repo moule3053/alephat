@@ -161,7 +161,7 @@ async function channelMessages(
   return (await res.json()) as Array<SlackMessage>;
 }
 
-/** The DM telling someone Open SWE picked them, once it arrives. */
+/** The DM telling someone Alephat picked them, once it arrives. */
 async function pickedDm(
   request: APIRequestContext,
   channel: string,
@@ -785,7 +785,7 @@ test.describe("Human review in Slack", () => {
     expect((await latestRequest(request)).picks).toEqual([]);
     await expect
       .poll(async () => cardText(await reviewCard(request, posted)))
-      .toContain("picked by Open SWE");
+      .toContain("picked by Alephat");
     await shootCard(page, "assigned");
 
     await loginAs(page, BOB);
@@ -818,7 +818,7 @@ test.describe("Human review in Slack", () => {
       }),
     ).toBeVisible();
     await page
-      .getByRole("button", { name: "Back to Open SWE assignments" })
+      .getByRole("button", { name: "Back to Alephat assignments" })
       .click();
     await expect(
       page.getByRole("button", {
@@ -837,7 +837,7 @@ test.describe("Human review in Slack", () => {
     expect((await latestRequest(request)).state).toBe("merged");
   });
 
-  test("nobody signs up, so the thread's agent picks the code owner Open SWE suggests; they accept from their DM and their approval merges it", async ({
+  test("nobody signs up, so the thread's agent picks the code owner Alephat suggests; they accept from their DM and their approval merges it", async ({
     page,
     request,
   }) => {
@@ -870,8 +870,8 @@ test.describe("Human review in Slack", () => {
     });
     const posted = await latestRequest(request);
 
-    // 2. Nobody signs up: Open SWE suggests Bob from CODEOWNERS, and the agent owning
-    //    the card's thread picks him with Open SWE's reason.
+    // 2. Nobody signs up: Alephat suggests Bob from CODEOWNERS, and the agent owning
+    //    the card's thread picks him with Alephat's reason.
     await control(request, "/control/human-review-deadline", {
       request_id: posted.id,
       step: "unclaimed",
@@ -1072,7 +1072,7 @@ test.describe("Human review in Slack", () => {
     await showSlack(page, dmChannel, "decline-3-dm-declined");
 
     // 6. The card thread's agent is told why and picks the other code owner, whom
-    //    Open SWE suggests now that the first one is out.
+    //    Alephat suggests now that the first one is out.
     await expect
       .poll(async () => (await latestRequest(request)).picks, {
         timeout: 90_000,
@@ -1147,7 +1147,7 @@ test.describe("Human review in Slack", () => {
         cardText(await reviewCard(request, await latestRequest(request))),
       )
       .toContain(
-        "Review request: dismissed by Open SWE: posted with the wrong summary",
+        "Review request: dismissed by Alephat: posted with the wrong summary",
       );
   });
 

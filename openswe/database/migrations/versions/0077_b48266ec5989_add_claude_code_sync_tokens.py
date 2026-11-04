@@ -1,7 +1,7 @@
 """Add Claude Code sync tokens.
 
 A person's Claude Code hooks present one of these to mirror their sessions into
-Open SWE. Only the token's digest is kept, and revoking one deletes its row.
+Alephat. Only the token's digest is kept, and revoking one deletes its row.
 """
 
 from alembic import op

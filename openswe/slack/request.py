@@ -1,4 +1,4 @@
-"""One Slack message or interaction addressed to Open SWE, as the routes hand it to processing."""
+"""One Slack message or interaction addressed to Alephat, as the routes hand it to processing."""
 
 from pydantic import BaseModel, Field
 
@@ -22,7 +22,7 @@ class SlackRequest(BaseModel):
     bot_user_id: str = ""
     triggering_bot_id: str = ""
     triggering_bot_app_id: str = ""
-    # Open SWE wrote the request; ``user_id`` is only who the run acts for.
+    # Alephat wrote the request; ``user_id`` is only who the run acts for.
     trigger_system: SystemIdentity | None = None
     thread_id: str | None = None
     channel_context: SlackChannelContext | None = None

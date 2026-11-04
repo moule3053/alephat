@@ -843,7 +843,7 @@ export function SidebarThreadRow({
             : worktreeThread.managedTaskFolder
               ? `This deletes the conversation. Its task files are kept at ${worktreeThread.cwd}.`
               : worktreeThread.ownedWorktrees.length
-                ? "This deletes the worktree Open SWE created for it, including any uncommitted changes in it. Its branch and commits are kept."
+                ? "This deletes the worktree Alephat created for it, including any uncommitted changes in it. Its branch and commits are kept."
                 : "This removes its history but does not revert changes made to your repository."
         }
       />

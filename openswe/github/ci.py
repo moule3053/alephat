@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 # excluded: they're rarely a code problem the agent can fix.
 FAILING_CONCLUSIONS: frozenset[str] = frozenset(["failure", "timed_out", "action_required"])
 
-# Check runs Open SWE itself produces; never treat them as fixable CI.
-_OPEN_SWE_CHECK_NAMES: frozenset[str] = frozenset([REVIEW_CHECK_RUN_NAME, "Open SWE Auto-fix"])
+# Check runs Alephat itself produces; never treat them as fixable CI.
+_OPEN_SWE_CHECK_NAMES: frozenset[str] = frozenset([REVIEW_CHECK_RUN_NAME, "Alephat Auto-fix"])
 
 
 @dataclass(frozen=True, slots=True)

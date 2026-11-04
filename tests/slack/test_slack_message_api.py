@@ -353,7 +353,7 @@ async def test_a_notice_is_not_repeated_while_the_thread_still_ends_with_it(
 
     for _ in range(2):
         assert await completion._post_failure_reply("t1", metadata, status, reason_code)
-    thread.append({"ts": "9.0", "text": "@Open SWE stop please"})
+    thread.append({"ts": "9.0", "text": "@Alephat stop please"})
     assert await completion._post_failure_reply("t1", metadata, status, reason_code)
 
     failure = completion._failure_text(status, reason_code=reason_code)
@@ -361,7 +361,7 @@ async def test_a_notice_is_not_repeated_while_the_thread_still_ends_with_it(
         "Fix it",
         sandbox.key,
         failure,
-        "@Open SWE stop please",
+        "@Alephat stop please",
         failure,
     ]
 

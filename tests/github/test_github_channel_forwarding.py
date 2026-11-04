@@ -53,7 +53,7 @@ async def _deliver(event_type: str, payload: dict[str, JsonValue]) -> tuple[http
 
 @pytest.fixture
 def intake(monkeypatch: pytest.MonkeyPatch) -> dict[str, AsyncMock]:
-    """Open SWE's own PR dispatch, and the forward to MDA, as stand-ins."""
+    """Alephat's own PR dispatch, and the forward to MDA, as stand-ins."""
     monkeypatch.setattr(webhook_common, "GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET)
     monkeypatch.setattr(github_routes, "repo_is_routable", AsyncMock(return_value=True))
     monkeypatch.setattr(

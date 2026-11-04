@@ -58,7 +58,7 @@ class ExpeditedReviewNomination:
                 "This diff already has an open card; no new one was posted. "
                 if reused
                 else "The approval card is posted. "
-            ) + "Once someone approves, Open SWE starts a thread that merges it. Do not poll."
+            ) + "Once someone approves, Alephat starts a thread that merges it. Do not poll."
         if elsewhere:
             return (
                 "This diff already has a card, so it stays in the Slack thread named here, not "
@@ -123,7 +123,7 @@ class ExpeditedReviewNomination:
         return audited.hunks
 
     async def approval_condition(self, author: str, head_sha: str) -> ApprovalCondition | None:
-        """The condition Open SWE's review of ``head_sha`` would approve on, if the author opted in."""
+        """The condition Alephat's review of ``head_sha`` would approve on, if the author opted in."""
         if not (await User.preferences_for_login(author)).experimental_conditional_approval:
             return None
         pr_ref = self.pr_ref
@@ -229,14 +229,14 @@ class ExpeditedReviewNomination:
                 f"Eligible changes touch at most {MAX_CHANGED_LINES} lines outside tests and "
                 "exclusions, and every one of those files has to have a readable text diff. Test "
                 f"files are not counted, and `excluded` leaves out hunks that qualify under the "
-                f"target repository's `{APPROVALS_PATH}`. When Open SWE's review of the current "
+                f"target repository's `{APPROVALS_PATH}`. When Alephat's review of the current "
                 "head would approve subject to human approval of the PR's condition, the card "
                 "shows that condition instead of the diff. Otherwise ask for a normal review."
             )
 
         if await User.for_login("github", payload.author) is None:
             raise ExpeditedReviewIneligible(
-                "Expedited review is only available for PRs authored by Open SWE users."
+                "Expedited review is only available for PRs authored by Alephat users."
             )
         settings = await RepoSettings.cached(pr_ref.owner, pr_ref.repo)
         review_channel = settings.channel_for_files([file.filename for file in files])
@@ -392,7 +392,7 @@ class ExpeditedReviewNomination:
             and await send_dm(
                 requester.slack_user_id,
                 f"Expedited review requested for <{pr_ref.url}|{pr_ref.repo}#{pr_ref.number}> "
-                f"in <#{channel_id}>. Open SWE merges it once someone approves.",
+                f"in <#{channel_id}>. Alephat merges it once someone approves.",
             )
         ):
             next_step = f"{next_step} The person was sent a Slack DM pointing to the card."

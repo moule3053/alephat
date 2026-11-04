@@ -87,7 +87,7 @@ def delete_slack_message(channel: str, message_ts: str) -> bool:
 
 
 def add_ephemeral(channel: str, user: str, text: str) -> str:
-    """Record an ephemeral reply. Open SWE tells a single clicker things this way
+    """Record an ephemeral reply. Alephat tells a single clicker things this way
     (why a vote was refused, for one), so a test has to be able to read them."""
     ts = next_slack_ts()
     EPHEMERALS.append({"channel": channel, "user": user, "text": text, "ts": ts})
@@ -138,7 +138,7 @@ def create_code_channel(payload: dict[str, Any]) -> dict[str, Any]:
     channel_id = f"C_CODE_{_code_channel_seq[0]}"
     channel = {
         "id": channel_id,
-        "name": str(payload.get("name") or "Open SWE task"),
+        "name": str(payload.get("name") or "Alephat task"),
         "session_id": str(payload.get("session_id") or ""),
         "origin_channel_id": str(payload.get("origin_channel_id") or ""),
         "origin_message_ts": str(payload.get("origin_message_ts") or ""),

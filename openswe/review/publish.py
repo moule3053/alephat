@@ -116,7 +116,7 @@ def render_inline_comment_body(finding: Finding) -> str:
         *(Refers to lines X-Y)*
 
         ---
-        *Your feedback helps Open SWE learn. React with 👍 or 👎 to tell us if this review comment was useful.*
+        *Your feedback helps Alephat learn. React with 👍 or 👎 to tell us if this review comment was useful.*
 
         ```suggestion
         <replacement>
@@ -148,7 +148,7 @@ def render_inline_comment_body(finding: Finding) -> str:
         [
             "",
             "---",
-            "*Your feedback helps Open SWE learn. React with 👍 or 👎 to tell us if this review comment was useful.*",
+            "*Your feedback helps Alephat learn. React with 👍 or 👎 to tell us if this review comment was useful.*",
         ]
     )
     body = "\n".join(body_parts)
@@ -241,10 +241,10 @@ def render_inline_comment_payload(finding: Finding) -> dict[str, Any] | None:
 
 
 def review_summary_marker(pr_number: int) -> str:
-    """The hidden marker embedded in every Open SWE review summary body.
+    """The hidden marker embedded in every Alephat review summary body.
 
     Used both to stamp the summary (``render_review_body``) and to detect
-    (``open_swe_review_exists``) whether Open SWE has already reviewed a PR.
+    (``open_swe_review_exists``) whether Alephat has already reviewed a PR.
     """
     return f"<!-- open-swe-reviewer pr={pr_number} -->"
 
@@ -420,14 +420,14 @@ def render_review_body(
     has_additional = additional_findings_count > 0
     if surfaced_count == 0 and not out_of_diff_findings:
         headline = (
-            "## ✅ Open SWE Review: No issues found\n\n"
-            "Open SWE reviewed this PR and found no potential bugs to report."
+            "## ✅ Alephat Review: No issues found\n\n"
+            "Alephat reviewed this PR and found no potential bugs to report."
         )
     elif surfaced_count == 0:
-        headline = "**Open SWE Review** found no issues in the changed lines."
+        headline = "**Alephat Review** found no issues in the changed lines."
     else:
         issue_word = "issue" if surfaced_count == 1 else "issues"
-        headline = f"**Open SWE Review** found {surfaced_count} potential {issue_word}."
+        headline = f"**Alephat Review** found {surfaced_count} potential {issue_word}."
 
     parts = [headline]
     if has_additional:
@@ -461,7 +461,7 @@ def render_review_body(
             + "\n\n</details>"
         )
         feedback_link = (
-            f", or [rate the latest assessment in Open SWE]({ui_url}#assessment-feedback)"
+            f", or [rate the latest assessment in Alephat]({ui_url}#assessment-feedback)"
             if ui_url
             else ""
         )
@@ -470,7 +470,7 @@ def render_review_body(
     if ui_url:
         links.append(f"[Open in Web]({ui_url})")
     if trace_url:
-        links.append(f"[View Open SWE trace]({trace_url})")
+        links.append(f"[View Alephat trace]({trace_url})")
     if links:
         parts.append(" • ".join(links))
     parts.append(review_summary_marker(pr_number))
@@ -494,13 +494,13 @@ def render_status_comment(
     "Open in Web" link while the run is live; deleted once ``publish_review``
     posts the review (which carries the same link).
     """
-    parts = ["## 🔍 Open SWE Review: in progress\n\nOpen SWE is reviewing this PR…"]
+    parts = ["## 🔍 Alephat Review: in progress\n\nAlephat is reviewing this PR…"]
     links = []
     ui_url = dashboard_thread_url(thread_id) if thread_id else None
     if ui_url:
         links.append(f"[Open in Web]({ui_url})")
     if trace_url:
-        links.append(f"[View Open SWE trace]({trace_url})")
+        links.append(f"[View Alephat trace]({trace_url})")
     if links:
         parts.append(" • ".join(links))
     parts.append(status_comment_marker(pr_number))
@@ -514,9 +514,9 @@ def render_failed_status_comment(*, pr_number: int, thread_id: str, reason: str)
     it when it starts or publishes.
     """
     parts = [
-        "## ⚠️ Open SWE Review: couldn't run\n\n"
-        f"Open SWE stopped before it could review this PR: {reason}. "
-        "Push a commit or re-request a review from Open SWE to run it again."
+        "## ⚠️ Alephat Review: couldn't run\n\n"
+        f"Alephat stopped before it could review this PR: {reason}. "
+        "Push a commit or re-request a review from Alephat to run it again."
     ]
     if ui_url := dashboard_thread_url(thread_id):
         parts.append(f"[Open in Web]({ui_url})")
@@ -621,7 +621,7 @@ async def settle_review_check_run(
     title: str,
     summary: str,
 ) -> None:
-    """Complete the tracked ``Open SWE Review`` check run, if one is open.
+    """Complete the tracked ``Alephat Review`` check run, if one is open.
 
     The dispatching webhook stores ``review_check_run_id`` in reviewer thread
     metadata when it creates the check. No-op when none is tracked. The id is
@@ -670,19 +670,19 @@ async def open_swe_review_exists(
     pr_number: int,
     token: str,
 ) -> bool | None:
-    """Return whether Open SWE has already posted a review summary on this PR.
+    """Return whether Alephat has already posted a review summary on this PR.
 
     Detected via the ``review_summary_marker`` that ``render_review_body``
-    embeds in every Open SWE review body. The reviewer uses this to avoid
+    embeds in every Alephat review body. The reviewer uses this to avoid
     posting a duplicate "No issues found" summary when the ``re_review`` config
     flag is stale — a push that lands mid-run is delivered as a queued message
     into the still-running first-review run, whose configurable still says
     ``re_review=False``, so the empty-review guard can't trust that flag alone.
 
     Tri-state on purpose:
-    - ``True``  — an Open SWE review summary was found.
+    - ``True``  — an Alephat review summary was found.
     - ``False`` — the full review list was paginated successfully and carried
-      no Open SWE summary.
+      no Alephat summary.
     - ``None``  — the answer is unknown because an API call (or a page partway
       through pagination) failed. Callers must not treat ``None`` as "no review
       exists": the old fail-open-as-False behaviour double-posted "no issues"

@@ -276,7 +276,7 @@ for (const review of [false, true]) {
     await editor.press("Enter");
     await expect
       .poll(() => desktop.titles())
-      .toContain("alice mentioned you in Open SWE");
+      .toContain("alice mentioned you in Alephat");
     await notificationReceived;
     await desktop.click(0);
     await expect(recipient).toHaveURL(/\/agents\/[0-9a-f-]{36}$/);
@@ -285,7 +285,7 @@ for (const review of [false, true]) {
     expect(
       dms
         .slice(beforeDms)
-        .filter((n) => n.text.includes("alice mentioned you in Open SWE")),
+        .filter((n) => n.text.includes("alice mentioned you in Alephat")),
     ).toHaveLength(0);
     await recipient.close();
   });

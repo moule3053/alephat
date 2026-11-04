@@ -562,7 +562,7 @@ async def upsert_agent_thread_metadata(
     is ``token_repositories``, the repositories the thread's GitHub token is
     narrowed to (see :mod:`openswe.github.token_scope`).
     Slack events on an existing thread also pass ``slack_participant_user_ids`` so
-    every linked human in the Slack thread becomes an Open SWE participant of the
+    every linked human in the Slack thread becomes an Alephat participant of the
     agent thread.
     """
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
@@ -966,9 +966,9 @@ AccountLinkReason = Literal["revoked", "unlinked"]
 
 
 async def account_link_reason(login: str | None) -> AccountLinkReason | None:
-    """Why ``login`` must sign in to Open SWE before starting a run, or ``None``.
+    """Why ``login`` must sign in to Alephat before starting a run, or ``None``.
 
-    Open SWE acts on GitHub as the person who asked, so a run needs their usable
+    Alephat acts on GitHub as the person who asked, so a run needs their usable
     GitHub token. ``"unlinked"``: they never signed in with GitHub. ``"revoked"``:
     the stored authorization is no longer usable. A failed read asks them to sign
     in rather than starting a run that can't act as them.
@@ -1008,7 +1008,7 @@ async def post_account_link_prompt(
 
     ``reason`` is ``"unlinked"`` (never signed in with GitHub) or ``"revoked"``
     (signed in before, but the stored GitHub authorization is no longer usable).
-    Open SWE opens PRs as the triggering user, so it cannot start until the user
+    Alephat opens PRs as the triggering user, so it cannot start until the user
     has signed in with GitHub and connected their Slack account in the dashboard.
 
     Posts a plain, token-free dashboard link as a visible threaded reply. The
@@ -1025,12 +1025,12 @@ async def post_account_link_prompt(
     if reason == "revoked":
         text = (
             "🔐 Your GitHub sign-in is no longer valid, so I can't resolve your GitHub "
-            f"account. Re-connect it in <{settings_url}|your Open SWE settings>, then tag me again."
+            f"account. Re-connect it in <{settings_url}|your Alephat settings>, then tag me again."
         )
     else:
         text = (
             "👋 I couldn't resolve your GitHub account from Slack. Sign in with GitHub and "
-            f"connect your Slack account in <{settings_url}|your Open SWE settings>, then tag me "
+            f"connect your Slack account in <{settings_url}|your Alephat settings>, then tag me "
             "again."
         )
     try:
@@ -1305,7 +1305,7 @@ async def track_review_check_run(
             token=token,
             conclusion="neutral",
             title="Superseded by a newer review",
-            summary="A newer Open SWE review run replaced this one.",
+            summary="A newer Alephat review run replaced this one.",
         )
     ]
     await set_reviewer_thread_metadata(

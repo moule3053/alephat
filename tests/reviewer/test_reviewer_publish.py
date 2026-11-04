@@ -1168,7 +1168,7 @@ async def test_publication_respects_the_base_policy_and_current_mode(
     assert result["success"] is True
     assert post.await_args is not None
     assert post.await_args.kwargs["event"] == expected_event
-    # Every earlier Open SWE approval goes; only an approval this publish posted may stand.
+    # Every earlier Alephat approval goes; only an approval this publish posted may stand.
     assert withdraw.await_args is not None
     assert withdraw.await_args.kwargs["keep_review_id"] == (
         77 if expected_event == "APPROVE" else None

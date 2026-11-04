@@ -1,4 +1,4 @@
-# ngrok traffic policy for a local Open SWE backend: only the webhook endpoints are public.
+# ngrok traffic policy for a local Alephat backend: only the webhook endpoints are public.
 # Under `langgraph dev` the LangGraph API (threads, runs, assistants, store) has no authentication,
 # so everything but the signature-checked webhooks must stay on localhost. `make tunnel` passes
 # this file to `ngrok http 2024`; any other tunnel needs an equivalent allowlist.

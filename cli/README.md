@@ -1,6 +1,6 @@
 # oswe CLI
 
-`oswe` starts a normal cloud Open SWE agent on a remote deployment and makes the current directory on the machine running it that agent's sandbox.
+`oswe` starts a normal cloud Alephat agent on a remote deployment and makes the current directory on the machine running it that agent's sandbox.
 The remote agent's shell commands, file uploads and file downloads all execute here.
 
 The deployment cannot dial that machine, so the CLI long-polls the backend for sandbox requests, runs them locally, and posts the results back.
@@ -20,7 +20,7 @@ brew install --cask langchain-ai/tap/open-swe-desktop
 If you installed the cask before it linked `oswe`, run `brew reinstall --cask open-swe-desktop` once to get the link (a plain `brew upgrade` skips auto-updating casks).
 
 For Intel Macs, Linux, or just the CLI, use a standalone download.
-Every desktop release, stable and nightly, ships `oswe` inside the app at `Open SWE.app/Contents/Resources/bin/oswe` and as standalone downloads for `darwin-arm64`, `darwin-x64`, `linux-arm64` and `linux-x64` with an `oswe-SHA256SUMS` file.
+Every desktop release, stable and nightly, ships `oswe` inside the app at `Alephat.app/Contents/Resources/bin/oswe` and as standalone downloads for `darwin-arm64`, `darwin-x64`, `linux-arm64` and `linux-x64` with an `oswe-SHA256SUMS` file.
 The macOS binaries are signed and notarized.
 
 ```sh

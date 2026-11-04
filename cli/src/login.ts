@@ -10,7 +10,7 @@ function page(heading: string, detail: string): string {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Open SWE</title>
+<title>Alephat</title>
 <style>
   :root { color-scheme: light dark }
   body {
@@ -38,7 +38,7 @@ const SIGNED_IN_PAGE = page(
 )
 const FAILED_PAGE = page(
   "Sign-in failed",
-  "Open SWE did not receive a sign-in code. Try `oswe login` again."
+  "Alephat did not receive a sign-in code. Try `oswe login` again."
 )
 
 function openBrowser(url: string): void {

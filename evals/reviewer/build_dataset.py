@@ -99,7 +99,7 @@ def upload(dataset_name: str, examples: list[dict]) -> None:
         sys.exit(1)
     ds = client.create_dataset(
         dataset_name=dataset_name,
-        description="Open SWE Reviewer baseline — 50 PRs from withmartian/code-review-benchmark goldens.",
+        description="Alephat Reviewer baseline — 50 PRs from withmartian/code-review-benchmark goldens.",
     )
     client.create_examples(
         dataset_id=ds.id,

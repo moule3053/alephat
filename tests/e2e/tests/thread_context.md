@@ -152,8 +152,8 @@ standing_instructions:
 </dynamic-context>
 ```
 
-## Turn 6: Carol, with no Open SWE account, chimes in
-Given: Carol never signed in to Open SWE, so nothing links her Slack account to a GitHub one
+## Turn 6: Carol, with no Alephat account, chimes in
+Given: Carol never signed in to Alephat, so nothing links her Slack account to a GitHub one
 When: she replies: can it handle unicode?
 Then: no run starts and the thread is untouched; Slack gets an account-link prompt instead
 

@@ -24,7 +24,7 @@ from openswe.run_config import RunConfig
 
 logger = logging.getLogger(__name__)
 
-#: Run metadata naming the Open SWE user a run acts as, whose own connections it reads.
+#: Run metadata naming the Alephat user a run acts as, whose own connections it reads.
 #: Only the backend writes it, and only for a run that person started: a channel's run,
 #: which MDA starts as its verified sender, or one they started from the dashboard on a
 #: channel's thread, which the thread router starts as their principal. The run's
@@ -83,7 +83,7 @@ def operation_connections(operation: str, config: RunnableConfig) -> list[Connec
 
 
 def acting_user(metadata: Mapping[str, object]) -> str | None:
-    """The Open SWE user the run ``metadata`` describes acts as (``ACTING_USER_KEY``)."""
+    """The Alephat user the run ``metadata`` describes acts as (``ACTING_USER_KEY``)."""
     user_id = metadata.get(ACTING_USER_KEY)
     return user_id if isinstance(user_id, str) and user_id.strip() else None
 

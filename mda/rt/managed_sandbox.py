@@ -137,7 +137,7 @@ def _planned(runtime: object) -> tuple[Run, SandboxSpec] | None:
         run = _run_of(runtime)
         spec = run.planned.sandbox
     except BackendCallError:
-        # Not started yet, or not an Open SWE run, so nothing may open a sandbox for it.
+        # Not started yet, or not an Alephat run, so nothing may open a sandbox for it.
         return None
     return None if spec is None else (run, spec)
 

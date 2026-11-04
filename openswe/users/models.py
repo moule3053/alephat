@@ -1,7 +1,7 @@
 """People, and the provider identities they sign in with.
 
 One ``users`` row is one person: a synthetic UUIDv7 that stays the same however
-they reach Open SWE. Each ``user_identity`` row is one provider account — a
+they reach Alephat. Each ``user_identity`` row is one provider account — a
 GitHub user or a Slack member — keyed by the provider's immutable
 ``external_id``, so a renamed GitHub login or a new Slack workspace changes a
 column rather than a person's identity. Tables that need to name a person
@@ -228,7 +228,7 @@ class User(Base):
     async def canonical_person(cls, person: PersonIdentity) -> PersonIdentity:
         """``person`` re-keyed on the ``users`` row behind it, unchanged when unknown.
 
-        One person reaching Open SWE from Slack and from the dashboard is one
+        One person reaching Alephat from Slack and from the dashboard is one
         entity the model can match across surfaces, instead of two whose
         relationship it has to infer. Provider handles stay on the record.
 
@@ -723,7 +723,7 @@ def _known(**values: str) -> dict[str, str]:
 
 
 async def _authorize(provider: Provider, login: str) -> None:
-    """Refuse to create a person who may not use Open SWE.
+    """Refuse to create a person who may not use Alephat.
 
     GitHub membership is the only proof of authorization, so a Slack account
     reaches a user record by ``link``-ing to one, never by creating its own.
@@ -735,4 +735,4 @@ async def _authorize(provider: Provider, login: str) -> None:
             "Refused to create a user for an unauthorized GitHub login",
             extra={"github_login": login},
         )
-        raise UnauthorizedUser(f"{login or '(no login)'} is not authorized to use Open SWE")
+        raise UnauthorizedUser(f"{login or '(no login)'} is not authorized to use Alephat")

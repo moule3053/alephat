@@ -1,4 +1,4 @@
-"""The Slack reaction that tags Open SWE on the message it is added to."""
+"""The Slack reaction that tags Alephat on the message it is added to."""
 
 import logging
 
@@ -36,7 +36,7 @@ async def process_slack_summon_reaction(
     bot_user_id: str,
     team_id: str,
 ) -> None:
-    """Treat a summon reaction as its reactor tagging Open SWE on the reacted-to message."""
+    """Treat a summon reaction as its reactor tagging Alephat on the reacted-to message."""
     if ENV.OPENSWE_ENV.optional() in {"preview", "staging"}:
         return
     item = event.item
@@ -48,7 +48,7 @@ async def process_slack_summon_reaction(
         or user_id == bot_user_id
     ):
         return
-    # Every message there already reaches Open SWE, so a reaction adds nothing.
+    # Every message there already reaches Alephat, so a reaction adds nothing.
     if is_dm_channel(channel_context) or await is_code_channel(item.channel):
         return
     message = await fetch_slack_thread_message_by_ts(item.channel, item.ts, item.ts)
@@ -102,7 +102,7 @@ async def _dispatch(request: SlackRequest) -> None:
         )
     except SlackThreadMappingError as exc:
         raise SlackRequestError(
-            "Open SWE found conflicting state for this Slack thread and will not guess "
+            "Alephat found conflicting state for this Slack thread and will not guess "
             "which agent thread to use."
         ) from exc
     repo = await common.get_slack_repo_config(

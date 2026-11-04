@@ -7,7 +7,7 @@ Keep PR titles and bodies concise; do not write essays.
 Focus on bullet points, Mermaid diagrams, and useful code samples or snippets.
 Do not include test-running or validation sections.
 This repository is public.
-Write for a reader who can't see internal repositories, Slack or Notion: say in plain words what a linked private PR or discussion does instead of relying on the link, and explain why Open SWE does something itself rather than only that it does.
+Write for a reader who can't see internal repositories, Slack or Notion: say in plain words what a linked private PR or discussion does instead of relying on the link, and explain why Alephat does something itself rather than only that it does.
 Do not narrate intermediate PR details; describe the final squash-merge outcome.
 For visual changes, include a before/after table with uploaded images or videos.
 Default screenshots to dark mode; request or capture both light and dark mode only when the change affects theme-specific behavior or appearance, or the user explicitly requests both.

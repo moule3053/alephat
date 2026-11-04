@@ -57,7 +57,7 @@ test.describe("Slack Code Channels", () => {
     expect(initialResult.thread_id).toBeTruthy();
     expect(followupResult.thread_id).toBe(initialResult.thread_id);
     await expect(page.locator("#thread")).toContainText(
-      "this unmentioned follow-up reached the same Open SWE session",
+      "this unmentioned follow-up reached the same Alephat session",
     );
     await expect(page.locator(".channel").filter({ hasText: "✦" })).toHaveCount(
       1,

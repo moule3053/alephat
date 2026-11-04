@@ -308,7 +308,7 @@ def parse_langsmith_locator(locator: str) -> LangSmithLocator | None:
 
 
 async def get_open_swe_thread_id_from_langsmith(locator: str) -> str | None:
-    """Resolve a LangSmith thread/run URL or run UUID to its Open SWE thread ID."""
+    """Resolve a LangSmith thread/run URL or run UUID to its Alephat thread ID."""
     parsed = parse_langsmith_locator(locator)
     if parsed is None:
         try:

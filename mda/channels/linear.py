@@ -1,4 +1,4 @@
-"""Linear, through Open SWE's app: mentioning or delegating an issue to it opens a session."""
+"""Linear, through Alephat's app: mentioning or delegating an issue to it opens a session."""
 
 from managed_deepagents import channels
 from rt.intake import backend_endpoint
@@ -10,9 +10,9 @@ backend = backend_endpoint("/linear/channel/events")
 
 channel = channels.linear(
     app={
-        "name": "Open SWE",
+        "name": "Alephat",
         "description": (
-            "Open SWE's coding agent: mention it or delegate an issue to it, and it works "
+            "Alephat's coding agent: mention it or delegate an issue to it, and it works "
             "on the issue's repository and answers in the session."
         ),
     },

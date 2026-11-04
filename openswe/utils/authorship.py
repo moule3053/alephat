@@ -37,7 +37,7 @@ _GITHUB_LOGIN_ALLOWED = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-")
 OPEN_SWE_BOT_NAME = sandbox_setup.GIT_NAME
 OPEN_SWE_BOT_EMAIL = sandbox_setup.GIT_EMAIL
 
-PR_ATTRIBUTION_TEXT = "Made by [Open SWE]"
+PR_ATTRIBUTION_TEXT = "Made by [Alephat]"
 PR_ATTRIBUTION_DEFAULT_URL = "https://github.com/langchain-ai/open-swe"
 PR_ATTRIBUTION_FOOTER = f"{PR_ATTRIBUTION_TEXT}({PR_ATTRIBUTION_DEFAULT_URL})"
 
@@ -48,7 +48,7 @@ def build_pr_attribution_footer(
     model_id: str | None = None,
     reasoning_effort: str | None = None,
 ) -> str:
-    """Build the Open SWE PR footer with the run's model details."""
+    """Build the Alephat PR footer with the run's model details."""
     url = thread_url.strip() if isinstance(thread_url, str) and thread_url.strip() else ""
     footer = PR_ATTRIBUTION_FOOTER
     if url:
@@ -402,7 +402,7 @@ def add_pr_collaboration_note(
     model_id: str | None = None,
     reasoning_effort: str | None = None,
 ) -> str:
-    """Make the Open SWE attribution footer the PR body's last line.
+    """Make the Alephat attribution footer the PR body's last line.
 
     The footer is platform-owned: it names the thread and the model that opened
     the PR, so an existing one — the agent's own, or a legacy double-attribution

@@ -1,6 +1,6 @@
-"""What Open SWE keeps about Slack threads, the runs in them, and its messages there.
+"""What Alephat keeps about Slack threads, the runs in them, and its messages there.
 
-A Slack thread binds to one Open SWE thread. Detaching it leaves a nonce in
+A Slack thread binds to one Alephat thread. Detaching it leaves a nonce in
 place of the binding, so resolving the location again names a fresh thread
 instead of the one that moved away. The thread also records who its untagged
 messages route from and the kickoff message its next reply replaces.
@@ -65,7 +65,7 @@ def _live(expires_at: datetime | None) -> bool:
 
 
 class SlackThread(Base):
-    """A Slack thread: its Open SWE thread, solo-thread routing, and kickoff message."""
+    """A Slack thread: its Alephat thread, solo-thread routing, and kickoff message."""
 
     __tablename__ = "slack_thread"
 
@@ -237,7 +237,7 @@ class SlackRun(Base):
 
 
 class SlackMessage(Base):
-    """A Slack message Open SWE tracks: the run behind it, the channel thread a DM was sent
+    """A Slack message Alephat tracks: the run behind it, the channel thread a DM was sent
     for, and the feedback reactions each person left on it."""
 
     __tablename__ = "slack_message"
@@ -452,7 +452,7 @@ def _at_location(channel_id: str, thread_ts: str) -> ColumnElement[bool]:
 
 
 async def lookup_slack_thread_id(channel_id: str, thread_ts: str) -> str | None:
-    """The Open SWE thread bound to a Slack location."""
+    """The Alephat thread bound to a Slack location."""
     channel, timestamp = normalize_slack_location(channel_id, thread_ts)
     async with postgres.session() as session:
         return await session.scalar(
@@ -461,7 +461,7 @@ async def lookup_slack_thread_id(channel_id: str, thread_ts: str) -> str | None:
 
 
 async def lookup_slack_link_thread_id(url: str) -> str | None:
-    """Resolve a permalink to its bound Open SWE thread, including reply-only links."""
+    """Resolve a permalink to its bound Alephat thread, including reply-only links."""
     from openswe.slack.code_channels import CODE_CHANNEL_SESSION_TS
 
     location = parse_slack_thread_url(url)
@@ -495,14 +495,14 @@ async def lookup_slack_link_thread_id(url: str) -> str | None:
 async def bind_slack_thread_id(
     channel_id: str, thread_ts: str, thread_id: str, *, replacing: str | None = None
 ) -> str:
-    """Bind a Slack location to an Open SWE thread unless another thread holds it.
+    """Bind a Slack location to an Alephat thread unless another thread holds it.
 
     ``replacing`` names the one other thread the location may move from.
     """
     channel, timestamp = normalize_slack_location(channel_id, thread_ts)
     normalized_thread_id = thread_id.strip() if isinstance(thread_id, str) else ""
     if not normalized_thread_id:
-        raise SlackThreadMappingError("Open SWE thread ID is required")
+        raise SlackThreadMappingError("Alephat thread ID is required")
     upsert = insert(SlackThread).values(
         id=uuid7(), channel_id=channel, thread_ts=timestamp, thread_id=normalized_thread_id
     )
@@ -543,7 +543,7 @@ def _thread_metadata_slack_location(thread: Mapping[str, object]) -> tuple[str, 
 async def resolve_slack_thread_id(
     langgraph_client: LangGraphClient, channel_id: str, thread_ts: str
 ) -> str:
-    """The Open SWE thread bound to a Slack location, binding one first if none is.
+    """The Alephat thread bound to a Slack location, binding one first if none is.
 
     A location bound to a thread that takes no new activity moves to its successor.
     """
@@ -579,7 +579,7 @@ async def resolve_slack_thread_id(
         and candidate
     }
     if len(matching_ids) > 1:
-        raise SlackThreadMappingError("Multiple Open SWE threads match this Slack location")
+        raise SlackThreadMappingError("Multiple Alephat threads match this Slack location")
 
     candidate = next(
         iter(matching_ids),

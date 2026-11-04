@@ -166,7 +166,7 @@ async def test_assess_readiness_does_not_wait_on_an_open_swe_review(
             "check_runs",
             AsyncMock(
                 return_value=[
-                    {"name": "Open SWE Review", "status": "in_progress"},
+                    {"name": "Alephat Review", "status": "in_progress"},
                     {"name": "unit", "status": "completed", "conclusion": "success"},
                 ]
             ),

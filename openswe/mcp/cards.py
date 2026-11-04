@@ -2,7 +2,7 @@
 
 The agent offers a card in a private thread for the services the owner asked to use
 and has not connected in the workspace's LMT gateway (every unconnected service, when
-the gateway offers no tools until all are connected). Each button opens Open SWE, which
+the gateway offers no tools until all are connected). Each button opens Alephat, which
 mints LMT's single-use consent link only for the card's owner, waits for that consent to
 finish, and queues one follow-up run once the card's services work. Waiting happens in
 the dashboard process that minted the link; if it restarts, the person says "continue".
@@ -159,7 +159,7 @@ class ConnectCard(BaseModel):
             )
 
     def button_url(self, slug: str) -> str:
-        """Where a Slack button sends the person: Open SWE, never LMT's link itself."""
+        """Where a Slack button sends the person: Alephat, never LMT's link itself."""
         path = f"/dashboard/api/my-managed-tools/{self.gateway}/connect/{quote(slug, safe='')}"
         query = urlencode({"thread_id": self.thread_id, "card": self.card_id})
         return f"{dashboard_api_base_url()}{path}?{query}"

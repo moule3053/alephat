@@ -1,4 +1,4 @@
-"""Turning a local coding-agent session into an Open SWE thread that continues its work."""
+"""Turning a local coding-agent session into an Alephat thread that continues its work."""
 
 import codecs
 import logging

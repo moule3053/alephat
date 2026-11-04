@@ -61,7 +61,7 @@ export default defineConfig({
   webServer: [
     {
       // The real mda/ project on Managed Deep Agents' local dev server, where
-      // every Open SWE thread runs its model loop. Only the LLM is faked.
+      // every Alephat thread runs its model loop. Only the LLM is faked.
       command: "tests/e2e/mda-dev.sh",
       cwd: repoRoot,
       url: `http://127.0.0.1:${MDA_PORT}/ok`,

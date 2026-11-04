@@ -178,7 +178,7 @@ async def test_an_issue_mention_starts_a_run_on_the_channels_thread(
 @pytest.mark.parametrize(
     ("event", "payload"),
     [
-        # Pull request conversations stay on Open SWE's own intake.
+        # Pull request conversations stay on Alephat's own intake.
         ("issue_comment.created", _comment_payload(pull_request={"url": "https://x"})),
         ("issues.opened", _issue_payload(issue={**_issue_payload()["issue"], "body": "no tag"})),
         # Another deployment's handle is not this one's.
@@ -207,7 +207,7 @@ async def test_an_unregistered_commenter_starts_nothing(
     prepared.assert_not_awaited()
     # One line says why the channel was told nothing starts.
     [record] = [r for r in caplog.records if hasattr(r, "no_run_reason")]
-    assert record.no_run_reason == "Sender is not a registered Open SWE user"
+    assert record.no_run_reason == "Sender is not a registered Alephat user"
     assert record.endpoint == "github"
 
 
@@ -229,8 +229,8 @@ async def test_the_public_repository_gate_applies(
 async def test_a_waiting_thread_is_only_asked_whether_open_swe_acts(prepared: AsyncMock) -> None:
     response = await _post(_event("issue_comment.created", _comment_payload(), interrupted=True))
 
-    # Open SWE would act, so the channel points the issue to the decision; nothing starts.
-    assert response.json() == {"input": "Open SWE was mentioned while the thread waits."}
+    # Alephat would act, so the channel points the issue to the decision; nothing starts.
+    assert response.json() == {"input": "Alephat was mentioned while the thread waits."}
     # No reaction, metadata or run token while the thread waits.
     prepared.assert_not_awaited()
     channel.adopt_channel_run.assert_not_awaited()  # type: ignore[attr-defined]

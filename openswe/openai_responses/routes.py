@@ -1,4 +1,4 @@
-"""An OpenAI Responses endpoint for programs in a sandbox, answered by Open SWE threads.
+"""An OpenAI Responses endpoint for programs in a sandbox, answered by Alephat threads.
 
 Each conversation is a thread that runs in the caller's sandbox. The agent's
 tool calls come back as already-executed ``mcp_call`` items, so the client never

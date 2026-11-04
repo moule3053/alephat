@@ -42,7 +42,7 @@ def review_shadow_thread_id(owner: str, repo: str, pr_number: int) -> str:
 
 
 def pr_comment_thread_id(owner: str, repo: str, pr_number: int) -> str:
-    """Agent thread for a PR that Open SWE did not branch, keyed by the PR itself."""
+    """Agent thread for a PR that Alephat did not branch, keyed by the PR itself."""
     return _url_uuid(f"{owner}/{repo}/pr/{pr_number}")
 
 
@@ -61,6 +61,6 @@ def mda_successor_thread_id(thread_id: str) -> str:
 
 
 def thread_id_from_branch(branch_name: str) -> str | None:
-    """Recover the agent thread id Open SWE embeds in the branches it creates."""
+    """Recover the agent thread id Alephat embeds in the branches it creates."""
     match = _UUID_RE.search(branch_name)
     return match.group(0) if match else None

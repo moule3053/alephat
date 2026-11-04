@@ -91,9 +91,9 @@ _MEMBERSHIP_SUBTYPES = frozenset(
         "channel_unarchive",
     }
 )
-_EXTERNAL_CHANNEL_REFUSAL = "Open SWE does not operate in channels with external participants."
+_EXTERNAL_CHANNEL_REFUSAL = "Alephat does not operate in channels with external participants."
 _THREAD_CONFLICT = (
-    "Open SWE found conflicting state for this Slack thread and will not guess "
+    "Alephat found conflicting state for this Slack thread and will not guess "
     "which agent thread to use."
 )
 _OPTION_ACTION_ID = "open_swe_option_select"
@@ -542,7 +542,7 @@ async def slack_webhook(
 
     if event.type == "message" and channel_id and channel_context is not None and watched:
         # Independent of the handling below: a watched channel's messages fire
-        # automations whether or not they address Open SWE.
+        # automations whether or not they address Alephat.
         background_tasks.add_task(_launch_slack_automations, envelope, channel_context)
 
     if event.type == "code_channel_action":
@@ -829,7 +829,7 @@ async def slack_webhook(
         )
         return accepted("Slack update queued")
 
-    # From here on the message is addressed to Open SWE: any failure is reported to the thread.
+    # From here on the message is addressed to Alephat: any failure is reported to the thread.
     target = SlackRequestTarget(
         channel_id=channel_id,
         thread_ts=thread_ts,
@@ -1027,12 +1027,12 @@ async def slack_command(
     if len(question) > MAX_QUESTION_CHARS:
         return ephemeral(
             f"That question is too long for `{command or ASK_COMMAND}`. "
-            "Tag Open SWE in a message instead."
+            "Tag Alephat in a message instead."
         )
 
     invocation = value("trigger_id") or hashlib.sha256(body).hexdigest()
     if not await common.claim_slack_event(f"slack-ask:{invocation}"):
-        return ephemeral("Open SWE is already working on that question.")
+        return ephemeral("Alephat is already working on that question.")
     thread_id = ask_thread_id(channel_id, user_id, invocation)
     background_tasks.add_task(
         process_slack_ask,
@@ -1092,7 +1092,7 @@ async def slack_code_channel_command(
         team_id=team_id,
     )
     if result["status"] != "accepted":
-        return ephemeral("Open SWE could not route that command to this code channel.")
+        return ephemeral("Alephat could not route that command to this code channel.")
     return ephemeral(f"Working on /{command}…")
 
 
@@ -1207,7 +1207,7 @@ async def slack_interactivity(
 
     action = _first_option_action(interaction.actions)
     if action is None:
-        return ignored("No Open SWE action")
+        return ignored("No Alephat action")
 
     button = SlackButtonValue.parse(parse_json_object((action.value or "{}").encode("utf-8")))
     if button is None:
@@ -1221,7 +1221,7 @@ async def slack_interactivity(
             interaction.user.id,
             "This plan approval button is no longer active. Plan mode and approval gates "
             "have been removed. Open the artifact linked in the original message to review it, "
-            "or reply in this thread and mention Open SWE with what you'd like to do next. "
+            "or reply in this thread and mention Alephat with what you'd like to do next. "
             "No action was taken.",
             thread_ts=interaction.message.thread_ts or interaction.container.thread_ts or None,
         )
@@ -1251,7 +1251,7 @@ async def slack_interactivity(
     )
     reply_ts = reply_thread_ts or thread_ts
 
-    # From here on the interaction is addressed to Open SWE: any failure is reported to the thread.
+    # From here on the interaction is addressed to Alephat: any failure is reported to the thread.
     target = SlackRequestTarget(channel_id=channel_id, thread_ts=reply_ts or action_ts)
 
     async def dispatch() -> WebhookResponse:
@@ -1415,7 +1415,7 @@ def _first_option_action(actions: list[SlackBlockAction]) -> SlackBlockAction | 
 
 
 def _has_option_element(elements: object) -> bool:
-    """Whether a Block Kit ``elements`` list holds one of Open SWE's option buttons."""
+    """Whether a Block Kit ``elements`` list holds one of Alephat's option buttons."""
     if not isinstance(elements, list):
         return False
     return any(

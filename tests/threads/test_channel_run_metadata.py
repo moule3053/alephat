@@ -6,7 +6,7 @@ from openswe.threads.router import channel_run_metadata
 from tests.mda_helpers import mda_starts
 
 _KEYS = (
-    # Open SWE's own run metadata.
+    # Alephat's own run metadata.
     "ls_repo_provider",
     "ls_attribution_identifier",
     "user_id",

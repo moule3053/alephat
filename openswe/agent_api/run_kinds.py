@@ -1,4 +1,4 @@
-"""The kinds of run Open SWE starts on Managed Deep Agents: the coding agent, the pull
+"""The kinds of run Alephat starts on Managed Deep Agents: the coding agent, the pull
 request reviewer and the review scout, each named by the run token's assistant id.
 
 MDA plays every kind with its one graph. Each kind names, for the backend: the catalog

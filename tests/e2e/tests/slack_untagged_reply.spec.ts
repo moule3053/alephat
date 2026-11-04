@@ -46,7 +46,7 @@ async function stateText(
 }
 
 // Open a two-party thread: Alice @-mentions the bot, the agent implements and
-// replies, so the thread now holds exactly Alice + Open SWE.
+// replies, so the thread now holds exactly Alice + Alephat.
 async function openTwoPartyThread(
   request: APIRequestContext,
 ): Promise<SendResult> {
@@ -103,7 +103,7 @@ test.describe("Slack untagged two-party replies", () => {
     request,
   }) => {
     await request.post("/control/reset");
-    // No prior Open SWE participation → the bot must be @-mentioned to engage.
+    // No prior Alephat participation → the bot must be @-mentioned to engage.
     const fresh = await send(request, {
       text: "just chatting with the team, nothing for the bot",
       mention_bot: false,

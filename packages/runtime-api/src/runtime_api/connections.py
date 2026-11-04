@@ -43,7 +43,7 @@ class ConnectionRef(BaseModel):
         """Whether an MCP server may send this connection's credential.
 
         An admin or a person picks the server's URL, so only the connections made for
-        MCP servers qualify, never one Open SWE or a channel reads for itself, such as
+        MCP servers qualify, never one Alephat or a channel reads for itself, such as
         the GitHub App's installation token.
         """
         return bool(_MCP_SERVER_SLUG.fullmatch(self.slug))

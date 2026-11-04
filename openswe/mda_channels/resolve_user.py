@@ -2,7 +2,7 @@
 
 ``mda/identity.py`` names this endpoint as the deployment's ``resolve_user``. MDA
 posts the sender each channel verified, Slack's, GitHub's or Linear's, and runs
-the delivery as the Open SWE user it is answered with: the principal a trusted
+the delivery as the Alephat user it is answered with: the principal a trusted
 backend call for that user id gets. So one person is one principal on every
 channel, and the dashboard's runs can share it.
 
@@ -32,7 +32,7 @@ router = APIRouter(prefix="/mda", dependencies=[Depends(require_mda_channel)])
 
 
 class AppUser(TypedDict):
-    """MDA's ``ResolvedAppUser``: run as this Open SWE user. The only answer besides ``None``."""
+    """MDA's ``ResolvedAppUser``: run as this Alephat user. The only answer besides ``None``."""
 
     type: Literal["user"]
     id: str
@@ -40,7 +40,7 @@ class AppUser(TypedDict):
 
 @router.post("/resolve-user")
 async def resolve_user(call: ResolveUserEndpointRequest) -> AppUser | None:
-    """The Open SWE user a channel's verified sender is, or ``None`` for MDA's default."""
+    """The Alephat user a channel's verified sender is, or ``None`` for MDA's default."""
     actor = call.get("actor")
     if actor is None:
         # The channel couldn't verify who sent it; the channel's principal runs it.
@@ -49,16 +49,16 @@ async def resolve_user(call: ResolveUserEndpointRequest) -> AppUser | None:
     try:
         user = await _open_swe_user(actor)
     except Exception:  # noqa: BLE001 - an error would fail the delivery; null still runs it
-        logger.exception("Could not map a channel sender to an Open SWE user", extra=extra)
+        logger.exception("Could not map a channel sender to an Alephat user", extra=extra)
         return None
     if user is None:
-        logger.info("Channel sender maps to no Open SWE user", extra=extra)
+        logger.info("Channel sender maps to no Alephat user", extra=extra)
         return None
     return {"type": "user", "id": str(user.id)}
 
 
 async def _open_swe_user(actor: EndpointActor) -> User | None:
-    """The Open SWE user a verified person is; ``None`` for anyone else, on any channel."""
+    """The Alephat user a verified person is; ``None`` for anyone else, on any channel."""
     if actor["provider"] == "slack":
         user = await User.for_person({"id": f"slack:{actor['id']}"})
         same_team = user is not None and _same_slack_team(user, actor["id"], actor["teamId"])

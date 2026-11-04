@@ -1,6 +1,6 @@
-"""The human input behind an Open SWE pull request: the opening request and every follow-up.
+"""The human input behind an Alephat pull request: the opening request and every follow-up.
 
-Open SWE already records every human turn: a thread's checkpointed ``messages``
+Alephat already records every human turn: a thread's checkpointed ``messages``
 hold the text and the ``<input-message>`` envelope that says whether a person
 typed it or the platform generated it, and ``pull_request_thread`` maps a PR
 back to the agent threads that produced it. :class:`SteeringHistory` reads those
@@ -66,7 +66,7 @@ class SteeringHistory(BaseModel):
 
     @classmethod
     async def load(cls, owner: str, repo: str, pr_number: int) -> Self | None:
-        """This PR's human turns, or ``None`` when Open SWE did not write it."""
+        """This PR's human turns, or ``None`` when Alephat did not write it."""
         pull_request = await PullRequest.get(owner, repo, pr_number)
         if pull_request is None:
             return None

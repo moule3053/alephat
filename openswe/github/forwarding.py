@@ -1,13 +1,13 @@
 """Hand @openswe issue mentions to the MDA deployment's GitHub channel.
 
-Open SWE's GitHub App keeps its one webhook URL here, at ``/webhooks/github``:
+Alephat's GitHub App keeps its one webhook URL here, at ``/webhooks/github``:
 reviews, pull request comments, CI and automations still start from it. The issue
 events that would start an agent run go to MDA's GitHub channel instead, exactly
 as GitHub sent them, so the channel verifies GitHub's signature with the same
 webhook secret (``mda deploy`` keeps the brought App's webhook here;
 MDA_GITHUB_WEBHOOK_ELSEWHERE). The forward is a job (``FORWARD_JOB``), so a restart
 doesn't lose it. A delivery MDA refuses, or that never gets through, leaves a 😕
-on the comment that mentioned Open SWE, so its author knows.
+on the comment that mentioned Alephat, so its author knows.
 """
 
 import asyncio

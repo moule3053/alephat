@@ -41,7 +41,7 @@ from openswe.utils.http_pool import close_pool as close_http_pool
 
 logger = logging.getLogger(__name__)
 
-# Before the queue starts: it reads this when it builds its workers, and Open SWE
+# Before the queue starts: it reads this when it builds its workers, and Alephat
 # cannot survive them landing on different loops.
 pin_single_event_loop()
 

@@ -825,7 +825,7 @@ export function AgentThreadView({
             >
               {bridgeError
                 ? `This thread's checkout on This Mac can't be served: ${bridgeError}`
-                : `This thread runs in a checkout on another Mac that isn't serving it right now. Open it in the Open SWE app there to continue it${canMove ? ", or move it to Cloud" : ""}.`}
+                : `This thread runs in a checkout on another Mac that isn't serving it right now. Open it in the Alephat app there to continue it${canMove ? ", or move it to Cloud" : ""}.`}
             </Banner>
           </div>
         )}
@@ -872,7 +872,7 @@ export function AgentThreadView({
                 source.workspaceStale.capturedAt
                   ? `was captured ${formatRelativeTime(Date.parse(source.workspaceStale.capturedAt))}`
                   : "has never been refreshed"
-              }, so its repositories may be out of date. Open SWE continued anyway and is refreshing the image in the background.`}
+              }, so its repositories may be out of date. Alephat continued anyway and is refreshing the image in the background.`}
             </Banner>
           </div>
         )}

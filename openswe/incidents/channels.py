@@ -87,10 +87,10 @@ async def slack_person(user_id: str) -> PersonIdentity:
 
 
 async def linked_slack_user(user_id: str) -> PersonIdentity | None:
-    """The identity of a Slack user who connected an Open SWE account, else None.
+    """The identity of a Slack user who connected an Alephat account, else None.
 
     A question unlocks the agent's tools, so it needs the same connected account as
-    mentioning Open SWE anywhere else.
+    mentioning Alephat anywhere else.
     """
     login = await User.login_for_slack(user_id)
     if not login:

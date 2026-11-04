@@ -1,4 +1,4 @@
-"""The Managed Deep Agents deployment that hosts every Open SWE graph.
+"""The Managed Deep Agents deployment that hosts every Alephat graph.
 
 ``mda`` serves them as one graph; a run's context names the graph it
 plays. Dispatch stamps a signed run token and the run's catalog, worked out once as
@@ -59,7 +59,7 @@ def mda_runtime_url() -> str:
     url = ENV.MDA_RUNTIME_URL.optional()
     if url is None:
         raise RemoteRuntimeConfigurationError(
-            "MDA_RUNTIME_URL is required: Open SWE's graphs run on Managed Deep Agents"
+            "MDA_RUNTIME_URL is required: Alephat's graphs run on Managed Deep Agents"
         )
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:

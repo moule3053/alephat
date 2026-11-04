@@ -1,4 +1,4 @@
-"""MDA asks ``/mda/resolve-user`` who a channel's verified sender is in Open SWE."""
+"""MDA asks ``/mda/resolve-user`` who a channel's verified sender is in Alephat."""
 
 import json
 from datetime import UTC, datetime

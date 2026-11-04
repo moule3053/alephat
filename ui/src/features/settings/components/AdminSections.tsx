@@ -75,7 +75,7 @@ export function SlackIntegrationSection({
   return (
     <SettingsSection
       title="Slack Integration"
-      description="Configure Slack and choose which bots can start Open SWE runs."
+      description="Configure Slack and choose which bots can start Alephat runs."
     >
       <SettingsRow
         htmlFor="slack-code-channels"
@@ -261,7 +261,7 @@ export function TriggerReviewSection() {
   return (
     <SettingsSection
       title="Trigger a Review"
-      description="Manually start an Open SWE Review run on a pull request. The repository must be enabled for review."
+      description="Manually start an Alephat Review run on a pull request. The repository must be enabled for review."
     >
       <div className="flex flex-col gap-space-2 p-space-4">
         <div className="flex items-center gap-space-2">

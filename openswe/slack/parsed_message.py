@@ -1,19 +1,19 @@
-"""Everything a person types into a Slack message for Open SWE, parsed in one place.
+"""Everything a person types into a Slack message for Alephat, parsed in one place.
 
-Routing decides whether a message is addressed to Open SWE first; a command never
+Routing decides whether a message is addressed to Alephat first; a command never
 makes it so. An action (`/btw`, `/breakout`, `/breakout:web`) is one of the first
 unquoted words after this bot's mention, or of the message, and the rest of the
 message is its argument:
 
-    @Open SWE /breakout #eng investigate this
-    @Open SWE /btw how does thread routing work?
+    @Alephat /breakout #eng investigate this
+    @Alephat /btw how does thread routing work?
 
 Options (`/model:perf…`, e.g. `/model:performance`, and `/workspace:<name>`) count
 anywhere outside quotes, so `/model:perf` in backticks or quotation marks is just
 text:
 
-    @Open SWE /model:perf /workspace:infra fix the flaky test
-    @Open SWE fix the flaky test /model:perf
+    @Alephat /model:perf /workspace:infra fix the flaky test
+    @Alephat fix the flaky test /model:perf
 
 The legacy `workspace:<name>` and `env:<name>` tags, without the slash, are still
 accepted anywhere in the message.
@@ -56,7 +56,7 @@ class ParsedSlackMessage:
     performance_model: bool = False
     workspace: str | None = None
     prior_text: str = ""
-    """What the sender wrote before mentioning Open SWE, when a command follows the mention."""
+    """What the sender wrote before mentioning Alephat, when a command follows the mention."""
     argument: str = ""
     argument_start: int = 0
     performance_span: Span | None = None

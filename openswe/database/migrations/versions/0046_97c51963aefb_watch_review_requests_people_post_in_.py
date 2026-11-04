@@ -1,6 +1,6 @@
 """Watch review requests people post in Slack
 
-A ``posted`` request is someone's own message in a review channel: Open SWE reacts
+A ``posted`` request is someone's own message in a review channel: Alephat reacts
 to it when the pull request is approved or merged and bumps it once it has sat green
 and unapproved.
 """

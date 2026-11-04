@@ -1,4 +1,4 @@
-"""Interactive cards Open SWE posts in Slack threads, and moving them in and out of the channel."""
+"""Interactive cards Alephat posts in Slack threads, and moving them in and out of the channel."""
 
 import logging
 from collections.abc import Awaitable, Callable

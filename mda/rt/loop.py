@@ -1,4 +1,4 @@
-"""Open SWE's middleware around each model call, run here as the catalog's ``LoopRules`` say.
+"""Alephat's middleware around each model call, run here as the catalog's ``LoopRules`` say.
 
 Before each call it ends the run where a rule says to, adds the thread's task
 context, keeps the sandbox's GitHub proxy fresh, picks the call's route and model, and

@@ -1,6 +1,6 @@
 # Dashboard UI
 
-Read [DESIGN.md](DESIGN.md) before changing Open SWE’s web/app UI.
+Read [DESIGN.md](DESIGN.md) before changing Alephat’s web/app UI.
 Prefer the installed Macaw components and semantic tokens over custom controls and styles.
 
 Before implementing or replacing a control, use Macaw CLI discovery from the repository root:

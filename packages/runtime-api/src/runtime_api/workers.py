@@ -1,4 +1,4 @@
-"""The calls that make an async subagent the runtime launches an Open SWE task worker.
+"""The calls that make an async subagent the runtime launches an Alephat task worker.
 
 The coordinator's run asks for a worker grant (``launch_worker``), launches the
 worker with it in place of its own run token, then registers the thread it

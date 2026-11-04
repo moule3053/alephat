@@ -1511,7 +1511,7 @@ async def _bind_repos(session: AsyncSession, workspace_id: UUID, repos: list[str
     """Make this workspace's ``workspace_repository`` rows exactly ``repos``.
 
     The binding references a ``repository`` row, and a workspace may name one
-    Open SWE has never seen, so the ones it does not know are inserted first.
+    Alephat has never seen, so the ones it does not know are inserted first.
     The ones it already knows are only read: ``Repository.save`` bumps
     ``last_activity_at``, and editing a workspace is not activity on its
     repositories. Bindings already in place are left alone too, so ``linked_at``

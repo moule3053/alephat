@@ -6,8 +6,8 @@ belongs to, here (``channels.linear`` ``on_event``). The backend decides: an age
 session turn starts the run it prepares, on the session's thread, with the
 run-complete webhook; issue and comment events start nothing, and are logged and
 run Linear automations. A session turn on a thread that waits on an interrupt
-starts nothing either: its answer only tells the channel Open SWE would act.
-Only the deployment, which holds Open SWE's shared secret, may call it.
+starts nothing either: its answer only tells the channel Alephat would act.
+Only the deployment, which holds Alephat's shared secret, may call it.
 """
 
 import json
@@ -36,8 +36,8 @@ LinearEventKey = Literal[
 ]
 _EVENT_KEYS: frozenset[str] = frozenset(get_args(LinearEventKey))
 _AUTOMATION_KEYS = frozenset({"Issue.create", "Issue.update"})
-# What the channel starts with while the thread waits: nothing, it only notes Open SWE acts.
-_ACTS_WHILE_INTERRUPTED: Final = "Open SWE was asked while the session waits."
+# What the channel starts with while the thread waits: nothing, it only notes Alephat acts.
+_ACTS_WHILE_INTERRUPTED: Final = "Alephat was asked while the session waits."
 
 router = APIRouter(prefix="/linear/channel", dependencies=[Depends(require_mda_channel)])
 

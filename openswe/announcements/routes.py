@@ -1,4 +1,4 @@
-"""Admin routes for DMing an announcement to everyone Open SWE can reach on Slack."""
+"""Admin routes for DMing an announcement to everyone Alephat can reach on Slack."""
 
 import logging
 from typing import Any

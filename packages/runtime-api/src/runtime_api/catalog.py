@@ -70,7 +70,7 @@ class McpServerSpec(BaseModel):
     credential for this one.
     """
 
-    # The Open SWE connection's name.
+    # The Alephat connection's name.
     name: str
     url: str
     transport: Literal["streamable_http", "sse"]

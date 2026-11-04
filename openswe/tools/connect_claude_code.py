@@ -1,4 +1,4 @@
-"""Start connecting a person's Claude Code to Open SWE without the token passing through the agent."""
+"""Start connecting a person's Claude Code to Alephat without the token passing through the agent."""
 
 from uuid import uuid7
 
@@ -22,7 +22,7 @@ async def connect_claude_code(machine_name: str) -> dict[str, object]:
     login = configurable().github_login
     user = await User.for_login("github", login) if login else None
     if login is None or user is None:
-        return {"ok": False, "error": "Could not resolve the caller's Open SWE user"}
+        return {"ok": False, "error": "Could not resolve the caller's Alephat user"}
     try:
         name = SyncTokenCreate(name=machine_name).name
     except ValidationError as exc:

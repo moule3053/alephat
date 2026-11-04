@@ -763,11 +763,11 @@ async def _withdraw_open_swe_approvals(
 ) -> None:
     """Leave standing only this publish's own approval, if it posted one."""
     if keep_review_id is not None:
-        reason = "Superseded by Open SWE's approval of the current head."
+        reason = "Superseded by Alephat's approval of the current head."
     elif keep_commit is not None:
-        reason = "New commits were pushed after Open SWE approved this pull request."
+        reason = "New commits were pushed after Alephat approved this pull request."
     else:
-        reason = "Open SWE's latest review of this pull request does not approve it."
+        reason = "Alephat's latest review of this pull request does not approve it."
     try:
         async with GitHubClient.connect(token=token) as github:
             refused = await (
@@ -782,14 +782,14 @@ async def _withdraw_open_swe_approvals(
             )
     except httpx2.HTTPError, ValueError:
         logger.warning(
-            "Could not list Open SWE approvals to withdraw",
+            "Could not list Alephat approvals to withdraw",
             extra={"repository": f"{owner}/{repo}", "pr_number": pr_number},
             exc_info=True,
         )
         return
     if refused:
         logger.error(
-            "Open SWE approvals the latest review does not support are still standing",
+            "Alephat approvals the latest review does not support are still standing",
             extra={
                 "repository": f"{owner}/{repo}",
                 "pr_number": pr_number,
@@ -809,7 +809,7 @@ async def _open_swe_already_reviewed(
 ) -> bool:
     """Decide whether to suppress a duplicate empty "no issues found" summary.
 
-    Suppress only when we are *certain* a prior Open SWE review exists, so a
+    Suppress only when we are *certain* a prior Alephat review exists, so a
     transient GitHub failure never causes a double-post:
 
     - ``is_re_review`` is a durable signal (the dispatching webhook set it from
@@ -914,7 +914,7 @@ def _comment_id_by_finding_id(
 ) -> dict[str, int]:
     """Map each surfaced finding id to its GitHub comment id via the marker.
 
-    The embedded Open SWE marker is the *only* source of truth. Every comment
+    The embedded Alephat marker is the *only* source of truth. Every comment
     this reviewer posts carries a ``<!-- open-swe-review-comment {...} -->``
     marker keyed by finding id (see ``render_inline_comment_body``), so the
     match is exact. The old ``(path, line, body)`` fallback collided whenever
@@ -1084,10 +1084,10 @@ async def _maybe_post_slack_completion_reply(
         return
 
     if surfaced_count == 0:
-        headline = "*Open SWE Review*: No issues found."
+        headline = "*Alephat Review*: No issues found."
     else:
         issue_word = "issue" if surfaced_count == 1 else "issues"
-        headline = f"*Open SWE Review* found {surfaced_count} potential {issue_word}."
+        headline = f"*Alephat Review* found {surfaced_count} potential {issue_word}."
 
     review_url = f"https://github.com/{owner}/{repo}/pull/{pr_number}"
     if isinstance(review_id, int):

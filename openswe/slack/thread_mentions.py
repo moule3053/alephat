@@ -56,7 +56,7 @@ class SlackThreadMention(Base):
             people = await User.for_identities("slack", mentioned | {poster})
             if unknown := mentioned - people.keys():
                 logger.info(
-                    "Skipping Slack mentions of people without an Open SWE account",
+                    "Skipping Slack mentions of people without an Alephat account",
                     extra={"slack_channel_id": channel_id, "mentions_skipped": len(unknown)},
                 )
             if not (mentioned := mentioned & people.keys()):

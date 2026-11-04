@@ -2,7 +2,7 @@
 
 The backend reaches it with the deployment's LangSmith key and is the only caller
 that may change anything. A person signed in to the dashboard may read the threads
-they own; everything else goes through the dashboard API, which applies Open SWE's
+they own; everything else goes through the dashboard API, which applies Alephat's
 thread rules before it calls here as the backend. Calls the backend makes in process
 skip this entirely, as the Agent Server does for its own ASGI transport.
 """

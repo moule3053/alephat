@@ -345,7 +345,7 @@ export function buildCommandItems(
 /** Prompt editor with autocomplete, model selection, attachments, and send/stop controls. */
 export const ChatComposer = memo(function ChatComposer({
   draftKey,
-  placeholder = "Ask Open SWE to build, fix bugs, explore",
+  placeholder = "Ask Alephat to build, fix bugs, explore",
   autoFocus = false,
   compact = false,
   disabled = false,

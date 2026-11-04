@@ -61,7 +61,7 @@ from openswe.webhooks import common
 
 
 async def _trusted_authors(*logins: str, comments: Iterable[dict[str, Any]] = ()) -> frozenset[str]:
-    """Lowercased logins, among the people in this event, who are known Open SWE users."""
+    """Lowercased logins, among the people in this event, who are known Alephat users."""
     return await User.known_logins(
         [*logins, *(str(comment.get("author") or "") for comment in comments)]
     )
@@ -638,7 +638,7 @@ async def settle_human_review_on_close(payload: dict[str, Any]) -> None:
 
 
 async def withdraw_superseded_approvals(payload: dict[str, Any]) -> None:
-    """Dismiss Open SWE's approvals of earlier commits once new commits reach a pull request."""
+    """Dismiss Alephat's approvals of earlier commits once new commits reach a pull request."""
     event = PullRequestEvent.parse(payload)
     identity = event.identity if event is not None else None
     if event is None or identity is None or not event.pull_request.head_sha:
@@ -646,19 +646,19 @@ async def withdraw_superseded_approvals(payload: dict[str, Any]) -> None:
     try:
         async with PullRequestClient.as_app(*identity) as pull:
             refused = await pull.withdraw_open_swe_approvals(
-                reason="New commits were pushed after Open SWE approved this pull request.",
+                reason="New commits were pushed after Alephat approved this pull request.",
                 keep_commit=event.pull_request.head_sha,
             )
     except Exception:
         # Later background tasks of this delivery must still run.
         common.logger.exception(
-            "Could not withdraw Open SWE approvals of superseded commits",
+            "Could not withdraw Alephat approvals of superseded commits",
             extra={"repository": event.repo_full_name, "pr_number": identity[2]},
         )
         return
     if refused:
         common.logger.error(
-            "Open SWE approvals of superseded commits are still standing",
+            "Alephat approvals of superseded commits are still standing",
             extra={
                 "repository": event.repo_full_name,
                 "pr_number": identity[2],
@@ -1120,7 +1120,7 @@ class _PrAuthorEvent(BaseModel):
 
 
 async def is_accepted_commenter(login: str) -> bool:
-    """Only registered Open SWE users may prompt the agent from GitHub comments."""
+    """Only registered Alephat users may prompt the agent from GitHub comments."""
     return bool(await User.known_logins([login]))
 
 
@@ -1534,7 +1534,7 @@ async def process_github_review_thread(payload: dict[str, object]) -> None:
 
 
 async def process_github_review_finding_reply(payload: dict[str, Any]) -> None:
-    """Route replies to Open SWE review comments back to the reviewer graph."""
+    """Route replies to Alephat review comments back to the reviewer graph."""
     parent_comment_id = common.review_comment_reply_parent_id(payload)
     if parent_comment_id is None:
         return

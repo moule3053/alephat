@@ -1,4 +1,4 @@
-"""One-off questions: the `/oswe` slash command and `@Open SWE /btw`.
+"""One-off questions: the `/oswe` slash command and `@Alephat /btw`.
 
 Each invocation gets an agent thread of its own, private to the asker and stamped
 ``unlisted`` so one-off questions never fill anyone's thread list. `/oswe` answers
@@ -51,13 +51,13 @@ CHANNEL_CONTEXT_MAX_TOKENS = 5000
 _CHANNEL_CONTEXT_MAX_CHARS = CHANNEL_CONTEXT_MAX_TOKENS * 4
 _CHANNEL_CONTEXT_TRIMMED = "[earlier messages omitted to stay inside the context budget]"
 _NO_CHANNEL_CONTEXT = "(unavailable — this is not a public channel, or it has no messages)"
-_CHANNEL_REFUSAL = "Open SWE cannot answer questions in this channel."
-_START_FAILURE = "Open SWE could not start that request. Try again in a moment."
+_CHANNEL_REFUSAL = "Alephat cannot answer questions in this channel."
+_START_FAILURE = "Alephat could not start that request. Try again in a moment."
 _SHORTCUT_ACKNOWLEDGEMENT = "Working on it — I’ll send a separate reply, visible only to you."
 _ACKNOWLEDGEMENT = "Working on it — the answer will replace this message, visible only to you."
-_BY_THE_WAY_USAGE = "Ask a question after it: `@Open SWE /btw how does thread routing work?`"
+_BY_THE_WAY_USAGE = "Ask a question after it: `@Alephat /btw how does thread routing work?`"
 _BY_THE_WAY_TOO_LONG = (
-    "That question is too long for `/btw`. Tag Open SWE without `/btw` to start a thread instead."
+    "That question is too long for `/btw`. Tag Alephat without `/btw` to start a thread instead."
 )
 
 

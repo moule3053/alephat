@@ -1,8 +1,8 @@
-# Open SWE Desktop
+# Alephat Desktop
 
 > [!IMPORTANT]
 > This desktop client is experimental.
-> The web UI is the recommended way to use Open SWE.
+> The web UI is the recommended way to use Alephat.
 
 The Electron app downloads a standalone UI release selected by the connected backend.
 It keeps the last complete UI on disk, including lazy routes, for offline use.
@@ -65,15 +65,15 @@ Native navigation opens the selected provider in your browser with a fresh PKCE 
 
 Packaged builds ask for the organization's backend URL on first launch and store it in the app's local user data.
 They have no maintainer-hosted default.
-Use **Open SWE → Backend URL…** to switch deployments; switching clears the previous deployment's local session data.
+Use **Alephat → Backend URL…** to switch deployments; switching clears the previous deployment's local session data.
 
-When the backend the app is connected to sets `OPENSWE_ALTERNATIVE_ENVS="preview:https://...,staging:https://..."`, **Open SWE → Environment** lists those backends next to it.
+When the backend the app is connected to sets `OPENSWE_ALTERNATIVE_ENVS="preview:https://...,staging:https://..."`, **Alephat → Environment** lists those backends next to it.
 Choosing one switches only until the app restarts; the stored backend URL stays the same.
 Nothing is configured on the desktop side.
 
 On macOS, Universal Links open agent and review pages in the app only when the URL's origin matches the configured backend.
 Links for other deployments open in the default browser instead.
-Associated domains are fixed in the signed app, so macOS may still launch Open SWE before it hands a mismatched link back to the browser.
+Associated domains are fixed in the signed app, so macOS may still launch Alephat before it hands a mismatched link back to the browser.
 
 The shared backend's GitHub App must allow `<backend-url>/dashboard/api/auth/callback` as a callback URL.
 Set `ALLOWED_GITHUB_ORGS` or `ALLOWED_GITHUB_USERS` on that backend to control which GitHub users can create dashboard sessions, including the ones "This Mac" threads run under.
@@ -96,7 +96,7 @@ To build and install from source, install Git, Node.js 26, and [Bun](https://bun
 make install-desktop
 ```
 
-The command fast-forwards to the latest `main`, builds Open SWE, and installs it in `/Applications` (or `~/Applications` when needed).
+The command fast-forwards to the latest `main`, builds Alephat, and installs it in `/Applications` (or `~/Applications` when needed).
 Run it again to update and replace the app; saved backend settings, login sessions, and projects are preserved.
 
 ## Local development
@@ -119,10 +119,10 @@ make web
 `pnpm run dev:desktop` is equivalent to `make desktop`.
 The desktop app connects to the backend at `http://localhost:2024`, which runs "This Mac" threads too; the bridge needs that backend's PostgreSQL.
 
-The app keeps the original `com.langchain.openswe` bundle ID and `Open SWE` production Electron profile, preserving installed users’ sessions, projects, task folders, caches, and instance locks.
+The app keeps the original `com.langchain.openswe` bundle ID and `Alephat` production Electron profile, preserving installed users’ sessions, projects, task folders, caches, and instance locks.
 Packaged apps continue to share backend configuration and sessions with `oswe` through `~/.open-swe/config.json`.
-Source launches retain the isolated `Open SWE Development` profile and do not share CLI configuration.
-The dev window is labeled **Open SWE Development**; existing development sessions and projects are preserved.
+Source launches retain the isolated `Alephat Development` profile and do not share CLI configuration.
+The dev window is labeled **Alephat Development**; existing development sessions and projects are preserved.
 
 Development defaults to `http://localhost:2024`.
 Point to another backend with:
@@ -143,10 +143,10 @@ pnpm --dir desktop run dist # installer for the current platform
 ```
 
 Neither command builds or embeds the dashboard.
-Build outputs are written to `desktop/dist/`; the bundle is `Open SWE.app`.
+Build outputs are written to `desktop/dist/`; the bundle is `Alephat.app`.
 Release assets retain the `Open-SWE-*` names, `desktop-v*` tags, original stable update feed and `open-swe-desktop` Homebrew cask for compatibility.
 There is one desktop product and version, not separate coding and general-purpose distributions.
-An update from an installed Open SWE app and a Homebrew reinstall still need macOS smoke tests to verify bundle replacement, preserved sessions/projects, and the CLI link.
+An update from an installed Alephat app and a Homebrew reinstall still need macOS smoke tests to verify bundle replacement, preserved sessions/projects, and the CLI link.
 
 ## macOS releases
 
@@ -203,7 +203,7 @@ The backend returns a short-lived handoff code to `127.0.0.1`; `/auth/desktop/ex
 No browser session is created, and the handoff cannot itself authenticate as a cookie.
 A LangSmith sign-in starts as its own internal UUID account, never linked by email.
 Coding features need a linked GitHub account: **Link GitHub** runs the GitHub App's OAuth through `/dashboard/api/github/login`.
-When that GitHub account already belongs to an Open SWE person, the LangSmith identity and login grant move to that person, so their threads and settings return; otherwise the GitHub account joins the LangSmith account.
+When that GitHub account already belongs to an Alephat person, the LangSmith identity and login grant move to that person, so their threads and settings return; otherwise the GitHub account joins the LangSmith account.
 A GitHub account already linked to another LangSmith account is refused.
 Once linked, the session acts as the GitHub login while every request still checks the LangSmith grant.
 

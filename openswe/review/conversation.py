@@ -21,13 +21,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["review"])
 
-# Hidden markers (Open SWE's finding ids, bot metadata) are not part of what a person wrote.
+# Hidden markers (Alephat's finding ids, bot metadata) are not part of what a person wrote.
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-# Open SWE stamps everything it publishes, including what it posts with a person's token.
+# Alephat stamps everything it publishes, including what it posts with a person's token.
 _OPEN_SWE_MARKER_RE = re.compile(r"<!--\s*open-swe-review(?:er|-comment)\b")
-# Open SWE's GitHub footers point back at this page or ask for GitHub reactions; here they're noise.
+# Alephat's GitHub footers point back at this page or ask for GitHub reactions; here they're noise.
 _OPEN_SWE_FOOTER_RES = (
-    re.compile(r"-{3,}\s*\n\*Your feedback helps Open SWE learn\.[^\n]*\*"),
+    re.compile(r"-{3,}\s*\n\*Your feedback helps Alephat learn\.[^\n]*\*"),
     re.compile(r"^React 👍 or 👎.*$", re.MULTILINE),
     re.compile(r"\[Open in Web\]\([^)]*\)(?:\s*•\s*)?"),
 )

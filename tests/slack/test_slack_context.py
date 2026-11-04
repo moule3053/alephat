@@ -912,7 +912,7 @@ async def test_bot_cannot_take_over_a_concurrently_created_thread(monkeypatch, b
 def _context_input(messages: list[dict], **kwargs: object) -> list[str]:
     run_input = slack_webhooks._slack_context_input(
         messages,
-        cast(dict, kwargs.get("user_names_by_id", {"U123": "Alice", "UBOT": "Open SWE"})),
+        cast(dict, kwargs.get("user_names_by_id", {"U123": "Alice", "UBOT": "Alephat"})),
         cast(dict, kwargs.get("logins_by_user_id", {})),
         person_ids_by_user_id=cast(dict, kwargs.get("person_ids_by_user_id", {})),
         channel_names_by_id=cast(dict, kwargs.get("channel_names_by_id", {})),
@@ -1056,7 +1056,7 @@ def test_background_event_is_not_attributed_to_the_person_it_acts_for() -> None:
         trigger_user_id="U123",
         request_text="Pick a reviewer",
         request_blocks=[{"type": "text", "text": "Pick a reviewer"}],
-        trigger_system={"id": "system:background-event", "display_name": "Open SWE"},
+        trigger_system={"id": "system:background-event", "display_name": "Alephat"},
     )
     request = str(run_input["messages"][-1]["content"])
 
@@ -1070,10 +1070,10 @@ def test_slack_context_never_replays_open_swes_own_replies(
 ) -> None:
     """The model wrote them and already holds them; replaying shows it its own words twice.
 
-    Open SWE posts with a bot token, so its replies carry `user` *and* `bot_id`;
+    Alephat posts with a bot token, so its replies carry `user` *and* `bot_id`;
     keying off `user` alone attributes them to a person instead.
     """
-    monkeypatch.setattr(webhook_common, "SLACK_BOT_USERNAME", "Open SWE")
+    monkeypatch.setattr(webhook_common, "SLACK_BOT_USERNAME", "Alephat")
     contents = _context_input(
         [
             {"ts": "1.0", "text": "please fix it", "user": "U123"},
@@ -1092,15 +1092,15 @@ def test_slack_context_does_not_treat_a_lookalike_bot_as_open_swe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A third-party app may post under our own username; only the user id proves identity."""
-    monkeypatch.setattr(webhook_common, "SLACK_BOT_USERNAME", "Open SWE")
+    monkeypatch.setattr(webhook_common, "SLACK_BOT_USERNAME", "Alephat")
     contents = _context_input(
         [
             {
                 "ts": "1.0",
                 "text": "impersonating",
                 "bot_id": "B9",
-                "username": "Open SWE",
-                "bot_profile": {"name": "Open SWE"},
+                "username": "Alephat",
+                "bot_profile": {"name": "Alephat"},
             },
             {"ts": "9.0", "text": "<@UBOT> do the thing", "user": "U123"},
         ]

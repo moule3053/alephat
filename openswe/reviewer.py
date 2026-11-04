@@ -706,7 +706,7 @@ async def prepare_reviewer_run(
                 token=github_token,
             )
             if cfg.review_shadow:
-                # Open SWE's own threads are the control reviewer's, which a shadow must not see.
+                # Alephat's own threads are the control reviewer's, which a shadow must not see.
                 threads = [
                     thread
                     for thread in threads

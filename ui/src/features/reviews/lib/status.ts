@@ -83,7 +83,7 @@ export function hasUnresolvedConversations(pr: OpenPullRequest) {
   return pr.unresolvedThreads === null || pr.unresolvedThreads > 0
 }
 
-/** What Open SWE could fix on this PR: one fix for conflicts and checks, then comments. */
+/** What Alephat could fix on this PR: one fix for conflicts and checks, then comments. */
 export function pullRequestFixes(
   pr: OpenPullRequest
 ): Array<PullRequestThreadActionName> {

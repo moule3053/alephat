@@ -1,4 +1,4 @@
-"""The calls an Open SWE run on MDA makes on the backend, each answered from the
+"""The calls an Alephat run on MDA makes on the backend, each answered from the
 run's token and the request alone, on whichever replica it lands.
 
 MDA keeps the model loop, its checkpoints, every tool call, and the middleware around

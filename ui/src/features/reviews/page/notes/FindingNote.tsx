@@ -33,7 +33,7 @@ function findingMarkdown(finding: ReviewFinding): string {
 }
 
 /**
- * Open SWE's finding as a margin note: a severity rule and the agent's mark,
+ * Alephat's finding as a margin note: a severity rule and the agent's mark,
  * never a comment bubble, so it reads as the agent's and not a person's.
  */
 export function FindingNote({
@@ -127,7 +127,7 @@ export function FindingNote({
                 variant="outlined"
                 onClick={() => askInChat(askAboutFinding(finding))}
               >
-                Ask Open SWE
+                Ask Alephat
               </Button>
               {!settled && (
                 <Button

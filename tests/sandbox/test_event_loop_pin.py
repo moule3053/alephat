@@ -1,4 +1,4 @@
-"""Open SWE forces the queue onto one event loop per process."""
+"""Alephat forces the queue onto one event loop per process."""
 
 import os
 import sys

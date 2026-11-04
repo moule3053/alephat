@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils"
 
-/** Open SWE's mark, used wherever the agent (not a person) is speaking. */
+/** Alephat's mark, used wherever the agent (not a person) is speaking. */
 export function AgentMark({ className }: { className?: string }) {
   return (
     <img

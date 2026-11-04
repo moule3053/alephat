@@ -6,7 +6,7 @@ import { ReviewBookmarklet, reviewBookmarkletUrl } from "./ReviewBookmarklet"
 
 it("provides a draggable bookmarklet link", () => {
   render(createElement(ReviewBookmarklet))
-  const link = screen.getByRole("link", { name: "👀 Open in Open SWE" })
+  const link = screen.getByRole("link", { name: "👀 Open in Alephat" })
   expect(link.getAttribute("href")).toBe(
     reviewBookmarkletUrl(window.location.origin)
   )

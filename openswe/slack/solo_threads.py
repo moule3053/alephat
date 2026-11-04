@@ -115,7 +115,7 @@ def track_explicit_mention(
     """Record an @mention's sender for solo routing without holding up the reply.
 
     The mention is answered either way; the record only decides whether later
-    untagged messages in the thread count as addressed to Open SWE.
+    untagged messages in the thread count as addressed to Alephat.
     """
     task = asyncio.create_task(
         allow_solo_thread_followup(

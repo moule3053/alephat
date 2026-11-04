@@ -18,7 +18,7 @@ const FIXTURE = resolve(__dirname, "thread_context.md");
 
 const ALICE_SLACK = "U_ALICE";
 const BOB_SLACK = "U_BOB";
-// Nobody has ever linked this Slack account to Open SWE.
+// Nobody has ever linked this Slack account to Alephat.
 const CAROL_SLACK = "U_CAROL";
 
 const BOB_INSTRUCTIONS =
@@ -353,7 +353,7 @@ test("records every message the model is handed as people come and go", async ({
   expect(fifth.run[0]).toContain("standing_instructions:");
   expect(fifth.run[0]).toContain("Never use ripgrep.");
 
-  // Open SWE commits and opens pull requests as the person who asked, so a
+  // Alephat commits and opens pull requests as the person who asked, so a
   // Slack account it cannot resolve to a GitHub one never reaches the model at
   // all: the webhook answers in the Slack thread instead.
   await sendSlack(page, {
@@ -368,9 +368,9 @@ test("records every message the model is handed as people come and go", async ({
     })
     .toContain("I couldn't resolve your GitHub account from Slack");
   const sixth = await thread.record({
-    title: "Turn 6: Carol, with no Open SWE account, chimes in",
+    title: "Turn 6: Carol, with no Alephat account, chimes in",
     given:
-      "Carol never signed in to Open SWE, so nothing links her Slack account to a GitHub one",
+      "Carol never signed in to Alephat, so nothing links her Slack account to a GitHub one",
     when: "she replies: can it handle unicode?",
     outcome:
       "no run starts and the thread is untouched; Slack gets an account-link prompt instead",

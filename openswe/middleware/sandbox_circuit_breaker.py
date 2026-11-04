@@ -35,7 +35,7 @@ def sandbox_unreachable_message(
 
     Deliberately does not claim the sandbox is gone for good — all we observed is
     that it stopped responding, and it may come back. ``handed_to_mda`` is for a
-    sandbox Open SWE set aside (deleted, or a reviewer's that stopped answering), where
+    sandbox Alephat set aside (deleted, or a reviewer's that stopped answering), where
     the thread's next run starts in a fresh one and "will not start a replacement"
     would be untrue.
     """
@@ -50,7 +50,7 @@ def sandbox_unreachable_message(
     which = f" ({', '.join(identifiers)})" if identifiers else ""
     if reason:
         return warning(
-            f"Open SWE could not open this thread's sandbox{which}: `{reason.replace('`', "'")}`. "
+            f"Alephat could not open this thread's sandbox{which}: `{reason.replace('`', "'")}`. "
             "Retrigger this thread to try again."
         )
     if handed_to_mda:
@@ -60,8 +60,8 @@ def sandbox_unreachable_message(
             "anything that was not pushed. Retrigger this thread to continue."
         )
     return warning(
-        f"This thread's sandbox{which} stopped responding, and Open SWE can't tell "
-        "whether it will come back. Open SWE will not start a replacement on its "
+        f"This thread's sandbox{which} stopped responding, and Alephat can't tell "
+        "whether it will come back. Alephat will not start a replacement on its "
         "own: a new sandbox is empty, so swapping one in would throw away anything "
         "not yet committed and pushed while still looking like a recovery. "
         "Retrigger this thread to try the same sandbox again, or start a new thread "

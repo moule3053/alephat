@@ -1,1 +1,1 @@
-"""Short links: a short Open SWE URL that redirects to a stored target URL."""
+"""Short links: a short Alephat URL that redirects to a stored target URL."""

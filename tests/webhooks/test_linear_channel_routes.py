@@ -145,7 +145,7 @@ async def test_a_session_turn_starts_the_run_prepared_on_the_sessions_thread(
         "agentSession": {
             "id": "session-1",
             "issue": {"id": "issue-1", "identifier": "ENG-1", "title": "Bug"},
-            "comment": {"id": "comment-1", "body": "@Open SWE fix it"},
+            "comment": {"id": "comment-1", "body": "@Alephat fix it"},
         },
     }
 
@@ -176,7 +176,7 @@ async def test_a_session_turn_on_an_interrupted_thread_prepares_nothing(
 
     response = await _post(app, _call("AgentSessionEvent.prompted", payload, interrupted=True))
 
-    # Only tells the channel Open SWE would act: no thread adopted, no run token signed.
+    # Only tells the channel Alephat would act: no thread adopted, no run token signed.
     assert response.json() == {"input": channel._ACTS_WHILE_INTERRUPTED}
     prepare.assert_not_awaited()
 
@@ -222,7 +222,7 @@ async def test_mda_starts_the_run_a_session_turn_prepares(
         "agentSession": {
             "id": "session-1",
             "issue": {"id": "issue-1", "identifier": "ENG-1", "title": "Bug"},
-            "comment": {"id": "comment-1", "body": "@Open SWE fix it"},
+            "comment": {"id": "comment-1", "body": "@Alephat fix it"},
             "creator": {"id": "user-1", "name": "Ada", "email": "ada@example.com"},
         },
     }
@@ -251,7 +251,7 @@ async def test_mda_starts_the_run_a_session_turn_prepares(
     ("signed_in", "decline"),
     [
         (None, "using the same email as your Linear account"),
-        (False, "Your GitHub sign-in to Open SWE is no longer valid"),
+        (False, "Your GitHub sign-in to Alephat is no longer valid"),
     ],
     ids=["unknown-author", "revoked-authorization"],
 )
@@ -277,7 +277,7 @@ async def test_a_session_turn_from_someone_who_cant_run_as_themselves_asks_them_
         "agentSession": {
             "id": "session-1",
             "issue": {"id": "issue-1", "identifier": "ENG-1", "title": "Bug"},
-            "comment": {"id": "comment-1", "body": "@Open SWE fix it in repo:acme/api"},
+            "comment": {"id": "comment-1", "body": "@Alephat fix it in repo:acme/api"},
             "creator": {"id": "user-1", "name": "Ada", "email": "ada@example.com"},
         },
     }

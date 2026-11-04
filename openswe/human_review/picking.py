@@ -444,7 +444,7 @@ async def _choose_reviewer(
         if owners or not fallback:
             people = owners
     if not people:
-        logger.info("No Open SWE user owns or recently changed these files", extra=extra)
+        logger.info("No Alephat user owns or recently changed these files", extra=extra)
         return None
     loads = await HumanReviewRequest.open_review_counts(
         [user.id for user in people.values()], excluding=request.id

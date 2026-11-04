@@ -307,7 +307,7 @@ export function OpenPullRequests({
             <div className="flex items-center gap-space-2 text-xs text-secondary">
               <span>
                 {scope === "review-assigned"
-                  ? "Open SWE assignments, then likely assignments and Slack mentions"
+                  ? "Alephat assignments, then likely assignments and Slack mentions"
                   : "GitHub review requests"}
               </span>
               {scope === "review-requested" && (
@@ -318,7 +318,7 @@ export function OpenPullRequests({
                     onFiltersChange({ github: undefined, pr: undefined })
                   }
                 >
-                  Back to Open SWE assignments
+                  Back to Alephat assignments
                 </Button>
               )}
               {firstInQueue && (
@@ -419,7 +419,7 @@ export function OpenPullRequests({
                   : latest
                     ? `Refreshed ${dateLabel(latest.updatedAt)}`
                     : scope === "review-assigned"
-                      ? "Open SWE review assignments"
+                      ? "Alephat review assignments"
                       : "Live open pull requests from GitHub"}
               </span>
             )}

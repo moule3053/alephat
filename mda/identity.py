@@ -1,11 +1,11 @@
-"""Only the Open SWE backend calls this deployment, with its LangSmith service key.
+"""Only the Alephat backend calls this deployment, with its LangSmith service key.
 
 Its threads are its own. Threads a channel starts belong to that channel's
 conversation: the backend reads them as LangSmith Studio does, and acts in them
 through the trusted-backend ingress.
 
 Before every run a channel starts, MDA asks the backend's ``/mda/resolve-user``
-who its verified sender is in Open SWE, signed with ``MDA_SERVICE_SECRET``: a
+who its verified sender is in Alephat, signed with ``MDA_SERVICE_SECRET``: a
 Slack, GitHub or Linear account its user has linked runs as that user, and
 anyone else as the channel's own principal.
 """

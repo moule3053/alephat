@@ -1,12 +1,12 @@
 """Slack threads, runs, and messages moved out of the LangGraph Store.
 
-``slack_thread`` is one row per Slack thread: the Open SWE thread bound to it
+``slack_thread`` is one row per Slack thread: the Alephat thread bound to it
 (or, once detached, the nonce its next thread is named with), who its untagged
 messages route from, and the kickoff message its next reply replaces.
 ``slack_run`` is one row per run started for or posting in a Slack thread; the
 latest ``started_at`` is the thread's current run, and the ``reply_*`` columns
 count the run's replies held back as stale. ``slack_message`` is one row per
-Slack message Open SWE tracks: the run behind a bot message, the channel thread
+Slack message Alephat tracks: the run behind a bot message, the channel thread
 a bot DM was sent for, and each person's feedback reactions on it.
 ``slack_view_suggestion`` holds the options a code-channel view's select menus
 offer.

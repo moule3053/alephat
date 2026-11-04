@@ -163,7 +163,7 @@ export function ClaudeCodeSetupSection() {
           </p>
           <p>
             Nothing appears? Run <Code>/hooks</Code> in Claude Code: you should
-            see Open SWE’s hooks under eight events. If you don’t, check the
+            see Alephat’s hooks under eight events. If you don’t, check the
             file is valid JSON.
           </p>
         </Step>
@@ -285,7 +285,7 @@ export function ClaudeCodeAboutSection() {
         <dl className="divide-y divide-default">
           <Fact term="What it is">
             A secret starting with <Code>occ_</Code>. Claude Code sends it with
-            every hook event so Open SWE knows the session is yours. Open SWE
+            every hook event so Alephat knows the session is yours. Alephat
             keeps only a hash of it, which is why it’s shown once.
           </Fact>
           <Fact term="Where it lives">

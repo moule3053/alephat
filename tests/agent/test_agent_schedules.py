@@ -738,7 +738,7 @@ async def test_slack_triggers_fire_on_matching_posts_once_and_within_their_limit
         return [result["schedule_id"] for result in results]
 
     bot = {"bot_id": "BDATADOG", "subtype": "bot_message"}
-    # Filtered out: a person, no match, a thread reply, an edit, and Open SWE itself.
+    # Filtered out: a person, no match, a thread reply, an edit, and Alephat itself.
     assert await launch(_slack_post("1.0", "FIRING: api latency", user="UALICE")) == []
     assert await launch(_slack_post("2.0", "RESOLVED: api latency", **bot)) == []
     assert await launch(_slack_post("3.0", "FIRING", thread_ts="1.0", **bot)) == []

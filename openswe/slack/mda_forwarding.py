@@ -1,6 +1,6 @@
 """Hand the Slack conversations that belong to MDA to MDA's Slack channel.
 
-Open SWE's Slack app keeps its URLs at the backend's ``/webhooks/slack``. A
+Alephat's Slack app keeps its URLs at the backend's ``/webhooks/slack``. A
 conversation belongs to MDA when MDA's Slack channel can start it
 (:func:`mda_can_start`): the backend binds the Slack thread to the thread MDA's
 channel will use, indexes that thread as the channel's, remembers the request it
@@ -97,7 +97,7 @@ def mda_can_start(
 ) -> bool:
     """Whether MDA's Slack channel can start a new conversation with this message.
 
-    It can for a person's mention of Open SWE in a channel and for a message in their
+    It can for a person's mention of Alephat in a channel and for a message in their
     DM with it: Trigger Server delivers those as ``mention`` and ``directMessage``, and
     the backend's endpoint builds the run it would have started itself. The rest
     needs the backend:

@@ -1,6 +1,6 @@
 """Routes for MDA's Slack channel: the Slack conversations the backend handed to MDA.
 
-Open SWE's Slack app keeps its URLs at ``/webhooks/slack``, which forwards the
+Alephat's Slack app keeps its URLs at ``/webhooks/slack``, which forwards the
 conversations that belong to MDA to Trigger Server (``openswe.slack.mda_forwarding``).
 The deployment's Slack channel owns those conversations' threads and starts their
 runs; its ``on_event`` names this endpoint, which it asks what each message starts.

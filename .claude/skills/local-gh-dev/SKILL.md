@@ -1,6 +1,6 @@
 ---
 name: local-gh-dev
-description: Run the Open SWE dashboard locally against real GitHub data, signed in with the `gh` CLI instead of a per-machine GitHub App. Use when asked to run the app locally, test a dashboard change against real PRs, reproduce something a screenshot shows, or when local login fails with "GITHUB_APP_CLIENT_ID not configured".
+description: Run the Alephat dashboard locally against real GitHub data, signed in with the `gh` CLI instead of a per-machine GitHub App. Use when asked to run the app locally, test a dashboard change against real PRs, reproduce something a screenshot shows, or when local login fails with "GITHUB_APP_CLIENT_ID not configured".
 ---
 
 # Local dashboard on real GitHub data

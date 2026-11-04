@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 
-// Runs that Open SWE dispatches itself (Slack, Linear, GitHub, schedules) must
+// Runs that Alephat dispatches itself (Slack, Linear, GitHub, schedules) must
 // stream the same v3 protocol events as runs the dashboard starts: `tools`
 // events for the root agent and namespaced events for its subagents. The
 // server fixes a run's streaming protocol at creation, so a legacy-shaped

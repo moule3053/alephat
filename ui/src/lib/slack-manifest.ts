@@ -58,20 +58,20 @@ export function slackAppManifest(
       messages_tab_enabled: true,
       messages_tab_read_only_enabled: false,
     },
-    bot_user: { display_name: "Open SWE", always_online: true },
+    bot_user: { display_name: "Alephat", always_online: true },
     shortcuts: [
       {
         name: "Explain This",
         type: "message",
         callback_id: "open_swe_explain",
-        description: "Ask Open SWE to explain this message",
+        description: "Ask Alephat to explain this message",
       },
     ],
     slash_commands: [
       {
         command: ASK_COMMAND,
         url: `${backendUrl}/webhooks/slack/commands`,
-        description: "Ask Open SWE",
+        description: "Ask Alephat",
         usage_hint: "[your request or question]",
         should_escape: false,
       },
@@ -86,8 +86,8 @@ export function slackAppManifest(
 
   return {
     display_information: {
-      name: "Open SWE",
-      description: "Enables Open SWE to interact with your workspace",
+      name: "Alephat",
+      description: "Enables Alephat to interact with your workspace",
       background_color: "#000000",
     },
     features,

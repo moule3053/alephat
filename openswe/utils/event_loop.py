@@ -1,4 +1,4 @@
-"""Open SWE runs on exactly one event loop per process.
+"""Alephat runs on exactly one event loop per process.
 
 Sandbox state is cached per thread in a process-global registry and reused by
 later runs. Isolated queue loops hand each worker its own loop, so anything
@@ -52,7 +52,7 @@ def pin_single_event_loop() -> None:
     if not hasattr(langgraph_config, ISOLATED_LOOPS_ENV):
         msg = (
             f"langgraph_api.config has no {ISOLATED_LOOPS_ENV}. The queue's loop model "
-            "changed, so Open SWE can no longer guarantee one event loop per process."
+            "changed, so Alephat can no longer guarantee one event loop per process."
         )
         raise RuntimeError(msg)
 
@@ -63,7 +63,7 @@ def pin_single_event_loop() -> None:
 
     if requested:
         logger.warning(
-            "%s was set; forcing it off. Open SWE requires one event loop per process.",
+            "%s was set; forcing it off. Alephat requires one event loop per process.",
             ISOLATED_LOOPS_ENV,
         )
 

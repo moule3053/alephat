@@ -34,7 +34,7 @@ GIT_INDEX_FILE="$index" git add -A
 tree=$(GIT_INDEX_FILE="$index" git write-tree)
 rm -f "$index"
 wip=$(git -c user.name=open-swe -c user.email=open-swe@users.noreply.github.com \
-  commit-tree "$tree" -p HEAD -m "Open SWE handoff")
+  commit-tree "$tree" -p HEAD -m "Alephat handoff")
 git update-ref refs/open-swe/handoff "$wip"
 git bundle create {bundle} refs/open-swe/handoff --not --remotes=origin 2>/dev/null
 git update-ref -d refs/open-swe/handoff

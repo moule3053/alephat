@@ -1,4 +1,4 @@
-# Open SWE dashboard design
+# Alephat dashboard design
 
 Use the published `@langchain/macaw-components` and `@langchain/macaw-tokens` packages for shared UI.
 Import components through their package subpaths.
@@ -21,7 +21,7 @@ Read its [component guidance](node_modules/@langchain/macaw-components/docs/DESI
 
 ## Product layout and variants
 
-Preserve Open SWE’s compact workspace layout and information density when adopting shared components.
+Preserve Alephat’s compact workspace layout and information density when adopting shared components.
 Keep titles and repository headings visually distinct from supporting metadata.
 Inspect the relevant component’s source and stories returned by the CLI before selecting its size, color, and variant.
 Use an emphasized action for the primary task and quieter controls for secondary actions, navigation, and disclosures.
@@ -29,7 +29,7 @@ Do not shrink text or override shared colors simply to make a default variant fi
 Check the wrapper’s height, padding, truncation, and focus-ring clearance instead.
 
 Compose existing primitives for product-specific layouts.
-Keep shared component behavior and reusable variants in Macaw rather than copying them into Open SWE.
+Keep shared component behavior and reusable variants in Macaw rather than copying them into Alephat.
 Keep routing, permissions, data fetching, and domain behavior in the application.
 
 ## UI conventions

@@ -1,4 +1,4 @@
-"""Small configuration files Open SWE reads from a repository's ``.open-swe`` directory."""
+"""Small configuration files Alephat reads from a repository's ``.open-swe`` directory."""
 
 import logging
 import random

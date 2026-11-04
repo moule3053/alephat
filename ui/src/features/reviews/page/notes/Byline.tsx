@@ -71,7 +71,7 @@ export function ReviewStateMark({ state }: { state: ConversationReviewState }) {
   )
 }
 
-/** A person's avatar; bots are square, and what Open SWE posted as someone shows its mark. */
+/** A person's avatar; bots are square, and what Alephat posted as someone shows its mark. */
 export function Avatar({
   author,
   size = "sm",

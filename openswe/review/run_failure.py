@@ -192,13 +192,13 @@ class ReviewRunFailure(BaseModel):
                 "No GitHub token to settle the failed review's check", extra=self.log_extra
             )
             return
-        # Neutral, not failure: a red X misreads an Open SWE outage as a problem in the code.
+        # Neutral, not failure: a red X misreads an Alephat outage as a problem in the code.
         result = pending or _CheckResult(
             conclusion="neutral",
             title="Review couldn't run",
             summary=(
-                f"Open SWE stopped before it could review this pull request: {self.reason}. "
-                "Push a commit or re-request a review from Open SWE to run it again."
+                f"Alephat stopped before it could review this pull request: {self.reason}. "
+                "Push a commit or re-request a review from Alephat to run it again."
             ),
         )
         await settle_review_check_run(

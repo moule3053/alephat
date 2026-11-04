@@ -30,7 +30,7 @@ interface LocalBridgesOptions {
 }
 
 const CREDENTIAL_REJECTED =
-  "The Open SWE session expired. Sign in again to keep running local threads.";
+  "The Alephat session expired. Sign in again to keep running local threads.";
 
 class LocalBridges {
   private readonly api: BridgeHttpApi;

@@ -158,7 +158,7 @@ class CreateResponseRequest(_Lenient):
         return self.conversation
 
     def agent_model(self) -> tuple[str, str] | None:
-        """``model`` as an Open SWE model id; anything else runs the workspace default."""
+        """``model`` as an Alephat model id; anything else runs the workspace default."""
         requested = self.reasoning.effort if self.reasoning else None
         for effort in (requested, DEFAULT_MODEL_EFFORT):
             model_id, chosen = normalize_model_choice(self.model, effort)

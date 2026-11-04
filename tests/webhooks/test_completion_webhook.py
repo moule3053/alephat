@@ -77,7 +77,7 @@ async def test_reviewer_error_preserves_pending_check_result(
         "review_check_pending_result": {
             "conclusion": "success",
             "title": "Found 1 potential issue",
-            "summary": "Open SWE surfaced 1 potential issue.",
+            "summary": "Alephat surfaced 1 potential issue.",
         },
         "pr": {"owner": "acme", "name": "widgets"},
         "source": "schedule",
@@ -101,7 +101,7 @@ async def test_reviewer_error_preserves_pending_check_result(
         token="token",
         conclusion="success",
         title="Found 1 potential issue",
-        summary="Open SWE surfaced 1 potential issue.",
+        summary="Alephat surfaced 1 potential issue.",
     )
 
 
@@ -226,7 +226,7 @@ async def test_a_github_channel_run_still_reports_its_failure_on_the_issue(
     comment = AsyncMock(return_value=True)
     monkeypatch.setattr(completion, "post_github_comment", comment)
 
-    # MDA's GitHub channel posts no failure notice, so Open SWE's reply stays.
+    # MDA's GitHub channel posts no failure notice, so Alephat's reply stays.
     result = await completion.handle_run_completion(
         {"thread_id": "t1", "run_id": "run-1", "status": "error", "metadata": {"channel": "github"}}
     )

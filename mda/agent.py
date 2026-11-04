@@ -1,8 +1,8 @@
-"""Open SWE's graphs as one Managed Deep Agent.
+"""Alephat's graphs as one Managed Deep Agent.
 
-Open SWE dispatch names the graph a run plays (``agent``, ``reviewer`` or
+Alephat dispatch names the graph a run plays (``agent``, ``reviewer`` or
 ``review-scout``) in its context. The model loop, its checkpoints and every tool call
-run here. The Open SWE backend holds every credential and plans the run: the catalog
+run here. The Alephat backend holds every credential and plans the run: the catalog
 it works out as it starts the run names the run's operations, subagents, models,
 sandbox and the rules of its loop. This runtime's own middleware runs the loop
 around each model call as those rules say (``rt.loop``), asking the backend only for
@@ -21,7 +21,7 @@ loop.
 
 The same agent runs as the async ``general-purpose`` subagent, the graph
 ``open-swe--general-purpose``, for the task workers a coordinator launches with
-``start_async_task``. A worker is an Open SWE thread of its own: it starts with a
+``start_async_task``. A worker is an Alephat thread of its own: it starts with a
 worker grant, adopts its own run token, and runs this agent's middleware as it.
 """
 
@@ -91,7 +91,7 @@ _MODEL_CALL_LIMIT: Final = 5_000
 # A worker's system prompt starts as this agent's; each run's follows it.
 _INSTRUCTIONS: Final = Path(__file__).with_name("instructions.md").read_text()
 _WORKER_DESCRIPTION: Final = (
-    "An Open SWE task worker: a full agent of its own, sharing this thread's sandbox, "
+    "An Alephat task worker: a full agent of its own, sharing this thread's sandbox, "
     "that works on one assignment in the background and reports back as a task message."
 )
 # The subagent each graph delegates to with ``task``; its description, prompt and

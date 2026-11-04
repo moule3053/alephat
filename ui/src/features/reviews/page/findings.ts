@@ -78,11 +78,11 @@ function findingRef(finding: ReviewFinding): string {
 }
 
 export function askAboutFinding(finding: ReviewFinding): string {
-  return `About Open SWE's finding "${finding.title}" at ${findingRef(finding)}: `
+  return `About Alephat's finding "${finding.title}" at ${findingRef(finding)}: `
 }
 
 export function fixFinding(finding: ReviewFinding): string {
-  return `Fix Open SWE's finding "${finding.title}" at ${findingRef(finding)} on this branch.`
+  return `Fix Alephat's finding "${finding.title}" at ${findingRef(finding)} on this branch.`
 }
 
 export function findingTarget(finding: AnchoredFinding): LineTarget {
@@ -131,7 +131,7 @@ export function mirroredThreadIds(
   )
 }
 
-/** Unresolved threads, less the GitHub copies of Open SWE's findings, which count as findings. */
+/** Unresolved threads, less the GitHub copies of Alephat's findings, which count as findings. */
 export function openConversations(
   threads: ReadonlyArray<ReviewThread>,
   findings: ReadonlyArray<ReviewFinding>

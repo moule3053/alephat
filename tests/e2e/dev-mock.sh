@@ -15,7 +15,7 @@ UI_PORT="${UI_PORT:-3000}"
 API="http://127.0.0.1:${API_PORT}"
 UI="http://127.0.0.1:${UI_PORT}"
 
-# An Open SWE sandbox points OPENAI_BASE_URL at Open SWE's own Responses API,
+# An Alephat sandbox points OPENAI_BASE_URL at Alephat's own Responses API,
 # behind a placeholder key. Each call there starts a production thread, so drop both.
 case "${OPENAI_BASE_URL:-}" in
   */sandbox-openai/*) unset OPENAI_BASE_URL OPENAI_API_KEY ;;
@@ -61,7 +61,7 @@ echo "  Slack/GitHub are mocked. Open two browser profiles to be"
 echo "  two users (Alice owns the plan; Bob can comment + request changes)."
 echo
 
-# Every Open SWE thread runs on the Managed Deep Agents server beside it.
+# Every Alephat thread runs on the Managed Deep Agents server beside it.
 E2E_REAL_LLM="${REAL_LLM}" tests/e2e/mda-dev.sh &
 MDA=$!
 E2E_REAL_LLM="${REAL_LLM}" uv run langgraph dev --config tests/e2e/langgraph.e2e.json \

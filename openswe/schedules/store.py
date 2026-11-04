@@ -118,7 +118,7 @@ class GitHubTrigger(BaseModel):
 
 
 class SlackTrigger(BaseModel):
-    """Fires on messages in one Slack channel Open SWE is a member of."""
+    """Fires on messages in one Slack channel Alephat is a member of."""
 
     kind: Literal["slack"] = "slack"
     channel: str = Field(min_length=9, max_length=40)
@@ -623,7 +623,7 @@ async def _checked_triggers(
     triggers: Sequence[TriggerConfig], login: str, *, use_workspace_credentials: bool
 ) -> list[TriggerConfig]:
     """``triggers`` once whoever configures them can reach every repository they name,
-    and Open SWE can read every Slack channel they watch."""
+    and Alephat can read every Slack channel they watch."""
     repos = {trigger.repo for trigger in triggers if isinstance(trigger, GitHubTrigger)}
     for repo in repos:
         if use_workspace_credentials:
@@ -636,7 +636,7 @@ async def _checked_triggers(
 
 
 async def _require_watchable_slack_channel(channel_id: str) -> None:
-    """Refuse a channel whose messages Slack doesn't deliver to Open SWE."""
+    """Refuse a channel whose messages Slack doesn't deliver to Alephat."""
     channel = await SlackChannel.load(channel_id, use_cache=False)
     if channel is None:
         raise HTTPException(422, f"Slack channel {channel_id} could not be read")
@@ -644,7 +644,7 @@ async def _require_watchable_slack_channel(channel_id: str) -> None:
         raise HTTPException(422, "externally shared Slack channels can't trigger automations")
     if channel.payload.get("is_member") is not True:
         raise HTTPException(
-            422, f"invite Open SWE to #{channel.name or channel_id} so it sees its messages"
+            422, f"invite Alephat to #{channel.name or channel_id} so it sees its messages"
         )
 
 
@@ -1226,7 +1226,7 @@ async def launch_github_automations(
     if sender in OPEN_SWE_GITHUB_LOGINS:
         # A run that opens or closes a pull request would otherwise trigger itself.
         logger.info(
-            "Ignoring Open SWE's own GitHub event for automations",
+            "Ignoring Alephat's own GitHub event for automations",
             extra={"github_delivery": delivery_id, "github_event": event_type},
         )
         return []

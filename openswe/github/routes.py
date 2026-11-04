@@ -217,7 +217,7 @@ async def github_webhook(
         return {"status": "accepted", "message": "Processing review thread resolution"}
 
     if event_type == "pull_request_review" and payload.get("action") in {"submitted", "dismissed"}:
-        # Any reviewer's verdict can complete a review request, registered with Open SWE or not.
+        # Any reviewer's verdict can complete a review request, registered with Alephat or not.
         background_tasks.add_task(service.settle_human_reviews, payload)
         if payload.get("action") == "submitted":
             background_tasks.add_task(CompletedReview.record, payload)
@@ -267,7 +267,7 @@ async def github_webhook(
             "Ignoring GitHub comment from an unregistered sender",
             extra={"github_event": event_type, "sender_login": sender_login},
         )
-        return {"status": "ignored", "reason": "Sender is not a registered Open SWE user"}
+        return {"status": "ignored", "reason": "Sender is not a registered Alephat user"}
 
     if (
         event_type == "pull_request_review_comment"

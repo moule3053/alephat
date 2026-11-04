@@ -32,7 +32,7 @@ AS_THE_CONVERSATION = {
     "x-mda-source-provider": "linear",
     "x-mda-source-thread-id": "org/ISS-1",
 }
-# A person's Open SWE user, which ``resolve_user`` names their channel runs by.
+# A person's Alephat user, which ``resolve_user`` names their channel runs by.
 USER_ID = "0190a3c4-0000-7000-8000-00000000ada0"
 # MDA's workspace, and the Agent Auth principal its channels run that user as there.
 WORKSPACE = "6f1e2d3c-0000-4000-8000-0000000000aa"
@@ -704,7 +704,7 @@ async def test_a_dashboard_command_on_a_channel_thread_is_its_senders(
     machine = Principal(kind="api_key", workspace="acme")
 
     assert await proxy._sender_user_id(Principal.of_login("ada"), "ada", channel) == str(ada.id)
-    # Only on a channel's thread, for a person Open SWE knows.
+    # Only on a channel's thread, for a person Alephat knows.
     assert await proxy._sender_user_id(Principal.of_login("ada"), "ada", {}) is None
     assert await proxy._sender_user_id(Principal.of_login("bob"), "bob", channel) is None
     # A machine is no person: the write is the channel's own.

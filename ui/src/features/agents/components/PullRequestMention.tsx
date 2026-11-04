@@ -46,7 +46,7 @@ function ReviewLink({
   )
 }
 
-/** Inline mention: the Open SWE review page, then a GitHub mark. */
+/** Inline mention: the Alephat review page, then a GitHub mark. */
 export function PullRequestChip({
   href,
   repoFullName,
@@ -104,7 +104,7 @@ export function PullRequestCard({
       <ReviewLink
         repoFullName={repoFullName}
         number={number}
-        aria-label={`Review ${repoFullName} pull request #${number} in Open SWE`}
+        aria-label={`Review ${repoFullName} pull request #${number} in Alephat`}
         className="flex min-w-0 flex-1 items-center gap-space-3 rounded-lg px-space-2 py-space-1 transition-colors hover:bg-surface-level-1-hover"
       >
         <GitPullRequestIcon

@@ -226,7 +226,7 @@ export function GitSettings() {
         />
         <SettingsRow
           label="Review my drafts"
-          description="Whether Open SWE Review runs on draft pull requests you open."
+          description="Whether Alephat Review runs on draft pull requests you open."
           control={
             <Select
               aria-label="Review my drafts"
