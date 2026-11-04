@@ -85,7 +85,7 @@ Task status:
 curl -s http://localhost:8080/v1/tasks | jq .
 ```
 
-Open the platform console at `http://localhost:3000/platform`.
+Open the platform console at `http://localhost:3005/platform`.
 Nginx serves the SPA and proxies `/v1/*` to the API service, including the unbuffered SSE event stream.
 The UI supports task creation, task status/activity, mid-run guidance and cancellation, approvals, model/sandbox defaults, and MCP server create/test/delete.
 
