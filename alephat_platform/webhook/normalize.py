@@ -180,7 +180,7 @@ def normalize_slack(
         "source": TaskSource.SLACK.value,
         "source_ref": f"{channel}/{thread_ts}",
         "thread_id": thread_id,
-        "agent_type": AgentType.CODING.value if repo else AgentType.WORKSPACE.value,
+        "agent_type": AgentType.CODING.value,
         "actor": {"kind": "slack_user", "id": user},
         "repo": repo,
         "title": text[:120],

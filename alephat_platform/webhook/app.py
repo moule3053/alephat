@@ -102,6 +102,10 @@ class SlackSocketModeClient:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [webhook] %(message)s",
+    )
     settings = get_settings()
     stop = asyncio.Event()
     app.state.nats = None
