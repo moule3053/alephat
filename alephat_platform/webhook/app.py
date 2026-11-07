@@ -87,6 +87,9 @@ class SlackSocketModeClient:
                     "delivery_id": delivery_id,
                     "slack_event_type": event_type,
                     "result": result,
+                    "event_details": json.dumps(
+                        {"event_type": event_type, "delivery_id": delivery_id, "result": result}
+                    ),
                 },
             )
 
@@ -104,6 +107,21 @@ class SlackSocketModeClient:
                         frame = json.loads(raw if isinstance(raw, str) else raw.decode())
                         if not isinstance(frame, dict):
                             continue
+                        payload = frame.get("payload")
+                        event = payload.get("event") if isinstance(payload, dict) else None
+                        logger.info(
+                            "Received Slack Socket Mode frame",
+                            extra={
+                                "event_details": json.dumps(
+                                    {
+                                        "frame_type": frame.get("type"),
+                                        "event_type": (
+                                            event.get("type") if isinstance(event, dict) else None
+                                        ),
+                                    }
+                                )
+                            },
+                        )
                         envelope_id = frame.get("envelope_id")
                         if isinstance(envelope_id, str) and envelope_id:
                             await ws.send(json.dumps({"envelope_id": envelope_id}))
@@ -121,10 +139,14 @@ class SlackSocketModeClient:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s [webhook] %(message)s",
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s [webhook] %(message)s %(event_details)s",
+            defaults={"event_details": ""},
+        )
     )
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
     settings = get_settings()
     stop = asyncio.Event()
     app.state.nats = None
