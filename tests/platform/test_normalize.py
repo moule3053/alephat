@@ -66,6 +66,29 @@ def test_slack_mention():
     assert cmd["thread_id"] == "slack:C1:1.2"
 
 
+def test_slack_channel_messages_require_a_mention_but_dms_do_not(monkeypatch):
+    monkeypatch.setenv("SLACK_BOT_USER_ID", "U1")
+    event = {
+        "type": "message",
+        "text": "hello",
+        "channel": "C1",
+        "channel_type": "group",
+        "ts": "1.2",
+        "user": "U2",
+    }
+    assert normalize_slack({"event": event}, org_id="org", delivery_id="E1")["command"] == "ignore"
+    event["text"] = "<@U1> hello"
+    assert (
+        normalize_slack({"event": event}, org_id="org", delivery_id="E2")["message"]["content"]
+        == "hello"
+    )
+    event.update({"channel": "D1", "channel_type": "im", "text": "hello"})
+    assert (
+        normalize_slack({"event": event}, org_id="org", delivery_id="E3")["command"]
+        == "upsert_and_enqueue"
+    )
+
+
 def test_slack_signature_rejects_replay():
     secret = "secret"
     body = b'{"event_id":"E1"}'

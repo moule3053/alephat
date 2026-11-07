@@ -1,14 +1,15 @@
+import uuid
 from unittest.mock import patch
 
 import pytest
 from deepagents.backends import StateBackend
-from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 from alephat_platform.common.config import clear_settings_cache
 from alephat_platform.harness import agents
 from alephat_platform.harness.agents import REGISTRY, RunContext, get_agent
 from alephat_platform.harness.sandboxes import SandboxRef
+from alephat_platform.harness.slack import SlackReply
 
 
 def test_all_agent_types():
@@ -77,15 +78,16 @@ async def test_agent_resumes_checkpoint_and_injects_boundary_guidance():
 
 
 @pytest.mark.asyncio
-async def test_real_backend_uses_deep_agent_runtime(monkeypatch):
-    class FakeModel(FakeMessagesListChatModel):
+@pytest.mark.parametrize("slack", [False, True])
+async def test_real_backend_uses_deep_agent_runtime(monkeypatch, slack):
+    class FakeModel(FakeListChatModel):
         def bind_tools(self, *_args, **_kwargs):
             return self
 
     monkeypatch.setattr(
         agents,
         "_make_deep_agent_model",
-        lambda _model, **_kwargs: FakeModel(responses=[AIMessage(content="deep agent complete")]),
+        lambda _model, **_kwargs: FakeModel(responses=["deep agent complete"]),
     )
     events = []
 
@@ -94,6 +96,20 @@ async def test_real_backend_uses_deep_agent_runtime(monkeypatch):
 
     async def on_boundary():
         return []
+
+    class RecordingReply(SlackReply):
+        def __init__(self):
+            super().__init__(uuid.uuid4(), uuid.uuid4(), {"channel": "D1", "thread_ts": "1.2"})
+            self.enabled = True
+            self.previews = []
+
+        async def instructions(self):
+            return ""
+
+        async def preview(self, text):
+            self.previews.append(text)
+
+    reply = RecordingReply() if slack else None
 
     context = RunContext(
         org_id="org",
@@ -110,6 +126,7 @@ async def test_real_backend_uses_deep_agent_runtime(monkeypatch):
         sandbox_id="sandbox",
         mcp_snapshot=[],
         checkpoint=None,
+        slack_reply=reply,
     )
     result = await get_agent("coding").run(
         context,
@@ -128,6 +145,8 @@ async def test_real_backend_uses_deep_agent_runtime(monkeypatch):
     assert result.final_message == "deep agent complete"
     assert result.checkpoint_blob["runtime"] == "deepagents"
     assert [event for event, _payload in events].count("model_started") == 1
+    if reply:
+        assert reply.previews[-1] == result.final_message
 
 
 def test_runtime_instructions_include_repo_rules_and_plan_mode():

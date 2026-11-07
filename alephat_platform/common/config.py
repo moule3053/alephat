@@ -121,6 +121,14 @@ class Settings:
     github_webhook_secret: str | None = field(default_factory=lambda: _env("GITHUB_WEBHOOK_SECRET"))
     slack_signing_secret: str | None = field(default_factory=lambda: _env("SLACK_SIGNING_SECRET"))
     slack_app_token: str | None = field(default_factory=lambda: _env("SLACK_APP_TOKEN"))
+    slack_bot_token: str = field(default_factory=lambda: _env("SLACK_BOT_TOKEN", "") or "")
+    slack_renderer_url: str = field(
+        default_factory=lambda: _env("SLACK_RENDERER_URL", "http://127.0.0.1:8082") or ""
+    )
+    slack_renderer_token: str = field(
+        default_factory=lambda: _env("SLACK_RENDERER_TOKEN", "") or ""
+    )
+    slack_user_map: str = field(default_factory=lambda: _env("SLACK_USER_MAP", "{}") or "{}")
     webhook_signatures_required: bool = field(
         default_factory=lambda: _env_bool("WEBHOOK_SIGNATURES_REQUIRED", False)
     )

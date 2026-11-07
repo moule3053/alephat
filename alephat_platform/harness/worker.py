@@ -33,6 +33,7 @@ from alephat_platform.harness.agents import RunContext, get_agent
 from alephat_platform.harness.llm_client import make_llm_client
 from alephat_platform.harness.mcp_runtime import connect_mcp_servers
 from alephat_platform.harness.sandboxes import SandboxProviderBase, SandboxRef, get_sandbox_provider
+from alephat_platform.harness.slack import SlackReply
 from openswe.github.app import get_github_app_installation_token
 
 logger = logging.getLogger(__name__)
@@ -348,7 +349,8 @@ class HarnessWorker:
             }
             await session.commit()
 
-        await self._notify_slack_start(task_snapshot["metadata"])
+        slack_reply = SlackReply(task_id, run_id, task_snapshot["metadata"])
+        await slack_reply.start()
         provider = get_sandbox_provider(task_snapshot["sandbox_provider"])
         try:
             if task_snapshot["sandbox_id"]:
@@ -382,6 +384,10 @@ class HarnessWorker:
                     error_message=str(exc),
                 )
                 await session.commit()
+            await slack_reply.finish(
+                "The sandbox could not be started. Please retry or check the sandbox configuration.",
+                status="failed",
+            )
             return
 
         async with factory() as session:
@@ -427,6 +433,10 @@ class HarnessWorker:
                     error_message=str(exc),
                 )
                 await session.commit()
+            await slack_reply.finish(
+                "The repository could not be prepared. Please check repository access and the selected branch.",
+                status="failed",
+            )
             return
 
         if task_snapshot["repo"]:
@@ -498,6 +508,10 @@ class HarnessWorker:
                     error_message=str(exc),
                 )
                 await session.commit()
+            await slack_reply.finish(
+                "A required integration could not be connected. Please check its configuration.",
+                status="failed",
+            )
             return
 
         ctx = RunContext(
@@ -518,6 +532,7 @@ class HarnessWorker:
             metadata=task_snapshot["metadata"],
             last_message_seq=task_snapshot["last_message_seq"],
             cancel_requested=task_snapshot["cancel_requested"],
+            slack_reply=slack_reply,
         )
 
         try:
@@ -533,6 +548,7 @@ class HarnessWorker:
                     error_message=ctx.agent_type,
                 )
                 await session.commit()
+            await slack_reply.finish("This task's agent type is not available.", status="failed")
             return
 
         async def on_step(event_type: str, payload: dict[str, Any]) -> None:
@@ -636,6 +652,10 @@ class HarnessWorker:
                     error_message=str(exc),
                 )
                 await session.commit()
+            await slack_reply.finish(
+                "The agent encountered an error. The task details contain the failure information.",
+                status="failed",
+            )
             return
         finally:
             heartbeat_stop.set()
@@ -679,6 +699,7 @@ class HarnessWorker:
                     reason=result.park_reason or ParkReason.PLAN_APPROVAL.value,
                     approval_payload=result.approval_payload,
                 )
+                reply_status = task_row.park_reason or "agent_question"
             else:
                 await complete_task(
                     session,
@@ -688,6 +709,7 @@ class HarnessWorker:
                     error_code=result.error_code,
                     error_message=None if result.success else result.final_message,
                 )
+                reply_status = task_row.status
                 if has_trailing_message and not task_row.cancel_requested_at:
                     task_row.status = TaskStatus.QUEUED.value
                     task_row.park_reason = None
@@ -708,77 +730,11 @@ class HarnessWorker:
                     )
             await session.commit()
 
-        await self._notify_slack_result(
-            task_snapshot["metadata"],
-            success=result.success,
-            final_message=result.final_message,
+        await slack_reply.finish(
+            result.final_message,
+            status=reply_status,
             pr_url=repo_outcome.get("pr_url") if isinstance(repo_outcome, dict) else None,
         )
-
-    async def _notify_slack_start(self, metadata: dict[str, Any]) -> None:
-        import os
-
-        import httpx
-
-        token = os.environ.get("SLACK_BOT_TOKEN", "").strip()
-        channel = metadata.get("channel") if isinstance(metadata, dict) else None
-        ts = (
-            (metadata.get("message_ts") or metadata.get("thread_ts"))
-            if isinstance(metadata, dict)
-            else None
-        )
-        if not token or not isinstance(channel, str) or not isinstance(ts, str):
-            return
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                await client.post(
-                    "https://slack.com/api/reactions.add",
-                    headers={"Authorization": f"Bearer {token}"},
-                    json={"channel": channel, "timestamp": ts, "name": "eyes"},
-                )
-        except Exception:
-            logger.debug("Slack start reaction failed", exc_info=True)
-
-    async def _notify_slack_result(
-        self,
-        metadata: dict[str, Any],
-        *,
-        success: bool,
-        final_message: str | None,
-        pr_url: str | None,
-    ) -> None:
-        import os
-
-        import httpx
-
-        token = os.environ.get("SLACK_BOT_TOKEN", "").strip()
-        channel = metadata.get("channel") if isinstance(metadata, dict) else None
-        thread_ts = metadata.get("thread_ts") if isinstance(metadata, dict) else None
-        msg_ts = (metadata.get("message_ts") or thread_ts) if isinstance(metadata, dict) else None
-        if not token or not isinstance(channel, str) or not isinstance(thread_ts, str):
-            return
-        text = (final_message or ("Task completed." if success else "Task failed.")).strip()
-        if pr_url:
-            text = f"{text}\n\nPull Request: {pr_url}"
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                await client.post(
-                    "https://slack.com/api/chat.postMessage",
-                    headers={"Authorization": f"Bearer {token}"},
-                    json={"channel": channel, "thread_ts": thread_ts, "text": text},
-                )
-                if isinstance(msg_ts, str):
-                    await client.post(
-                        "https://slack.com/api/reactions.add",
-                        headers={"Authorization": f"Bearer {token}"},
-                        json={
-                            "channel": channel,
-                            "timestamp": msg_ts,
-                            "name": "white_check_mark" if success else "x",
-                        },
-                    )
-        except Exception:
-            logger.warning("Failed to post Slack thread reply", exc_info=True)
 
 
 def main() -> None:

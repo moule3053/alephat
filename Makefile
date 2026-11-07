@@ -1,6 +1,7 @@
 .PHONY: all format format-check lint typecheck mda-typecheck mda-test test tests integration_tests help run dev dev-mda mda-cli dev-ui postgres migration tunnel web build-dashboard desktop install-desktop install-checkout swagger cli hooks platform-api platform-webhook platform-harness platform-deps platform-migrate platform-up platform-down platform-build platform-logs platform-ps
 
 # Default target executed when no arguments are given to make.
+.PHONY: platform-slack-renderer
 all: help
 
 ######################
@@ -117,7 +118,7 @@ platform-down:
 	$(COMPOSE_CMD) down
 
 platform-logs:
-	$(COMPOSE_CMD) logs -f api webhook harness ui
+	$(COMPOSE_CMD) logs -f api webhook harness slack-renderer ui
 
 platform-ps:
 	$(COMPOSE_CMD) ps
@@ -131,6 +132,9 @@ platform-webhook:
 
 platform-harness:
 	uv run python -m alephat_platform.harness.worker
+
+platform-slack-renderer:
+	pnpm --filter @alephat/slack-renderer dev
 
 install:
 	uv sync --extra dev

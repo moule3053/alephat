@@ -1,0 +1,19 @@
+FROM node:24-alpine AS build
+WORKDIR /app
+RUN corepack enable
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY ui/patches ui/patches
+COPY desktop/patches desktop/patches
+COPY slack-renderer/package.json slack-renderer/package.json
+RUN pnpm install --frozen-lockfile --filter @alephat/slack-renderer...
+COPY slack-renderer slack-renderer
+RUN pnpm --filter @alephat/slack-renderer build
+
+FROM node:24-alpine
+WORKDIR /app
+ENV NODE_ENV=production HOST=0.0.0.0 PORT=8082
+COPY --from=build --chown=node:node /app/node_modules node_modules
+COPY --from=build --chown=node:node /app/slack-renderer slack-renderer
+USER node
+EXPOSE 8082
+CMD ["node", "slack-renderer/dist/server.js"]

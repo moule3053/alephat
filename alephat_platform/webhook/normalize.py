@@ -155,6 +155,12 @@ def normalize_slack(
 
     text = event.get("text") or ""
     channel = event.get("channel")
+    if (
+        event_type == "message"
+        and event.get("channel_type") != "im"
+        and not (bot_user_id and f"<@{bot_user_id}>" in text)
+    ):
+        return _ignore(org_id, delivery_id, "no_mention")
     if bot_user_id:
         text = re.sub(rf"<@{re.escape(bot_user_id)}>\s*", "", text).strip()
 
@@ -181,7 +187,12 @@ def normalize_slack(
         "title": text[:120],
         "message": {"kind": "user_input", "content": text, "blocks": []},
         "idempotency_key": f"slack:{delivery_id}",
-        "metadata": {"channel": channel, "thread_ts": thread_ts, "message_ts": message_ts},
+        "metadata": {
+            "channel": channel,
+            "thread_ts": thread_ts,
+            "message_ts": message_ts,
+            "slack_team_id": payload.get("team_id"),
+        },
     }
 
 

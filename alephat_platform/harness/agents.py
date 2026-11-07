@@ -6,15 +6,16 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from langchain.agents.middleware import AgentMiddleware, AgentState
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langchain_core.messages import message_to_dict as langchain_message_to_dict
 from langchain_core.messages.utils import messages_from_dict
-from langchain_core.tools import tool
+from langchain_core.tools import BaseTool, tool
 
 from alephat_platform.common.config import get_settings
 from alephat_platform.harness.llm_client import LLMClient, parse_model_id, resolve_llm_mode
 from alephat_platform.harness.mcp_runtime import McpSession
 from alephat_platform.harness.sandboxes import ExecResult, SandboxProviderBase, SandboxRef
+from alephat_platform.harness.slack import SlackReply, SlackTools
 
 logger = logging.getLogger(__name__)
 
@@ -163,8 +164,9 @@ def _model_effort_kwargs(provider: str, effort: Any) -> dict[str, Any]:
     return {}
 
 
-def _make_deep_agent_model(model_id: str, *, effort: Any = None) -> Any:
+def _make_deep_agent_model(model_id: str, *, effort: Any = None, streaming: bool = False) -> Any:
     settings = get_settings()
+    stream_options = {"streaming": True} if streaming else {}
     if resolve_llm_mode() == "litellm":
         from langchain_openai import ChatOpenAI
 
@@ -173,6 +175,7 @@ def _make_deep_agent_model(model_id: str, *, effort: Any = None) -> Any:
             api_key=settings.litellm_api_key,
             base_url=settings.litellm_base_url or "http://localhost:4000",
             max_retries=5,
+            **stream_options,
             **_model_effort_kwargs("openai", effort),
         )
 
@@ -186,6 +189,7 @@ def _make_deep_agent_model(model_id: str, *, effort: Any = None) -> Any:
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
             max_retries=5,
+            **stream_options,
             **effort_kwargs,
         )
     if parsed.provider == "anthropic":
@@ -196,6 +200,7 @@ def _make_deep_agent_model(model_id: str, *, effort: Any = None) -> Any:
             api_key=settings.anthropic_api_key,
             base_url=settings.anthropic_base_url,
             max_retries=5,
+            **stream_options,
             **effort_kwargs,
         )
     if parsed.provider == "fireworks":
@@ -206,6 +211,7 @@ def _make_deep_agent_model(model_id: str, *, effort: Any = None) -> Any:
             api_key=settings.fireworks_api_key,
             base_url=settings.fireworks_base_url,
             max_retries=5,
+            **stream_options,
             **effort_kwargs,
         )
     if parsed.provider in {"google", "gemini", "google_genai", "google-genai"}:
@@ -215,6 +221,7 @@ def _make_deep_agent_model(model_id: str, *, effort: Any = None) -> Any:
             model=parsed.model,
             google_api_key=settings.google_api_key,
             max_retries=5,
+            **stream_options,
             **effort_kwargs,
         )
     raise ValueError(f"Unsupported Deep Agent model provider: {parsed.provider}")
@@ -250,6 +257,7 @@ class RunContext:
     metadata: dict[str, Any] = field(default_factory=dict)
     last_message_seq: int = 0
     cancel_requested: bool = False
+    slack_reply: SlackReply | None = None
 
 
 def _runtime_instructions(ctx: RunContext) -> str:
@@ -295,6 +303,7 @@ class CodingAgentRunner:
         if sandbox_ref.handle is not None:
             return await self._run_deep_agent(
                 ctx,
+                sandbox=sandbox,
                 sandbox_ref=sandbox_ref,
                 mcp_sessions=mcp_sessions,
                 on_step=on_step,
@@ -472,6 +481,7 @@ class CodingAgentRunner:
         self,
         ctx: RunContext,
         *,
+        sandbox: SandboxProviderBase,
         sandbox_ref: SandboxRef,
         mcp_sessions: list[McpSession],
         on_step: Any,
@@ -535,21 +545,55 @@ class CodingAgentRunner:
         runtime_instructions = _runtime_instructions(ctx)
         if runtime_instructions:
             system_prompt += f"\n\n{runtime_instructions}"
+        slack_tools: list[BaseTool] = []
+        if ctx.slack_reply and ctx.slack_reply.enabled:
+            system_prompt += f"\n\n{await ctx.slack_reply.instructions()}"
+            slack_tools.extend(await SlackTools(ctx.slack_reply, sandbox, sandbox_ref).tools())
         graph = create_deep_agent(
-            model=_make_deep_agent_model(ctx.model, effort=ctx.metadata.get("agent_effort")),
+            model=_make_deep_agent_model(
+                ctx.model,
+                effort=ctx.metadata.get("agent_effort"),
+                streaming=bool(ctx.slack_reply and ctx.slack_reply.enabled),
+            ),
             system_prompt=system_prompt,
-            tools=[request_plan_approval, request_user_guidance, *mcp_tools],
+            tools=[request_plan_approval, request_user_guidance, *mcp_tools, *slack_tools],
             backend=sandbox_ref.handle,
             middleware=[middleware],
             context_schema=AgentRuntimeContext,
             checkpointer=False,
         )
         try:
-            result = await graph.ainvoke(
-                {"messages": history},
-                config={"recursion_limit": 100},
-                context=AgentRuntimeContext(mcp_sessions=mcp_sessions),
-            )
+            if ctx.slack_reply and ctx.slack_reply.enabled:
+                result: dict[str, object] = {}
+                message_id: str | None = None
+                parts: list[str] = []
+                async for mode, payload in graph.astream(
+                    {"messages": history},
+                    config={"recursion_limit": 100},
+                    context=AgentRuntimeContext(mcp_sessions=mcp_sessions),
+                    stream_mode=["messages", "values"],
+                ):
+                    if mode == "values" and isinstance(payload, dict):
+                        result = payload
+                    elif mode == "messages":
+                        message, _metadata = payload
+                        if (
+                            isinstance(message, AIMessageChunk)
+                            and message.text
+                            and not message.tool_call_chunks
+                        ):
+                            if message.id != message_id:
+                                message_id, parts = message.id, []
+                            parts.append(message.text)
+                            await ctx.slack_reply.preview("".join(parts))
+                if not result:
+                    raise RuntimeError("The agent stream ended without a final state")
+            else:
+                result = await graph.ainvoke(
+                    {"messages": history},
+                    config={"recursion_limit": 100},
+                    context=AgentRuntimeContext(mcp_sessions=mcp_sessions),
+                )
         except AgentCancelledError:
             return AgentResult(
                 success=False,
@@ -573,7 +617,8 @@ class CodingAgentRunner:
                 },
             )
 
-        messages = list(result.get("messages") or [])
+        raw_messages = result.get("messages")
+        messages = list(raw_messages) if isinstance(raw_messages, list) else []
         final = next(
             (
                 _message_content(message)

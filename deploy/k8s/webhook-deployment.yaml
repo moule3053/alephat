@@ -68,6 +68,30 @@ spec:
                   key: password
             - name: SERVICE_NAME
               value: webhook
+            - name: SLACK_APP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: SLACK_APP_TOKEN
+                  optional: true
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: SLACK_BOT_TOKEN
+                  optional: true
+            - name: SLACK_BOT_USER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: SLACK_BOT_USER_ID
+                  optional: true
+            - name: SLACK_USER_MAP
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: SLACK_USER_MAP
+                  optional: true
             - name: GITHUB_WEBHOOK_SECRET
               valueFrom:
                 secretKeyRef:

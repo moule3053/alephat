@@ -6,9 +6,11 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
+from pydantic import JsonValue, TypeAdapter
 
 from alephat_platform.common.config import get_settings
 from alephat_platform.common.db import dispose_engine, get_session_factory, session_scope
@@ -22,6 +24,7 @@ from alephat_platform.webhook.normalize import (
     verify_github_signature,
     verify_slack_signature,
 )
+from alephat_platform.webhook.slack_actions import SlackActionHandler
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,11 @@ class SlackSocketModeClient:
     async def _handle_envelope(self, frame: dict[str, object]) -> None:
         payload = frame.get("payload")
         if not isinstance(payload, dict):
+            return
+        if frame.get("type") == "interactive":
+            await SlackActionHandler(self.org_id).handle(
+                TypeAdapter(dict[str, JsonValue]).validate_python(payload)
+            )
             return
         event_obj = payload.get("event")
         channel = event_obj.get("channel") if isinstance(event_obj, dict) else None
@@ -123,13 +131,23 @@ class SlackSocketModeClient:
                             },
                         )
                         envelope_id = frame.get("envelope_id")
-                        if isinstance(envelope_id, str) and envelope_id:
+                        if (
+                            isinstance(envelope_id, str)
+                            and envelope_id
+                            and frame.get("type") != "events_api"
+                        ):
                             await ws.send(json.dumps({"envelope_id": envelope_id}))
                         if frame.get("type") == "disconnect":
                             logger.info("Slack Socket Mode requested reconnect")
                             break
-                        if frame.get("type") == "events_api":
+                        if frame.get("type") in {"events_api", "interactive"}:
                             await self._handle_envelope(frame)
+                            if (
+                                frame.get("type") == "events_api"
+                                and isinstance(envelope_id, str)
+                                and envelope_id
+                            ):
+                                await ws.send(json.dumps({"envelope_id": envelope_id}))
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -279,7 +297,16 @@ def create_app() -> FastAPI:
         ):
             raise UnauthorizedError("invalid slack signature")
 
-        payload = json.loads(body.decode() or "{}")
+        if request.headers.get("content-type", "").startswith("application/x-www-form-urlencoded"):
+            payload = json.loads(parse_qs(body.decode()).get("payload", ["{}"])[0])
+        else:
+            payload = json.loads(body.decode() or "{}")
+        if payload.get("type") == "block_actions":
+            if not settings.slack_signing_secret:
+                raise UnauthorizedError("Interactive Slack requests require signature verification")
+            return await SlackActionHandler(settings.default_org_id).handle(
+                TypeAdapter(dict[str, JsonValue]).validate_python(payload)
+            )
         if payload.get("type") == "url_verification":
             return {"challenge": payload.get("challenge")}
 

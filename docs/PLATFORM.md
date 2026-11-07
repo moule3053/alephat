@@ -129,7 +129,53 @@ export NATS_URL=nats://localhost:4222
 make platform-api           # terminal 1
 make platform-webhook       # terminal 2
 make platform-harness       # terminal 3 — can start later; drains backlog
+make platform-slack-renderer # terminal 4 — rich Slack messages, loopback :8082
 ```
+
+## Rich Slack messages
+
+The platform uses `@json-render/chat` and the Chat SDK Slack adapter in `slack-renderer/`.
+The stateless renderer has no Slack or model credentials and never fetches image URLs.
+Python keeps the outbound Socket Mode connection, agent runtime, Slack credentials, and authorization.
+Compose runs the renderer as an internal service; Kubernetes runs it as a loopback-only harness sidecar.
+Do not expose the renderer publicly.
+Set the same optional `SLACK_RENDERER_TOKEN` on its server and harness client when using a remote renderer.
+
+Enable Socket Mode and save the `app_mention` and `message.im` bot event subscriptions in Slack's app settings.
+Use `SLACK_APP_TOKEN` (`connections:write`), `SLACK_BOT_TOKEN` (`chat:write`, `reactions:write`, `app_mentions:read`, `im:history`, and `files:write`), and `SLACK_BOT_USER_ID` in `deploy/.env`.
+Enable Interactivity in the Slack app for buttons; Socket Mode needs no public request URL.
+Invite the bot to private channels before mentioning it.
+
+Ordinary Markdown is parsed into Slack-formatted sections, tables, and images.
+Replies update in place while the model streams.
+The agent can call `render_slack_card` for the entire chat catalog: Card, Section, Text, Fields/Field, Table, Chart, Divider, Image, Actions, Button, and LinkButton.
+The renderer also resolves the chat runtime's state bindings, visibility conditions, and repeats.
+Chart types are bar, line, area, and pie.
+Slack's size limits still apply; the adapter falls back to text for oversized tables/charts, and long messages split into multiple replies.
+The renderer is not a browser: arbitrary React, 3D, live browser state, and web-only widgets cannot run inside Slack.
+
+`upload_slack_file` uploads sandbox artifacts directly to the current thread using Slack's external upload flow, without publishing a public URL.
+It permits files up to 10 MiB whose resolved path is inside the sandbox workspace.
+Use it for private screenshots, PDFs, or diagrams rendered in the sandbox.
+Public image embeds require an HTTPS URL.
+If rendering fails, the harness attempts a plain-text reply and logs the delivery error.
+
+### Button authorization
+
+Buttons are signed, expire after 24 hours, and are bound to their task, run, and Slack conversation.
+The webhook checks organization membership and task ownership (or administrator access); duplicate clicks are idempotent.
+Map a Slack identity to an existing platform `users.user_id` explicitly:
+
+```dotenv
+SLACK_USER_MAP='{"T0123456789:U0123456789":"00000000-0000-4000-8000-000000000002"}'
+```
+
+Unmapped people receive an authorization message rather than inheriting the default developer account's permissions.
+New Slack tasks also resolve their creator through this mapping; production rejects unlinked senders, while `API_AUTH_DISABLED=true` retains the local default-account behavior for messages only.
+The reserved action IDs `approve`, `reject`, and `cancel` call the same domain operations as the task API.
+Other signed buttons deliver their label/value as human guidance, creating a new task for a completed conversation.
+Link buttons open URLs without task mutations.
+Keep `SLACK_USER_MAP` operator-managed; it grants identity access, not a model-controlled preference.
 
 ## Package layout
 

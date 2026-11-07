@@ -4,12 +4,14 @@ import hashlib
 import uuid
 from typing import Any
 
+from pydantic import TypeAdapter
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alephat_platform.common.config import get_settings
 from alephat_platform.common.enums import IngressCommand, MessageKind, TaskStatus
-from alephat_platform.common.models import Message, Task, WebhookDelivery
+from alephat_platform.common.errors import ForbiddenError
+from alephat_platform.common.models import Message, OrgMembership, Task, User, WebhookDelivery
 from alephat_platform.common.outbox import enqueue_control, enqueue_task_work
 from alephat_platform.common.tasks import add_message, cancel_task, create_task
 
@@ -49,6 +51,20 @@ async def apply_ingress_command(session: AsyncSession, command: dict[str, Any]) 
 
     org_id = uuid.UUID(command["org_id"])
     user_id = uuid.UUID(settings.default_user_id)
+    if command.get("source") == "slack":
+        actor = command.get("actor") or {}
+        metadata = command.get("metadata") or {}
+        identities = TypeAdapter(dict[str, uuid.UUID]).validate_json(settings.slack_user_map)
+        mapped_user = identities.get(f"{metadata.get('slack_team_id')}:{actor.get('id')}")
+        if mapped_user is not None:
+            if (
+                await session.get(User, mapped_user) is None
+                or await session.get(OrgMembership, (org_id, mapped_user)) is None
+            ):
+                raise ForbiddenError("Linked Slack user is not a member of this organization")
+            user_id = mapped_user
+        elif not settings.api_auth_disabled:
+            raise ForbiddenError("Slack user is not linked to a platform account")
     thread_id = command.get("thread_id")
     if not thread_id:
         return {"accepted": True, "ignored": True, "reason": "no_thread"}

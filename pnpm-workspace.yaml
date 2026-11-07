@@ -4,6 +4,7 @@ packages:
   - desktop
   - cli
   - tests/e2e
+  - slack-renderer
 
 allowBuilds:
   core-js: false

@@ -53,6 +53,19 @@ spec:
                   name: alephat-config
                   key: DATABASE_USER
       containers:
+        - name: slack-renderer
+          image: us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-slack-renderer:latest
+          imagePullPolicy: Always
+          env:
+            - name: HOST
+              value: "127.0.0.1"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
         - name: harness
           image: us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-platform:latest
           imagePullPolicy: Always
@@ -68,6 +81,18 @@ spec:
                   key: password
             - name: SERVICE_NAME
               value: harness
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: SLACK_BOT_TOKEN
+                  optional: true
+            - name: SLACK_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: SLACK_SIGNING_SECRET
+                  optional: true
             - name: WORKER_ID
               valueFrom:
                 fieldRef:

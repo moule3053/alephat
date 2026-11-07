@@ -1,0 +1,23 @@
+{
+  "name": "@alephat/slack-renderer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "node --experimental-strip-types --watch src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test src/*.test.ts"
+  },
+  "dependencies": {
+    "@chat-adapter/slack": "4.44.0",
+    "@json-render/chat": "0.22.0",
+    "@json-render/core": "0.22.0",
+    "chat": "4.44.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "typescript": "^5.9.0"
+  }
+}

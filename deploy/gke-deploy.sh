@@ -24,7 +24,7 @@ if [[ -f "${SCRIPT_DIR}/.env" ]]; then
       OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|FIREWORKS_API_KEY|\
       GITHUB_APP_ID|GITHUB_APP_CLIENT_ID|GITHUB_APP_CLIENT_SECRET|GITHUB_APP_INSTALLATION_ID|\
       GITHUB_APP_PRIVATE_KEY|ALLOWED_GITHUB_USERS|ALLOWED_GITHUB_ORGS|GITHUB_WEBHOOK_SECRET|\
-      SLACK_SIGNING_SECRET|SLACK_BOT_TOKEN|SLACK_APP_ID|SLACK_BOT_USER_ID|SLACK_BOT_USERNAME|\
+      SLACK_SIGNING_SECRET|SLACK_BOT_TOKEN|SLACK_APP_TOKEN|SLACK_APP_ID|SLACK_BOT_USER_ID|SLACK_BOT_USERNAME|SLACK_USER_MAP|\
       TOKEN_ENCRYPTION_KEY|DASHBOARD_JWT_SECRET|PLATFORM_API_TOKEN|PLATFORM_JWT_SECRET)
         if [[ -z "${!k:-}" && -n "${v}" ]]; then
           export "${k}=${v}"
@@ -196,6 +196,7 @@ PROJECT_ID="${PROJECT_ID:-your-gcp-project-id}"
 
 PLATFORM_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}/alephat-platform:latest"
 UI_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}/alephat-ui:latest"
+SLACK_RENDERER_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}/alephat-slack-renderer:latest"
 SANDBOX_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}/alephat-sandbox:latest"
 
 render_litellm_model_list() {
@@ -616,6 +617,8 @@ if [[ "${USE_EXTERNAL_SECRETS}" == "true" ]]; then
     --arg webhook "${GITHUB_WEBHOOK_SECRET:-${EXISTING_WEBHOOK_SECRET:-$(openssl rand -hex 32)}}" \
     --arg slack_secret "${SLACK_SIGNING_SECRET:-$(read_k8s_secret_key alephat-secrets SLACK_SIGNING_SECRET)}" \
     --arg slack_token "${SLACK_BOT_TOKEN:-$(read_k8s_secret_key alephat-secrets SLACK_BOT_TOKEN)}" \
+    --arg slack_app_token "${SLACK_APP_TOKEN:-$(read_k8s_secret_key alephat-secrets SLACK_APP_TOKEN)}" \
+    --arg slack_user_map "${SLACK_USER_MAP:-$(read_k8s_secret_key alephat-secrets SLACK_USER_MAP)}" \
     --arg slack_app_id "${SLACK_APP_ID:-$(read_k8s_secret_key alephat-secrets SLACK_APP_ID)}" \
     --arg slack_bot_user_id "${SLACK_BOT_USER_ID:-$(read_k8s_secret_key alephat-secrets SLACK_BOT_USER_ID)}" \
     --arg slack_bot_username "${SLACK_BOT_USERNAME:-$(read_k8s_secret_key alephat-secrets SLACK_BOT_USERNAME)}" \
@@ -625,6 +628,8 @@ if [[ "${USE_EXTERNAL_SECRETS}" == "true" ]]; then
       GITHUB_WEBHOOK_SECRET: $webhook,
       SLACK_SIGNING_SECRET: $slack_secret,
       SLACK_BOT_TOKEN: $slack_token,
+      SLACK_APP_TOKEN: $slack_app_token,
+      SLACK_USER_MAP: $slack_user_map,
       SLACK_APP_ID: $slack_app_id,
       SLACK_BOT_USER_ID: $slack_bot_user_id,
       SLACK_BOT_USERNAME: $slack_bot_username
@@ -783,6 +788,9 @@ if [[ "${SKIP_BUILD}" != "true" ]]; then
     --config "${REPO_ROOT}/cloudbuild.ui.yaml" \
     --substitutions="_UI_IMAGE=${UI_IMAGE}"
   gcloud builds submit "${REPO_ROOT}" \
+    --config "${REPO_ROOT}/cloudbuild.slack-renderer.yaml" \
+    --substitutions="_SLACK_RENDERER_IMAGE=${SLACK_RENDERER_IMAGE}"
+  gcloud builds submit "${REPO_ROOT}" \
     --config "${REPO_ROOT}/cloudbuild.sandbox.yaml" \
     --substitutions="_SANDBOX_IMAGE=${SANDBOX_IMAGE}"
 fi
@@ -806,6 +814,9 @@ images:
   - name: us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-ui
     newName: ${UI_IMAGE%:*}
     newTag: ${UI_IMAGE##*:}
+  - name: us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-slack-renderer
+    newName: ${SLACK_RENDERER_IMAGE%:*}
+    newTag: ${SLACK_RENDERER_IMAGE##*:}
 EOF
 kubectl -n "${PLATFORM_NAMESPACE}" delete job alephat-migrate --ignore-not-found
 kubectl apply -k "${TMP_KUSTOMIZE}"
