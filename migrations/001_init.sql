@@ -268,3 +268,18 @@ ON CONFLICT DO NOTHING;
 INSERT INTO user_settings (user_id)
 VALUES ('00000000-0000-4000-8000-000000000002')
 ON CONFLICT DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS allowed_slack_bots (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id UUID NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+    team_id TEXT NOT NULL,
+    bot_id TEXT NOT NULL,
+    slack_user_id TEXT NOT NULL DEFAULT '',
+    app_id TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL,
+    image_url TEXT NOT NULL DEFAULT '',
+    created_by UUID REFERENCES users(user_id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (org_id, team_id, bot_id)
+);

@@ -619,9 +619,9 @@ class CodingAgentRunner:
         messages = list(raw_messages) if isinstance(raw_messages, list) else []
         final = next(
             (
-                _message_content(message)
+                text
                 for message in reversed(messages)
-                if isinstance(message, AIMessage)
+                if isinstance(message, AIMessage) and (text := _message_content(message).strip())
             ),
             "Task completed",
         )

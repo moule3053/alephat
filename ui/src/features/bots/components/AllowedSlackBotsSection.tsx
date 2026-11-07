@@ -84,7 +84,8 @@ export function AllowedSlackBotsSection({
   })
 
   const pending = add.isPending
-  const unavailable = pending || bots.isPending || bots.isError
+  // A failed allowlist request must not lock the only control that can recover it.
+  const unavailable = pending || bots.isPending
   const matches = directory.data?.filter((bot) =>
     `${bot.name} ${bot.bot_id} ${bot.user_id}`
       .toLowerCase()

@@ -146,19 +146,20 @@ def normalize_slack(
         return _ignore(org_id, delivery_id, "unhandled_slack")
 
     bot_user_id = os.environ.get("SLACK_BOT_USER_ID", "").strip()
-    if (
-        event.get("bot_id")
-        or event.get("subtype")
-        or (bot_user_id and event.get("user") == bot_user_id)
-    ):
+    own_bot = bool(bot_user_id and event.get("user") == bot_user_id)
+    if event.get("subtype") or own_bot:
         return _ignore(org_id, delivery_id, "bot_or_subtype_message")
+    triggering_bot_id = event.get("bot_id") if isinstance(event.get("bot_id"), str) else ""
 
     text = event.get("text") or ""
     channel = event.get("channel")
+    mentioned = event_type == "app_mention" or bool(bot_user_id and f"<@{bot_user_id}>" in text)
+    in_thread = bool(event.get("thread_ts"))
     if (
         event_type == "message"
         and event.get("channel_type") != "im"
-        and not (bot_user_id and f"<@{bot_user_id}>" in text)
+        and not mentioned
+        and not in_thread
     ):
         return _ignore(org_id, delivery_id, "no_mention")
     if bot_user_id:
@@ -170,8 +171,10 @@ def normalize_slack(
     thread_id = f"slack:{channel}:{thread_ts}"
     # optional repo:owner/name
     repo = None
-    m = re.search(r"repo:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", text)
-    if m:
+    m = re.search(r"\b(?:repo:|in\s+(?:repo\s+)?)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b", text)
+    if m and not m.group(1).endswith(
+        (".md", ".py", ".ts", ".tsx", ".js", ".json", ".yaml", ".yml")
+    ):
         repo = m.group(1)
 
     return {
@@ -192,6 +195,10 @@ def normalize_slack(
             "thread_ts": thread_ts,
             "message_ts": message_ts,
             "slack_team_id": payload.get("team_id"),
+            "triggering_bot_id": triggering_bot_id,
+            "require_existing_task": (
+                event_type == "message" and event.get("channel_type") != "im" and not mentioned
+            ),
         },
     }
 

@@ -66,6 +66,26 @@ def test_slack_mention():
     assert cmd["thread_id"] == "slack:C1:1.2"
 
 
+def test_slack_allows_another_bots_mention_but_not_its_own(monkeypatch):
+    monkeypatch.setenv("SLACK_BOT_USER_ID", "U1")
+    payload = {
+        "team_id": "T1",
+        "event": {
+            "type": "app_mention",
+            "bot_id": "B2",
+            "user": "U2",
+            "text": "<@U1> check the deploy",
+            "channel": "C1",
+            "ts": "1.2",
+        },
+    }
+    command = normalize_slack(payload, org_id="org", delivery_id="E1")
+    assert command["command"] == "upsert_and_enqueue"
+    assert command["metadata"]["triggering_bot_id"] == "B2"
+    payload["event"]["user"] = "U1"
+    assert normalize_slack(payload, org_id="org", delivery_id="E2")["command"] == "ignore"
+
+
 def test_slack_channel_messages_require_a_mention_but_dms_do_not(monkeypatch):
     monkeypatch.setenv("SLACK_BOT_USER_ID", "U1")
     event = {
@@ -87,6 +107,22 @@ def test_slack_channel_messages_require_a_mention_but_dms_do_not(monkeypatch):
         normalize_slack({"event": event}, org_id="org", delivery_id="E3")["command"]
         == "upsert_and_enqueue"
     )
+    event["text"] = "in moule3053/alephat update README.md"
+    assert (
+        normalize_slack({"event": event}, org_id="org", delivery_id="E4")["repo"]
+        == "moule3053/alephat"
+    )
+    event.update(
+        {
+            "channel": "C1",
+            "channel_type": "group",
+            "thread_ts": "1.0",
+            "text": "create a pr",
+        }
+    )
+    threaded = normalize_slack({"event": event}, org_id="org", delivery_id="E5")
+    assert threaded["command"] == "upsert_and_enqueue"
+    assert threaded["metadata"]["require_existing_task"] is True
 
 
 def test_slack_signature_rejects_replay():

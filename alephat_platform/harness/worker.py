@@ -188,7 +188,8 @@ class HarnessWorker:
         self.bus = NatsBus(self.settings.nats_url)
         self.llm = make_llm_client()
         self._stop = asyncio.Event()
-        self._busy = False
+        self._slots = asyncio.Semaphore(4)
+        self._running: set[asyncio.Task[None]] = set()
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -219,6 +220,8 @@ class HarnessWorker:
         finally:
             self._stop.set()
             reaper.cancel()
+            if self._running:
+                await asyncio.gather(*self._running, return_exceptions=True)
             await self.bus.close()
             await dispose_engine()
 
@@ -245,8 +248,8 @@ class HarnessWorker:
             stream="TASKS",
         )
         while not self._stop.is_set():
-            if self._busy:
-                await asyncio.sleep(0.5)
+            if self._slots.locked():
+                await asyncio.sleep(0.2)
                 continue
             try:
                 msgs = await psub.fetch(1, timeout=2)
@@ -259,17 +262,24 @@ class HarnessWorker:
                     await msg.ack()
                     if claimed is not None:
                         task_id, run_id = claimed
-                        self._busy = True
-                        try:
-                            await self._execute_run(task_id, run_id)
-                        finally:
-                            self._busy = False
+                        await self._slots.acquire()
+                        run_task = asyncio.create_task(self._run_slot(task_id, run_id))
+                        self._running.add(run_task)
+                        run_task.add_done_callback(self._running.discard)
                 except Exception:
                     logger.exception("Failed handling message")
                     try:
                         await msg.nak()
                     except Exception:
                         pass
+
+    async def _run_slot(self, task_id: uuid.UUID, run_id: uuid.UUID) -> None:
+        try:
+            await self._execute_run(task_id, run_id)
+        except Exception:
+            logger.exception("Unhandled error in task %s run %s", task_id, run_id)
+        finally:
+            self._slots.release()
 
     async def _claim_enqueue(self, body: dict[str, Any]) -> tuple[uuid.UUID, uuid.UUID] | None:
         payload = body.get("payload") or body
@@ -591,6 +601,11 @@ class HarnessWorker:
                 rows = list(pending.scalars().all())
                 if rows:
                     ctx.last_message_seq = max(int(row.seq) for row in rows)
+                    new_ts = (task_row.metadata_ or {}).get("message_ts") if task_row else None
+                    if isinstance(new_ts, str) and new_ts and new_ts != slack_reply.message_ts:
+                        slack_reply.message_ts = new_ts
+                        slack_reply.timestamps = []
+                        slack_reply.spec = None
                 await session.commit()
                 return [_message_input(row) for row in rows]
 

@@ -2,6 +2,7 @@
 
 import hashlib
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import TypeAdapter
@@ -11,8 +12,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from alephat_platform.common.config import get_settings
 from alephat_platform.common.enums import IngressCommand, MessageKind, TaskStatus
 from alephat_platform.common.errors import ForbiddenError
-from alephat_platform.common.models import Message, OrgMembership, Task, User, WebhookDelivery
+from alephat_platform.common.models import (
+    AllowedSlackBot,
+    Message,
+    OrgMembership,
+    Task,
+    User,
+    WebhookDelivery,
+)
 from alephat_platform.common.outbox import enqueue_control, enqueue_task_work
+from alephat_platform.common.slack import SlackClient
+from alephat_platform.common.state_machine import is_terminal
 from alephat_platform.common.tasks import add_message, cancel_task, create_task
 
 
@@ -63,8 +73,26 @@ async def apply_ingress_command(session: AsyncSession, command: dict[str, Any]) 
             ):
                 raise ForbiddenError("Linked Slack user is not a member of this organization")
             user_id = mapped_user
-        elif not settings.api_auth_disabled:
+        elif not settings.api_auth_disabled and not metadata.get("triggering_bot_id"):
             raise ForbiddenError("Slack user is not linked to a platform account")
+        bot_id = metadata.get("triggering_bot_id")
+        if isinstance(bot_id, str) and bot_id:
+            allowed = (
+                await session.execute(
+                    select(AllowedSlackBot).where(
+                        AllowedSlackBot.org_id == org_id,
+                        AllowedSlackBot.team_id == str(metadata.get("slack_team_id") or ""),
+                        AllowedSlackBot.bot_id == bot_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if allowed is None:
+                return {"accepted": True, "ignored": True, "reason": "bot_not_allowed"}
+            metadata["triggering_bot"] = {
+                "key": f"{allowed.team_id}:{allowed.bot_id}",
+                "name": allowed.name,
+            }
+            command["metadata"] = metadata
     thread_id = command.get("thread_id")
     if not thread_id:
         return {"accepted": True, "ignored": True, "reason": "no_thread"}
@@ -83,6 +111,8 @@ async def apply_ingress_command(session: AsyncSession, command: dict[str, Any]) 
     content = message.get("content") or ""
 
     if task is None:
+        if (command.get("metadata") or {}).get("require_existing_task"):
+            return {"accepted": True, "ignored": True, "metadata": {"reason": "no_mention"}}
         if cmd in {
             IngressCommand.UPSERT_AND_ENQUEUE.value,
             IngressCommand.CI_FAILURE.value,
@@ -103,6 +133,7 @@ async def apply_ingress_command(session: AsyncSession, command: dict[str, Any]) 
                 platform_default_model=settings.default_model,
                 platform_default_sandbox_provider=settings.default_sandbox_provider,
             )
+            await _acknowledge_slack_message(settings.slack_bot_token, command.get("metadata"))
             return {
                 "accepted": True,
                 "task_id": str(task.task_id),
@@ -112,6 +143,11 @@ async def apply_ingress_command(session: AsyncSession, command: dict[str, Any]) 
         return {"accepted": True, "ignored": True, "reason": "no_task"}
 
     # Existing task: append message and enqueue/control
+    if not task.repo and command.get("repo"):
+        task.repo = command.get("repo")
+    incoming_metadata = command.get("metadata")
+    if isinstance(incoming_metadata, dict) and incoming_metadata.get("message_ts"):
+        task.metadata_ = {**(task.metadata_ or {}), "message_ts": incoming_metadata["message_ts"]}
     if content:
         kind = message.get("kind") or MessageKind.USER_GUIDANCE.value
         if task.status == TaskStatus.RUNNING.value:
@@ -131,7 +167,22 @@ async def apply_ingress_command(session: AsyncSession, command: dict[str, Any]) 
                 run_id=task.active_run_id,
             )
         else:
+            was_terminal = is_terminal(task.status)
+            if was_terminal:
+                task.status = TaskStatus.QUEUED.value
+                task.park_reason = None
+                task.cancel_requested_at = None
+                task.cancel_reason = None
+                task.updated_at = datetime.now(UTC)
             await add_message(session, task_id=task.task_id, content=content, kind=kind)
+            if was_terminal:
+                await enqueue_task_work(
+                    session,
+                    org_id=task.org_id,
+                    task_id=task.task_id,
+                    agent_type=task.agent_type,
+                    reason="follow_up",
+                )
     elif task.status in {TaskStatus.QUEUED.value, TaskStatus.PARKED.value}:
         if task.status == TaskStatus.PARKED.value:
             task.status = TaskStatus.QUEUED.value
@@ -143,4 +194,18 @@ async def apply_ingress_command(session: AsyncSession, command: dict[str, Any]) 
             reason="resumed",
         )
 
+    await _acknowledge_slack_message(settings.slack_bot_token, incoming_metadata)
     return {"accepted": True, "task_id": str(task.task_id), "status": task.status}
+
+
+async def _acknowledge_slack_message(token: str, metadata: object) -> None:
+    if not token or not isinstance(metadata, dict):
+        return
+    channel = metadata.get("channel")
+    message_ts = metadata.get("message_ts") or metadata.get("thread_ts")
+    if not isinstance(channel, str) or not isinstance(message_ts, str):
+        return
+    try:
+        await SlackClient(token).react(channel, message_ts, "eyes")
+    except Exception:
+        return

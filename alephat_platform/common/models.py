@@ -274,6 +274,23 @@ class ProcessedMessage(Base):
     )
 
 
+class AllowedSlackBot(Base):
+    __tablename__ = "allowed_slack_bots"
+    __table_args__ = (UniqueConstraint("org_id", "team_id", "bot_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    team_id: Mapped[str] = mapped_column(Text, nullable=False)
+    bot_id: Mapped[str] = mapped_column(Text, nullable=False)
+    slack_user_id: Mapped[str] = mapped_column(Text, default="")
+    app_id: Mapped[str] = mapped_column(Text, default="")
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    image_url: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class CommandIdempotency(Base):
     __tablename__ = "command_idempotency"
     idempotency_key: Mapped[str] = mapped_column(Text, primary_key=True)

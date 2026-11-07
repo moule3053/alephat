@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import uuid
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, JsonValue, TypeAdapter
 from sqlalchemy import select
@@ -12,12 +13,12 @@ from alephat_platform.common.config import get_settings
 from alephat_platform.common.db import session_scope
 from alephat_platform.common.enums import TaskStatus
 from alephat_platform.common.models import Approval, OrgMembership, Task, User
+from alephat_platform.common.outbox import enqueue_task_work
 from alephat_platform.common.slack import SlackAction, SlackActionSigner, SlackClient, SlackMessage
 from alephat_platform.common.tasks import (
     add_message,
     append_event,
     cancel_task,
-    create_task,
     decide_approval,
 )
 from alephat_platform.webhook.handlers import accept_delivery
@@ -188,27 +189,16 @@ class SlackActionHandler:
         elif task.status in {"queued", "running", "parked"}:
             await add_message(session, task_id=task.task_id, content=content)
         else:
-            # Terminal tasks stay immutable. A follow-up gets a new task in the same Slack thread.
-            settings = get_settings()
-            await create_task(
+            task.status = TaskStatus.QUEUED.value
+            task.park_reason = None
+            task.cancel_requested_at = None
+            task.cancel_reason = None
+            task.updated_at = datetime.now(UTC)
+            await add_message(session, task_id=task.task_id, content=content)
+            await enqueue_task_work(
                 session,
                 org_id=task.org_id,
-                user_id=actor.user_id,
-                title=action.label,
-                prompt=f"Previous task: {task.title or task.prompt or ''}\n\nPrevious response:\n{context}\n\n{content}",
-                repo=task.repo,
-                base_ref=task.base_ref,
-                source="slack",
-                source_ref=task.source_ref,
-                thread_id=f"slack-action:{uuid.uuid4()}",
+                task_id=task.task_id,
                 agent_type=task.agent_type,
-                model=task.model,
-                sandbox_provider=task.sandbox_provider,
-                metadata={
-                    key: value
-                    for key, value in (task.metadata_ or {}).items()
-                    if key in {"channel", "thread_ts", "message_ts", "slack_team_id"}
-                },
-                platform_default_model=settings.default_model,
-                platform_default_sandbox_provider=settings.default_sandbox_provider,
+                reason="follow_up",
             )

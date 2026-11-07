@@ -1005,6 +1005,10 @@ def task_to_agent_thread(
         "updatedAt": int(task.updated_at.replace(tzinfo=UTC).timestamp() * 1000),
         "messages": messages,
         "pullRequests": pull_requests if isinstance(pull_requests, list) else [],
+        "triggeringBot": meta.get("triggering_bot")
+        if isinstance(meta.get("triggering_bot"), dict)
+        else None,
+        "sourceAppUrl": meta.get("slack_url") if isinstance(meta.get("slack_url"), str) else None,
     }
 
 
@@ -1099,7 +1103,8 @@ async def get_threads_page(
     source: str | None = None,
     status: str | None = None,
     q: str | None = None,
-    scope: Literal["all", "interactive", "automation"] = "all",
+    scope: Literal["all", "interactive", "automation", "bot"] = "all",
+    bot: str | None = None,
     automation_id: str | None = None,
     repo: str | None = None,
     ownerless: bool = False,
@@ -1121,7 +1126,12 @@ async def get_threads_page(
             continue
         if ownerless and task.repo:
             continue
-        if scope != "all" and _is_automation(task) != (scope == "automation"):
+        if scope == "bot":
+            triggering = (task.metadata_ or {}).get("triggering_bot")
+            key = triggering.get("key") if isinstance(triggering, dict) else None
+            if key != bot:
+                continue
+        elif scope != "all" and _is_automation(task) != (scope == "automation"):
             continue
         if automation_id and (task.metadata_ or {}).get("schedule_id") != automation_id:
             continue

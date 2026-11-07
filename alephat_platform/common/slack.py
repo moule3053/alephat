@@ -78,6 +78,9 @@ class SlackClient:
                 raise
             logger.debug("Slack reaction is already present")
 
+    async def method(self, name: str, body: dict[str, JsonValue] | None = None) -> dict[str, JsonValue]:
+        return await self._call(name, body or {}, form=True)
+
     async def ephemeral(self, channel: str, user: str, text: str) -> None:
         await self._call("chat.postEphemeral", {"channel": channel, "user": user, "text": text})
 

@@ -13,6 +13,7 @@ from alephat_platform.api.routes_dashboard import router as dashboard_router
 from alephat_platform.api.routes_mcp import router as mcp_router
 from alephat_platform.api.routes_meta import router as meta_router
 from alephat_platform.api.routes_oauth import router as oauth_router
+from alephat_platform.api.routes_slack_bots import router as slack_bots_router
 from alephat_platform.api.routes_tasks import router as tasks_router
 from alephat_platform.common.config import get_settings
 from alephat_platform.common.db import dispose_engine, get_session_factory
@@ -72,6 +73,7 @@ def create_app() -> FastAPI:
     app.include_router(mcp_router)
     app.include_router(oauth_router)
     app.include_router(dashboard_router)
+    app.include_router(slack_bots_router)
     return app
 
 
