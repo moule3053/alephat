@@ -24,7 +24,7 @@
 
 Alephat turns engineering work into a repeatable system: investigate a codebase, implement changes, validate them, and deliver a pull request.
 It also reviews pull requests, learns repository-specific review preferences, monitors CI, and responds to feedback.
-Built on Alephat and Deep Agents by LangChain, it is open source and deployable in your infrastructure.
+Built on LangGraph and Deep Agents by LangChain, it is open source and deployable in your infrastructure.
 
 > [!NOTE]
 > Alephat is under active development.
@@ -32,7 +32,7 @@ Built on Alephat and Deep Agents by LangChain, it is open source and deployable 
 
 ---
 
-Alephat is a fork of [Alephat](https://github.com/langchain-ai/open-swe) with a standalone Kubernetes platform.
+Alephat is a fork of [Open SWE](https://github.com/langchain-ai/open-swe) with a standalone Kubernetes platform.
 See [the platform guide](docs/PLATFORM.md) and the GKE deployment guide below.
 The current upstream runtime requires Python 3.14 or newer; the platform images and dependency lockfile use that runtime.
 
@@ -63,7 +63,7 @@ Cloud coding follow-ups reuse the thread’s context and sandbox; independent th
 [Deep Agents](https://github.com/langchain-ai/deepagents) supplies planning, filesystem, shell, skills, and subagent primitives.
 [LangGraph](https://github.com/langchain-ai/langgraph) provides durable execution and thread state.
 Alephat adds engineering tools, integrations, authorization, and user interfaces.
-The graph entrypoints are declared in [`langgraph.json`](langgraph.json), with an [architecture inventory](AGENTS.md#architecture).
+The graph entrypoints are declared in [`langgraph.json`](langgraph.json), with an overview in [`AGENTS.md`](AGENTS.md).
 
 Cloud coding runs in persistent, per-thread Linux sandboxes with tooling supplied by workspace scripts or snapshots.
 An unreachable coding sandbox is not silently replaced.
@@ -106,13 +106,13 @@ It does not cover anything under [`vendor/`](vendor/README.md), which is not lic
 
 ## Standalone GKE deployment: Kata or gVisor, Agent Sandbox, LiteLLM, and KEDA
 
-This fork can run Alephat's API, webhook receiver, dashboard, worker harness, PostgreSQL, NATS JetStream, LiteLLM gateway, and code sandboxes on Kubernetes.
+This fork can run Alephat's API, webhook receiver (with outbound Slack Socket Mode), dashboard, worker harness (with rich Slack `@json-render/chat` sidecar), PostgreSQL, NATS JetStream, LiteLLM gateway, and code sandboxes on Kubernetes.
 It does **not** require a LangSmith deployment, a commercial sandbox account, or any Alephat license key.
 The checked-in configuration uses the open-source editions of Agent Sandbox (`v1.0.9`), Kata Containers (`4.3.1`) or gVisor, KEDA (`2.21.0`), External Secrets Operator (`2.14.0`) with Google Cloud Secret Manager, NATS (`2.12`), PostgreSQL (`17`), and LiteLLM (`1.106.6`).
 
 ### Automated one-command deployment (`./deploy/gke-deploy.sh`)
 
-`./deploy/gke-deploy.sh` provisions the GKE cluster (choosing either **Kata** with Ubuntu + nested virtualization or **gVisor** with Container-Optimized OS + a gVisor sandbox node pool), installs Agent Sandbox and KEDA, deploys LiteLLM with your chosen `--models`, builds and pushes the images, and deploys the Alephat platform and harness:
+`./deploy/gke-deploy.sh` auto-loads credentials from `deploy/.env` if present, provisions the GKE cluster (choosing either **Kata** with Ubuntu + nested virtualization or **gVisor** with Container-Optimized OS + a gVisor sandbox node pool), installs Agent Sandbox, KEDA, and External Secrets Operator, deploys LiteLLM with your chosen `--models`, builds and pushes the four images (`alephat-platform`, `alephat-ui`, `alephat-slack-renderer`, and `alephat-sandbox`), and deploys the Alephat platform and harness:
 
 ```bash
 # Deploy with Kata Containers (default) and Gemini 4 Argon + OpenAI + Anthropic in LiteLLM
@@ -177,6 +177,7 @@ export PLATFORM_NAMESPACE="alephat"
 export SANDBOX_NAMESPACE="alephat-sandboxes"
 export PLATFORM_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}/alephat-platform:latest"
 export UI_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}/alephat-ui:latest"
+export SLACK_RENDERER_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}/alephat-slack-renderer:latest"
 export SANDBOX_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}/alephat-sandbox:latest"
 
 # Required when publishing the dashboard with Traefik in step 9.
@@ -444,13 +445,28 @@ export PLATFORM_API_TOKEN="$(openssl rand -hex 32)"
 export PLATFORM_JWT_SECRET="$(openssl rand -hex 32)"
 export DASHBOARD_JWT_SECRET="$(openssl rand -hex 32)"
 export TOKEN_ENCRYPTION_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '\n')"
+# Optional Slack Socket Mode & rich Slack replies (see docs/PLATFORM.md#rich-slack-messages)
+export SLACK_SIGNING_SECRET="${SLACK_SIGNING_SECRET:-}"
+export SLACK_BOT_TOKEN="${SLACK_BOT_TOKEN:-}"
+export SLACK_APP_TOKEN="${SLACK_APP_TOKEN:-}"
+export SLACK_APP_ID="${SLACK_APP_ID:-}"
+export SLACK_BOT_USER_ID="${SLACK_BOT_USER_ID:-}"
+export SLACK_BOT_USERNAME="${SLACK_BOT_USERNAME:-alephat}"
+export SLACK_USER_MAP="${SLACK_USER_MAP:-{}}"
 
 kubectl -n "$PLATFORM_NAMESPACE" create secret generic alephat-postgres \
   --from-literal=password="$ALEPHAT_DB_PASSWORD"
 kubectl -n "$PLATFORM_NAMESPACE" create secret generic alephat-secrets \
   --from-literal=PLATFORM_API_TOKEN="$PLATFORM_API_TOKEN" \
   --from-literal=PLATFORM_JWT_SECRET="$PLATFORM_JWT_SECRET" \
-  --from-literal=GITHUB_WEBHOOK_SECRET="$GITHUB_WEBHOOK_SECRET"
+  --from-literal=GITHUB_WEBHOOK_SECRET="$GITHUB_WEBHOOK_SECRET" \
+  --from-literal=SLACK_SIGNING_SECRET="$SLACK_SIGNING_SECRET" \
+  --from-literal=SLACK_BOT_TOKEN="$SLACK_BOT_TOKEN" \
+  --from-literal=SLACK_APP_TOKEN="$SLACK_APP_TOKEN" \
+  --from-literal=SLACK_APP_ID="$SLACK_APP_ID" \
+  --from-literal=SLACK_BOT_USER_ID="$SLACK_BOT_USER_ID" \
+  --from-literal=SLACK_BOT_USERNAME="$SLACK_BOT_USERNAME" \
+  --from-literal=SLACK_USER_MAP="$SLACK_USER_MAP"
 kubectl -n "$PLATFORM_NAMESPACE" create secret generic alephat-oauth \
   --from-literal=ALLOWED_GITHUB_USERS="$ALLOWED_GITHUB_USERS" \
   --from-literal=GITHUB_APP_ID="$GITHUB_APP_ID" \
@@ -493,7 +509,7 @@ Never commit rendered Secrets, private keys, or API keys.
 
 ### 7. Build and push the Alephat images
 
-Create an Artifact Registry Docker repository and submit all three builds to Cloud Build:
+Create an Artifact Registry Docker repository and submit all four builds to Cloud Build:
 
 ```bash
 gcloud artifacts repositories describe "$AR_REPOSITORY" \
@@ -509,6 +525,9 @@ gcloud builds submit . \
   --config cloudbuild.ui.yaml \
   --substitutions="_UI_IMAGE=${UI_IMAGE}"
 gcloud builds submit . \
+  --config cloudbuild.slack-renderer.yaml \
+  --substitutions="_SLACK_RENDERER_IMAGE=${SLACK_RENDERER_IMAGE}"
+gcloud builds submit . \
   --config cloudbuild.sandbox.yaml \
   --substitutions="_SANDBOX_IMAGE=${SANDBOX_IMAGE}"
 ```
@@ -520,7 +539,8 @@ Point Kustomize at those images without editing every Deployment:
   cd deploy/k8s
   kustomize edit set image \
     "us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-platform=${PLATFORM_IMAGE}" \
-    "us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-ui=${UI_IMAGE}"
+    "us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-ui=${UI_IMAGE}" \
+    "us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-slack-renderer=${SLACK_RENDERER_IMAGE}"
 )
 ```
 
@@ -606,7 +626,7 @@ echo "$TRAEFIK_IP"
 ```
 
 Install the official Traefik chart.
-The checked-in values expose ports 80 and 443, redirect HTTP to HTTPS, persist ACME state, and configure a Let's Encrypt HTTP-01 resolver.
+The checked-in values expose ports 80 and 443, redirect HTTP to HTTPS, persist ACME state, and configure a Let's Encrypt TLS-ALPN-01 resolver on port 443.
 A single replica is intentional because the open-source file-based ACME store must not be written concurrently by multiple Traefik replicas.
 
 ```bash
@@ -652,7 +672,7 @@ dig +short "$ALEPHAT_HOST"
 ```
 
 If DNS is hosted outside Cloud DNS, create the equivalent `A` record with that provider.
-Do not create the TLS route until public DNS resolves to `TRAEFIK_IP`; Let's Encrypt must reach port 80 for the HTTP-01 challenge.
+Do not create the TLS route until public DNS resolves to `TRAEFIK_IP`; Let's Encrypt must reach port 443 for the TLS-ALPN-01 challenge.
 
 Apply the Traefik route after replacing the example hostname.
 `/hooks/*` goes directly to the webhook service; all other paths go to the UI, whose Nginx configuration proxies `/dashboard/api/*` and `/v1/*` to the API.
@@ -748,10 +768,14 @@ The checked-in manifests are a reproducible standalone starting point, not an HA
 Deleting the namespace or any PVC can delete its underlying disk, depending on the StorageClass reclaim policy.
 Take a database backup and a JetStream snapshot before destructive maintenance.
 
-Delete the cluster when it is no longer needed:
+Delete the cluster and associated resources when they are no longer needed:
 
 ```bash
-gcloud container clusters delete "$CLUSTER_NAME" --zone "$ZONE" --quiet
+./deploy/gke-teardown.sh \
+  --project "$PROJECT_ID" \
+  --region "$REGION" \
+  --zone "$ZONE" \
+  --cluster-name "$CLUSTER_NAME"
 ```
 
 References: [GKE Agent Sandbox](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/machine-learning/agent-sandbox), [Agent Sandbox releases](https://github.com/kubernetes-sigs/agent-sandbox/releases), [Kata installation](https://github.com/kata-containers/kata-containers/blob/main/docs/installation.md), [KEDA installation](https://keda.sh/docs/2.20/deploy/), [KEDA NATS JetStream scaler](https://keda.sh/docs/2.20/scalers/nats-jetstream/), [Traefik Kubernetes installation](https://doc.traefik.io/traefik/getting-started/kubernetes/), [GKE static LoadBalancer addresses](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/service-load-balancer-parameters), [Cloud DNS records](https://docs.cloud.google.com/dns/docs/records), and [GitHub App OAuth callbacks](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-user-authorization-callback-url).

@@ -27,11 +27,17 @@ Alephat starts three kinds of run (`agent`, `reviewer`, `review-scout`), each a 
 As a run starts, its kind resolves the run's catalog from what only the backend holds, such as thread settings, workspace defaults, the sender's access and credentialed integrations (`agent_catalog`, `reviewer_catalog`, `review_scout_catalog`, `openswe/agent_api/run_catalog.py`); after that, every call is answered from the token (`openswe/agent_api/run_calls.py`).
 The backend never runs middleware around a model call; the only middleware objects it keeps are the preparation and the reporters a named endpoint calls.
 
-Alephat also provides an independent multi-service platform in `alephat_platform/` with API, webhook, and harness services over PostgreSQL and NATS.
-Its deployment files live in `deploy/`; see `docs/PLATFORM.md` and the standalone GKE guide in `README.md`.
-Keep the platform compatible when changing shared OAuth or sandbox provider APIs.
-Use `make platform-up` for the local stack and `uv run pytest tests/platform` for its unit tests.
-Both runtimes require Python 3.14 or newer.
+Alephat also provides an independent multi-service platform in `alephat_platform/` with API, webhook, and harness services over PostgreSQL and NATS, paired with a stateless rich Slack renderer in `slack-renderer/` (`@alephat/slack-renderer`):
+
+- `alephat_platform/api/`: FastAPI control plane (`/v1/*`) for tasks, approvals, MCP CRUD, and SSE, plus dashboard compatibility routes (`/dashboard/api/*`, `/auth/*`) serving GitHub OAuth sign-in, the Work chat UI, repository/pull request detail, diff, conversation, and review views, skills, automations, and the allowed Slack bots allowlist (`routes_slack_bots.py`).
+- `alephat_platform/webhook/`: FastAPI public ingress (`/hooks/github`, `/hooks/slack`), outbound Slack Socket Mode WebSocket listener (`SlackSocketModeClient`), event deduplication (`channel:ts`), bot allowlist checks, follow-up thread resumption on completed tasks, and signed interactive button handling (`SlackActionHandler`) authorized via `SLACK_USER_MAP`.
+- `alephat_platform/harness/`: NATS JetStream `TASKS` worker with PostgreSQL leases/heartbeats, Deep Agents execution across `agent_sandbox` (Kata `kata-qemu` or `gvisor`), `local` (with isolated gitconfig and `gh` auth wrapper), `daytona`, and `opensandbox`, automatic recording of sandbox-created pull requests, and Slack thread replies (`render_slack_card` and `upload_slack_file` via the sandbox file API).
+- `slack-renderer/`: stateless TypeScript service using `@json-render/chat` and the Chat SDK Slack adapter to render Markdown, cards, tables, charts, images, and signed buttons without holding Slack or model credentials (runs as an internal service in Compose and a loopback sidecar on the harness Pod in Kubernetes).
+
+Its deployment files and automated GKE provisioning/teardown scripts (`deploy/gke-deploy.sh`, `deploy/gke-teardown.sh`, `deploy/k8s/external-secrets.yaml`) live in `deploy/`; see `docs/PLATFORM.md` and the standalone GKE guide in `README.md`.
+Keep the platform compatible when changing shared OAuth, Slack, or sandbox provider APIs.
+Use `make platform-up` for the local stack, `uv run pytest tests/platform` for platform unit tests, and `pnpm --filter @alephat/slack-renderer test` for renderer tests.
+Both Python runtimes require Python 3.14 or newer.
 
 ## Conventions
 
