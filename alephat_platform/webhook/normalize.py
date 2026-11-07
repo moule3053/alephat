@@ -129,6 +129,8 @@ def normalize_slack(
     org_id: str,
     delivery_id: str,
 ) -> dict[str, Any]:
+    import os
+
     if payload.get("type") == "url_verification":
         return {
             "schema_version": 1,
@@ -139,12 +141,30 @@ def normalize_slack(
         }
 
     event = payload.get("event") or {}
-    if event.get("type") != "app_mention" and event.get("type") != "message":
+    event_type = event.get("type")
+    if event_type not in {"app_mention", "message"}:
         return _ignore(org_id, delivery_id, "unhandled_slack")
+
+    bot_user_id = os.environ.get("SLACK_BOT_USER_ID", "").strip()
+    if (
+        event.get("bot_id")
+        or event.get("subtype")
+        or (bot_user_id and event.get("user") == bot_user_id)
+    ):
+        return _ignore(org_id, delivery_id, "bot_or_subtype_message")
 
     text = event.get("text") or ""
     channel = event.get("channel")
+    # In public/private channels, Slack sends both `message` and `app_mention` when @mentioned;
+    # let `app_mention` handle channel mentions and `message` handle DMs (`im`).
+    if event_type == "message" and event.get("channel_type") != "im":
+        return _ignore(org_id, delivery_id, "non_im_message")
+
+    if bot_user_id:
+        text = re.sub(rf"<@{re.escape(bot_user_id)}>\s*", "", text).strip()
+
     thread_ts = event.get("thread_ts") or event.get("ts")
+    message_ts = event.get("ts") or thread_ts
     user = event.get("user")
     thread_id = f"slack:{channel}:{thread_ts}"
     # optional repo:owner/name
@@ -160,13 +180,13 @@ def normalize_slack(
         "source": TaskSource.SLACK.value,
         "source_ref": f"{channel}/{thread_ts}",
         "thread_id": thread_id,
-        "agent_type": AgentType.CODING.value,
+        "agent_type": AgentType.CODING.value if repo else AgentType.WORKSPACE.value,
         "actor": {"kind": "slack_user", "id": user},
         "repo": repo,
         "title": text[:120],
         "message": {"kind": "user_input", "content": text, "blocks": []},
         "idempotency_key": f"slack:{delivery_id}",
-        "metadata": {"channel": channel, "thread_ts": thread_ts},
+        "metadata": {"channel": channel, "thread_ts": thread_ts, "message_ts": message_ts},
     }
 
 

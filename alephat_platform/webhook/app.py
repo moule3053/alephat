@@ -119,6 +119,7 @@ def create_app() -> FastAPI:
             return result
 
     @app.post("/hooks/slack")
+    @app.post("/webhooks/slack")
     async def slack_hook(
         request: Request,
         x_slack_signature: str | None = Header(default=None, alias="X-Slack-Signature"),

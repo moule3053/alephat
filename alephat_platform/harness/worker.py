@@ -348,6 +348,7 @@ class HarnessWorker:
             }
             await session.commit()
 
+        await self._notify_slack_start(task_snapshot["metadata"])
         provider = get_sandbox_provider(task_snapshot["sandbox_provider"])
         try:
             if task_snapshot["sandbox_id"]:
@@ -706,6 +707,78 @@ class HarnessWorker:
                         reason="trailing_message",
                     )
             await session.commit()
+
+        await self._notify_slack_result(
+            task_snapshot["metadata"],
+            success=result.success,
+            final_message=result.final_message,
+            pr_url=repo_outcome.get("pr_url") if isinstance(repo_outcome, dict) else None,
+        )
+
+    async def _notify_slack_start(self, metadata: dict[str, Any]) -> None:
+        import os
+
+        import httpx
+
+        token = os.environ.get("SLACK_BOT_TOKEN", "").strip()
+        channel = metadata.get("channel") if isinstance(metadata, dict) else None
+        ts = (
+            (metadata.get("message_ts") or metadata.get("thread_ts"))
+            if isinstance(metadata, dict)
+            else None
+        )
+        if not token or not isinstance(channel, str) or not isinstance(ts, str):
+            return
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(
+                    "https://slack.com/api/reactions.add",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"channel": channel, "timestamp": ts, "name": "eyes"},
+                )
+        except Exception:
+            logger.debug("Slack start reaction failed", exc_info=True)
+
+    async def _notify_slack_result(
+        self,
+        metadata: dict[str, Any],
+        *,
+        success: bool,
+        final_message: str | None,
+        pr_url: str | None,
+    ) -> None:
+        import os
+
+        import httpx
+
+        token = os.environ.get("SLACK_BOT_TOKEN", "").strip()
+        channel = metadata.get("channel") if isinstance(metadata, dict) else None
+        thread_ts = metadata.get("thread_ts") if isinstance(metadata, dict) else None
+        msg_ts = (metadata.get("message_ts") or thread_ts) if isinstance(metadata, dict) else None
+        if not token or not isinstance(channel, str) or not isinstance(thread_ts, str):
+            return
+        text = (final_message or ("Task completed." if success else "Task failed.")).strip()
+        if pr_url:
+            text = f"{text}\n\nPull Request: {pr_url}"
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                await client.post(
+                    "https://slack.com/api/chat.postMessage",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"channel": channel, "thread_ts": thread_ts, "text": text},
+                )
+                if isinstance(msg_ts, str):
+                    await client.post(
+                        "https://slack.com/api/reactions.add",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={
+                            "channel": channel,
+                            "timestamp": msg_ts,
+                            "name": "white_check_mark" if success else "x",
+                        },
+                    )
+        except Exception:
+            logger.warning("Failed to post Slack thread reply", exc_info=True)
 
 
 def main() -> None:
