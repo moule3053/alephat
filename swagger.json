@@ -11321,7 +11321,7 @@
     },
     "/dashboard/api/auth/login": {
       "get": {
-        "description": "Everyone signs in with LangSmith; locally without it, as the `gh` CLI's user.",
+        "description": "Sign in with GitHub OAuth (or LangSmith when configured); locally without it, as `gh`.",
         "operationId": "auth_login_dashboard_api_auth_login_get",
         "parameters": [
           {
@@ -11338,6 +11338,40 @@
                 }
               ],
               "title": "Redirect To"
+            }
+          },
+          {
+            "in": "query",
+            "name": "desktop_handoff",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Desktop Handoff"
+            }
+          },
+          {
+            "in": "query",
+            "name": "desktop_port",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 65535,
+                  "minimum": 1024,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Desktop Port"
             }
           }
         ],
