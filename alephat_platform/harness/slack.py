@@ -1,13 +1,12 @@
 """One run's rich Slack reply, backed by the task's persisted message timestamps."""
 
 import asyncio
-import base64
 import logging
-import shlex
 import time
 import uuid
 from pathlib import PurePosixPath
 
+from deepagents.backends.protocol import FileDownloadResponse
 from langchain_core.tools import StructuredTool, ToolException
 from pydantic import JsonValue, TypeAdapter
 from sqlalchemy import select
@@ -22,7 +21,7 @@ from alephat_platform.common.slack import (
     SlackMessage,
     SlackRendererClient,
 )
-from alephat_platform.harness.sandboxes import SandboxProviderBase, SandboxRef
+from alephat_platform.harness.sandboxes import SandboxRef
 from openswe.prompts import prompt
 
 logger = logging.getLogger(__name__)
@@ -273,8 +272,8 @@ class SlackReply:
 
 
 class SlackTools:
-    def __init__(self, reply: SlackReply, sandbox: SandboxProviderBase, ref: SandboxRef) -> None:
-        self.reply, self.sandbox, self.ref = reply, sandbox, ref
+    def __init__(self, reply: SlackReply, ref: SandboxRef) -> None:
+        self.reply, self.ref = reply, ref
 
     async def tools(self) -> list[StructuredTool]:
         return [
@@ -303,25 +302,8 @@ class SlackTools:
         return {"posted": True, "message_count": len(self.reply.timestamps)}
 
     async def upload_file(self, path: str, title: str) -> dict[str, JsonValue]:
-        script = (
-            "import base64,pathlib,sys\n"
-            "root=pathlib.Path.cwd().resolve()\n"
-            "p=pathlib.Path(sys.argv[1]).resolve()\n"
-            "if not p.is_relative_to(root):\n"
-            "    raise ValueError('File must be inside the sandbox workspace')\n"
-            "if not p.is_file() or p.stat().st_size > 10*1024*1024:\n"
-            "    raise ValueError('Maximum file size is 10 MiB')\n"
-            "print(base64.b64encode(p.read_bytes()).decode())"
-        )
         try:
-            result = await self.sandbox.exec(
-                self.ref, f"python -c {shlex.quote(script)} {shlex.quote(path)}", timeout=30
-            )
-            if result.exit_code:
-                raise ValueError(result.stderr[-1000:] or "Cannot read sandbox artifact")
-            content = base64.b64decode(result.stdout.strip(), validate=True)
-            if len(content) > 10 * 1024 * 1024:
-                raise ValueError("Maximum file size is 10 MiB")
+            content = await self._workspace_file(path)
             file_id = await self.reply.client.upload(
                 self.reply.channel,
                 self.reply.thread_ts,
@@ -333,3 +315,17 @@ class SlackTools:
             logger.warning("Slack artifact upload failed", exc_info=True)
             raise ToolException(str(exc)) from exc
         return {"file_id": file_id, "uploaded": True}
+
+    async def _workspace_file(self, path: str) -> bytes:
+        # Shell output mixes stderr and truncates large results, so binary files
+        # must use the sandbox file API rather than a base64 print.
+        download = getattr(self.ref.handle, "adownload_files", None)
+        if download is None:
+            raise ValueError("This sandbox cannot transfer files")
+        responses = await download([path])
+        response = responses[0] if responses else FileDownloadResponse(path=path, error="missing")
+        if response.error or response.content is None:
+            raise ValueError(str(response.error or "Cannot read sandbox artifact"))
+        if len(response.content) > 10 * 1024 * 1024:
+            raise ValueError("Maximum file size is 10 MiB")
+        return response.content

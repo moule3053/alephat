@@ -4,10 +4,13 @@ from unittest.mock import AsyncMock
 
 import httpx2
 import pytest
+from deepagents.backends.protocol import FileDownloadResponse
 
 from alephat_platform.common.config import clear_settings_cache
 from alephat_platform.common.models import OrgMembership, Task, User
 from alephat_platform.common.slack import SlackAction, SlackActionSigner, SlackClient
+from alephat_platform.harness.sandboxes import SandboxRef
+from alephat_platform.harness.slack import SlackReply, SlackTools
 from alephat_platform.webhook.slack_actions import SlackActionHandler
 
 
@@ -111,3 +114,23 @@ async def test_private_upload_uses_slack_form_handshake_without_forwarding_the_b
         == "F1"
     )
     assert endpoint.content == b"image"
+
+
+@pytest.mark.asyncio
+async def test_slack_file_upload_reads_workspace_bytes_instead_of_shell_output():
+    class Workspace:
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("shell output truncates binary transfers")
+
+        async def adownload_files(self, paths):
+            assert paths == ["/aurora_borealis.png"]
+            return [FileDownloadResponse(path=paths[0], content=b"\x89PNG")]
+
+    reply = SlackReply(uuid.uuid4(), uuid.uuid4(), {"channel": "C1", "thread_ts": "1.2"})
+    reply.client.upload = AsyncMock(return_value="F1")
+    result = await SlackTools(
+        reply, SandboxRef(provider="local", sandbox_id="sandbox", handle=Workspace())
+    ).upload_file("/aurora_borealis.png", "Aurora")
+
+    assert result == {"file_id": "F1", "uploaded": True}
+    assert reply.client.upload.await_args.kwargs["content"] == b"\x89PNG"

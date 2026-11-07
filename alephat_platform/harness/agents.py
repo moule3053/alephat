@@ -303,7 +303,6 @@ class CodingAgentRunner:
         if sandbox_ref.handle is not None:
             return await self._run_deep_agent(
                 ctx,
-                sandbox=sandbox,
                 sandbox_ref=sandbox_ref,
                 mcp_sessions=mcp_sessions,
                 on_step=on_step,
@@ -481,7 +480,6 @@ class CodingAgentRunner:
         self,
         ctx: RunContext,
         *,
-        sandbox: SandboxProviderBase,
         sandbox_ref: SandboxRef,
         mcp_sessions: list[McpSession],
         on_step: Any,
@@ -548,7 +546,7 @@ class CodingAgentRunner:
         slack_tools: list[BaseTool] = []
         if ctx.slack_reply and ctx.slack_reply.enabled:
             system_prompt += f"\n\n{await ctx.slack_reply.instructions()}"
-            slack_tools.extend(await SlackTools(ctx.slack_reply, sandbox, sandbox_ref).tools())
+            slack_tools.extend(await SlackTools(ctx.slack_reply, sandbox_ref).tools())
         graph = create_deep_agent(
             model=_make_deep_agent_model(
                 ctx.model,
