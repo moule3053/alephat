@@ -53,9 +53,16 @@ class SlackSocketModeClient:
         if not isinstance(payload, dict):
             return
         event_obj = payload.get("event")
+        channel = event_obj.get("channel") if isinstance(event_obj, dict) else None
+        msg_ts = event_obj.get("ts") if isinstance(event_obj, dict) else None
+        event_type = event_obj.get("type") if isinstance(event_obj, dict) else None
         client_msg_id = event_obj.get("client_msg_id") if isinstance(event_obj, dict) else None
-        delivery_id = str(
-            payload.get("event_id") or client_msg_id or frame.get("envelope_id") or uuid.uuid4()
+        delivery_id = (
+            f"{channel}:{msg_ts}"
+            if isinstance(channel, str) and isinstance(msg_ts, str)
+            else str(
+                payload.get("event_id") or client_msg_id or frame.get("envelope_id") or uuid.uuid4()
+            )
         )
         raw_body = json.dumps(payload, separators=(",", ":")).encode()
         async with session_scope() as session:
@@ -63,13 +70,25 @@ class SlackSocketModeClient:
                 session, provider="slack", delivery_id=delivery_id, raw_body=raw_body
             )
             if not is_new:
+                logger.info(
+                    "Duplicate Slack event skipped",
+                    extra={"delivery_id": delivery_id, "slack_event_type": event_type},
+                )
                 return
             command = normalize_slack(
                 payload,
                 org_id=self.org_id,
                 delivery_id=delivery_id,
             )
-            await apply_ingress_command(session, command)
+            result = await apply_ingress_command(session, command)
+            logger.info(
+                "Processed Slack Socket Mode event",
+                extra={
+                    "delivery_id": delivery_id,
+                    "slack_event_type": event_type,
+                    "result": result,
+                },
+            )
 
     async def run(self) -> None:
         import websockets

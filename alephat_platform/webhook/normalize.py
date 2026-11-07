@@ -155,11 +155,6 @@ def normalize_slack(
 
     text = event.get("text") or ""
     channel = event.get("channel")
-    # In public/private channels, Slack sends both `message` and `app_mention` when @mentioned;
-    # let `app_mention` handle channel mentions and `message` handle DMs (`im`).
-    if event_type == "message" and event.get("channel_type") != "im":
-        return _ignore(org_id, delivery_id, "non_im_message")
-
     if bot_user_id:
         text = re.sub(rf"<@{re.escape(bot_user_id)}>\s*", "", text).strip()
 
