@@ -16,10 +16,15 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 if [[ -f "${SCRIPT_DIR}/.env" ]]; then
   while IFS='=' read -r k v; do
     [[ -z "${k}" || "${k}" =~ ^# ]] && continue
+    v="${v#\"}"
+    v="${v%\"}"
+    v="${v#\'}"
+    v="${v%\'}"
     case "${k}" in
       OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|FIREWORKS_API_KEY|\
       GITHUB_APP_ID|GITHUB_APP_CLIENT_ID|GITHUB_APP_CLIENT_SECRET|GITHUB_APP_INSTALLATION_ID|\
       GITHUB_APP_PRIVATE_KEY|ALLOWED_GITHUB_USERS|ALLOWED_GITHUB_ORGS|GITHUB_WEBHOOK_SECRET|\
+      SLACK_SIGNING_SECRET|SLACK_BOT_TOKEN|SLACK_APP_ID|SLACK_BOT_USER_ID|SLACK_BOT_USERNAME|\
       TOKEN_ENCRYPTION_KEY|DASHBOARD_JWT_SECRET|PLATFORM_API_TOKEN|PLATFORM_JWT_SECRET)
         if [[ -z "${!k:-}" && -n "${v}" ]]; then
           export "${k}=${v}"
@@ -609,7 +614,21 @@ if [[ "${USE_EXTERNAL_SECRETS}" == "true" ]]; then
     --arg token "${PLATFORM_API_TOKEN:-${EXISTING_API_TOKEN:-$(openssl rand -hex 32)}}" \
     --arg jwt "${PLATFORM_JWT_SECRET:-${EXISTING_JWT_SECRET:-$(openssl rand -hex 32)}}" \
     --arg webhook "${GITHUB_WEBHOOK_SECRET:-${EXISTING_WEBHOOK_SECRET:-$(openssl rand -hex 32)}}" \
-    '{PLATFORM_API_TOKEN: $token, PLATFORM_JWT_SECRET: $jwt, GITHUB_WEBHOOK_SECRET: $webhook}')"
+    --arg slack_secret "${SLACK_SIGNING_SECRET:-$(read_k8s_secret_key alephat-secrets SLACK_SIGNING_SECRET)}" \
+    --arg slack_token "${SLACK_BOT_TOKEN:-$(read_k8s_secret_key alephat-secrets SLACK_BOT_TOKEN)}" \
+    --arg slack_app_id "${SLACK_APP_ID:-$(read_k8s_secret_key alephat-secrets SLACK_APP_ID)}" \
+    --arg slack_bot_user_id "${SLACK_BOT_USER_ID:-$(read_k8s_secret_key alephat-secrets SLACK_BOT_USER_ID)}" \
+    --arg slack_bot_username "${SLACK_BOT_USERNAME:-$(read_k8s_secret_key alephat-secrets SLACK_BOT_USERNAME)}" \
+    '{
+      PLATFORM_API_TOKEN: $token,
+      PLATFORM_JWT_SECRET: $jwt,
+      GITHUB_WEBHOOK_SECRET: $webhook,
+      SLACK_SIGNING_SECRET: $slack_secret,
+      SLACK_BOT_TOKEN: $slack_token,
+      SLACK_APP_ID: $slack_app_id,
+      SLACK_BOT_USER_ID: $slack_bot_user_id,
+      SLACK_BOT_USERNAME: $slack_bot_username
+    }')"
 
   ensure_gsm_secret "alephat-oauth" "$(jq -nc \
     --arg app_id "${GITHUB_APP_ID:-$(read_k8s_secret_key alephat-oauth GITHUB_APP_ID)}" \
