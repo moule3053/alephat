@@ -120,6 +120,7 @@ class Settings:
     )
     github_webhook_secret: str | None = field(default_factory=lambda: _env("GITHUB_WEBHOOK_SECRET"))
     slack_signing_secret: str | None = field(default_factory=lambda: _env("SLACK_SIGNING_SECRET"))
+    slack_app_token: str | None = field(default_factory=lambda: _env("SLACK_APP_TOKEN"))
     webhook_signatures_required: bool = field(
         default_factory=lambda: _env_bool("WEBHOOK_SIGNATURES_REQUIRED", False)
     )

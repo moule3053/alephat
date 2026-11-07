@@ -26,6 +26,80 @@ from alephat_platform.webhook.normalize import (
 logger = logging.getLogger(__name__)
 
 
+class SlackSocketModeClient:
+    """Outbound Slack Socket Mode WebSocket listener (`apps.connections.open`)."""
+
+    def __init__(self, *, app_token: str, org_id: str, stop_event: asyncio.Event) -> None:
+        self.app_token = app_token
+        self.org_id = org_id
+        self.stop_event = stop_event
+
+    async def _open_ws_url(self) -> str:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                "https://slack.com/api/apps.connections.open",
+                headers={"Authorization": f"Bearer {self.app_token}"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        if not isinstance(data, dict) or not data.get("ok") or not isinstance(data.get("url"), str):
+            raise RuntimeError(f"Slack apps.connections.open failed: {data}")
+        return data["url"]
+
+    async def _handle_envelope(self, frame: dict[str, object]) -> None:
+        payload = frame.get("payload")
+        if not isinstance(payload, dict):
+            return
+        event_obj = payload.get("event")
+        client_msg_id = event_obj.get("client_msg_id") if isinstance(event_obj, dict) else None
+        delivery_id = str(
+            payload.get("event_id") or client_msg_id or frame.get("envelope_id") or uuid.uuid4()
+        )
+        raw_body = json.dumps(payload, separators=(",", ":")).encode()
+        async with session_scope() as session:
+            is_new = await accept_delivery(
+                session, provider="slack", delivery_id=delivery_id, raw_body=raw_body
+            )
+            if not is_new:
+                return
+            command = normalize_slack(
+                payload,
+                org_id=self.org_id,
+                delivery_id=delivery_id,
+            )
+            await apply_ingress_command(session, command)
+
+    async def run(self) -> None:
+        import websockets
+
+        while not self.stop_event.is_set():
+            try:
+                ws_url = await self._open_ws_url()
+                async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20) as ws:
+                    logger.info("Connected to Slack Socket Mode WebSocket")
+                    async for raw in ws:
+                        if self.stop_event.is_set():
+                            break
+                        frame = json.loads(raw if isinstance(raw, str) else raw.decode())
+                        if not isinstance(frame, dict):
+                            continue
+                        envelope_id = frame.get("envelope_id")
+                        if isinstance(envelope_id, str) and envelope_id:
+                            await ws.send(json.dumps({"envelope_id": envelope_id}))
+                        if frame.get("type") == "disconnect":
+                            logger.info("Slack Socket Mode requested reconnect")
+                            break
+                        if frame.get("type") == "events_api":
+                            await self._handle_envelope(frame)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Slack Socket Mode connection error; retrying in 5s", exc_info=True)
+                await asyncio.sleep(5)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
@@ -44,8 +118,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             on_connection=_set_connection,
         )
     )
+    socket_task: asyncio.Task[None] | None = None
+    app_token = (settings.slack_app_token or "").strip()
+    if app_token.startswith("xapp-") and app_token != "xapp-your-app-level-token":
+        client = SlackSocketModeClient(
+            app_token=app_token,
+            org_id=settings.default_org_id,
+            stop_event=stop,
+        )
+        socket_task = asyncio.create_task(client.run())
+
     yield
     stop.set()
+    if socket_task is not None:
+        socket_task.cancel()
+        try:
+            await socket_task
+        except asyncio.CancelledError:
+            pass
     publisher_task.cancel()
     try:
         await publisher_task
