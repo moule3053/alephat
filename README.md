@@ -279,7 +279,7 @@ The harness creates a direct `Sandbox` from this template for every task; a warm
 
 KEDA scales the harness deployment from one to fifty workers based on the pending message count for the durable `harness-workers` consumer on the `TASKS` JetStream stream.
 Keeping one worker running prevents queue-based scale-down from interrupting a task after its message has been claimed.
-One harness Pod processes one task at a time.
+Each harness worker runs up to 4 tasks concurrently.
 
 ```bash
 helm repo add kedacore https://kedacore.github.io/charts
@@ -356,7 +356,7 @@ kubectl -n "$PLATFORM_NAMESPACE" rollout status \
 ```
 
 The values file creates logical aliases that match the dashboard model IDs and routes them to OpenAI, Anthropic, the Gemini API, and Vertex AI Gemini.
-The default `gemini-5.6-flash` alias uses Vertex AI through Workload Identity; `google:gemini-3.5-flash` demonstrates the API-key route.
+The default `google:gemini-4-argon` (`google_genai:gemini-4-argon`) aliases use the Gemini API key; `gemini-5.6-flash` and `google:gemini-3.5-flash` route to Vertex AI through Workload Identity.
 Provider model names change over time and differ by account; update each `litellm_params.model` to a model enabled for your account.
 `DEFAULT_MODEL` in `deploy/k8s/configmap.yaml` must match one of the `model_name` aliases.
 The explicit PostgreSQL password flags are required because the pinned LiteLLM chart generates an internal proxy credential in addition to consuming `litellm-postgres`; both must contain the same value.
