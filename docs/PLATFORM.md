@@ -69,6 +69,9 @@ make platform-logs
 make platform-down
 ```
 
+> **Troubleshooting:** An exit code `137` while building the UI image usually means the Docker VM ran out of memory.
+> Allocate at least 6 GB of memory to Docker before retrying (with Colima: `colima stop && colima start --memory 6`, then re-run `make platform-up`).
+
 Smoke test:
 
 ```bash
