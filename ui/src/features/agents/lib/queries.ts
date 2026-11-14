@@ -1554,9 +1554,7 @@ export function useMoveThread(
       let destination: ThreadMoveDestination = { target: "cloud" }
       if (to === "local") {
         if (!window.openSweDesktop)
-          throw new Error(
-            "Open this thread in the Alephat app to move it here"
-          )
+          throw new Error("Open this thread in the Alephat app to move it here")
         destination = {
           sandbox_bridge_id: await window.openSweDesktop.takeOverThread({
             threadId: thread.id,
