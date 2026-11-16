@@ -47,15 +47,29 @@ class SlackReply:
         self.fallback_text = ""
         self.stream_disabled = False
 
+    async def hydrate(self) -> None:
+        if not self.enabled or self.timestamps:
+            return
+        async with session_scope() as session:
+            task = await session.get(Task, self.task_id)
+            raw_saved = (task.metadata_ or {}).get("slack_reply") if task else None
+            saved = raw_saved if isinstance(raw_saved, dict) else {}
+            if saved.get("run_id") == str(self.run_id):
+                raw_ts = saved.get("timestamps")
+                if isinstance(raw_ts, list):
+                    self.timestamps = [str(ts) for ts in raw_ts]
+                raw_spec = saved.get("spec")
+                if isinstance(raw_spec, dict) and self.spec is None:
+                    self.spec = TypeAdapter(dict[str, JsonValue]).validate_python(raw_spec)
+                raw_fallback = saved.get("fallback_text")
+                if isinstance(raw_fallback, str) and not self.fallback_text:
+                    self.fallback_text = raw_fallback
+
     async def start(self) -> None:
         if not self.enabled:
             return
         try:
-            async with session_scope() as session:
-                task = await session.get(Task, self.task_id)
-                saved = (task.metadata_ or {}).get("slack_reply", {}) if task else {}
-                if saved.get("run_id") == str(self.run_id):
-                    self.timestamps = list(saved.get("timestamps", []))
+            await self.hydrate()
             await self.client.react(self.channel, self.message_ts, "eyes")
             await self.publish(markdown="Working on it…", controls="running")
         except Exception:
@@ -82,6 +96,7 @@ class SlackReply:
         partial: bool = False,
     ) -> None:
         async with self.lock:
+            await self.hydrate()
             rendered = await self.renderer.render(markdown=markdown, spec=spec, partial=partial)
             messages = rendered.messages
             if not messages:
@@ -121,6 +136,8 @@ class SlackReply:
                 "slack_reply": {
                     "run_id": str(self.run_id),
                     "timestamps": self.timestamps,
+                    "spec": self.spec,
+                    "fallback_text": self.fallback_text,
                 },
             }
 
@@ -299,6 +316,7 @@ class SlackTools:
             logger.warning("Slack card could not be rendered", exc_info=True)
             raise ToolException(str(exc)) from exc
         self.reply.spec, self.reply.fallback_text = spec, fallback_text
+        await self.reply.save()
         return {"posted": True, "message_count": len(self.reply.timestamps)}
 
     async def upload_file(self, path: str, title: str) -> dict[str, JsonValue]:

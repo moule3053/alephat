@@ -30,22 +30,21 @@ def test_postgresql_uses_gke_persistent_disk():
     assert "emptyDir" not in volume
 
 
-def test_nats_persists_jetstream_with_single_writer_rollouts():
-    documents = _documents("nats.yaml")
-    claim = _document(documents, "PersistentVolumeClaim", "nats-data")
-    deployment = _document(documents, "Deployment", "nats")
+def test_temporal_uses_postgresql_persistence_and_keda_scaler():
+    documents = _documents("temporal.yaml")
+    deployment = _document(documents, "Deployment", "temporal")
+    env = {
+        item["name"]: item
+        for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["DB"]["value"] == "postgres12"
+    assert env["POSTGRES_SEEDS"]["value"] == "alephat-postgresql"
 
-    assert claim["spec"]["storageClassName"] == "standard-rwo"
-    assert claim["spec"]["resources"]["requests"]["storage"] == "20Gi"
-    assert deployment["spec"]["strategy"]["type"] == "Recreate"
-    pod_spec = deployment["spec"]["template"]["spec"]
-    volume = pod_spec["volumes"][0]
-    assert volume["persistentVolumeClaim"]["claimName"] == "nats-data"
-    container = pod_spec["containers"][0]
-    assert "--jetstream" in container["args"]
-    store_dir_index = container["args"].index("--store_dir")
-    assert container["args"][store_dir_index + 1] == "/data/jetstream"
-    assert container["volumeMounts"][0]["mountPath"] == "/data"
+    keda_docs = _documents("harness-keda.yaml")
+    scaled = _document(keda_docs, "ScaledObject", "alephat-harness")
+    trigger = scaled["spec"]["triggers"][0]
+    assert trigger["type"] == "temporal"
+    assert trigger["metadata"]["taskQueue"] == "alephat-agents"
 
 
 def test_litellm_postgresql_uses_gke_persistent_disk():

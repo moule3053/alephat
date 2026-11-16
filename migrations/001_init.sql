@@ -123,10 +123,10 @@ ALTER TABLE tasks
 CREATE TABLE IF NOT EXISTS runs (
     run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     task_id UUID NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+    temporal_run_id TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     attempt INT NOT NULL DEFAULT 1,
     worker_id TEXT,
-    lease_expires_at TIMESTAMPTZ,
     started_at TIMESTAMPTZ,
     ended_at TIMESTAMPTZ,
     error_code TEXT,
@@ -135,9 +135,11 @@ CREATE TABLE IF NOT EXISTS runs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS temporal_run_id TEXT;
+DROP INDEX IF EXISTS idx_runs_lease;
+ALTER TABLE runs DROP COLUMN IF EXISTS lease_expires_at;
+
 CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task_id);
-CREATE INDEX IF NOT EXISTS idx_runs_lease ON runs(status, lease_expires_at)
-    WHERE status IN ('leased', 'active');
 
 CREATE TABLE IF NOT EXISTS messages (
     message_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -194,19 +196,7 @@ CREATE TABLE IF NOT EXISTS sandboxes (
     UNIQUE (task_id, provider, sandbox_id)
 );
 
-CREATE TABLE IF NOT EXISTS graph_checkpoints (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    task_id UUID NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
-    run_id UUID NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-    thread_key TEXT NOT NULL DEFAULT 'default',
-    version BIGINT NOT NULL,
-    blob JSONB NOT NULL,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (run_id, thread_key, version)
-);
-
-CREATE INDEX IF NOT EXISTS idx_graph_checkpoints_run ON graph_checkpoints(run_id, version DESC);
+DROP TABLE IF EXISTS graph_checkpoints, outbox, processed_messages CASCADE;
 
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
     provider TEXT NOT NULL,
@@ -215,23 +205,6 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
     task_id UUID,
     processed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (provider, delivery_id)
-);
-
-CREATE TABLE IF NOT EXISTS outbox (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    aggregate_type TEXT NOT NULL,
-    aggregate_id TEXT NOT NULL,
-    subject TEXT NOT NULL,
-    payload JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    published_at TIMESTAMPTZ
-);
-
-CREATE INDEX IF NOT EXISTS idx_outbox_unpublished ON outbox(created_at) WHERE published_at IS NULL;
-
-CREATE TABLE IF NOT EXISTS processed_messages (
-    msg_id TEXT PRIMARY KEY,
-    processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS command_idempotency (

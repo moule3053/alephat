@@ -9,5 +9,5 @@ resources:
   - webhook-deployment.yaml
   - harness-deployment.yaml
   - ui-deployment.yaml
-  - nats.yaml
+  - temporal.yaml
   - postgresql.yaml

@@ -1,9 +1,9 @@
-"""Task API routes (/v1/tasks)."""
+"""Task API routes (/v1/tasks) backed by Temporal workflows."""
 
 import asyncio
 import json
 import uuid
-from typing import Any
+from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, Header, Query
 from fastapi.responses import StreamingResponse
@@ -11,8 +11,15 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from alephat_platform.api.deps import AuthContext, get_auth, get_db, require_task_actor
+from alephat_platform.api.deps import (
+    AuthContext,
+    get_auth,
+    get_db,
+    get_temporal,
+    require_task_actor,
+)
 from alephat_platform.common.config import get_settings
+from alephat_platform.common.db import get_session_factory
 from alephat_platform.common.enums import McpMode, MessageKind, TaskSource
 from alephat_platform.common.errors import PlatformError
 from alephat_platform.common.idempotency import (
@@ -26,12 +33,8 @@ from alephat_platform.common.serializers import (
     run_to_dict,
     task_to_dict,
 )
-from alephat_platform.common.tasks import (
-    add_message,
-    cancel_task,
-    create_task,
-    decide_approval,
-)
+from alephat_platform.common.tasks import TaskStore
+from alephat_platform.common.temporal import TemporalPlatformClient
 
 router = APIRouter(prefix="/v1", tags=["tasks"])
 
@@ -47,7 +50,7 @@ class CreateTaskBody(BaseModel):
     sandbox_provider: str | None = None
     mcp_server_ids: list[uuid.UUID] | None = None
     mcp_mode: str = McpMode.INHERIT.value
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, object] = Field(default_factory=dict)
     thread_id: str | None = None
     source_ref: str | None = None
 
@@ -71,8 +74,9 @@ async def post_task(
     body: CreateTaskBody,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
+    temporal: TemporalPlatformClient = Depends(get_temporal),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     route = "POST /v1/tasks"
     stored = await begin_idempotent_command(
         db,
@@ -83,9 +87,9 @@ async def post_task(
     if stored:
         return stored.body
     settings = get_settings()
+    store = TaskStore(db)
     try:
-        task = await create_task(
-            db,
+        submission = await store.create_task(
             org_id=auth.org_id,
             user_id=auth.user_id,
             title=body.title,
@@ -113,7 +117,20 @@ async def post_task(
             detail=str(exc),
             error_code="invalid_task_request",
         ) from exc
-    response = {
+
+    task = submission.task
+    await db.commit()
+
+    if submission.turn is not None:
+        accepted = await temporal.submit_turn(
+            task_id=task.task_id,
+            org_id=task.org_id,
+            turn=submission.turn,
+        )
+        task.active_run_id = uuid.UUID(accepted.run_id)
+        await db.flush()
+
+    response: dict[str, object] = {
         "task_id": str(task.task_id),
         "thread_id": task.thread_id,
         "status": task.status,
@@ -141,7 +158,7 @@ async def list_tasks(
     limit: int = Query(default=50, le=200),
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     q = select(Task).where(Task.org_id == auth.org_id).order_by(Task.created_at.desc()).limit(limit)
     if status:
         q = q.where(Task.status == status)
@@ -159,7 +176,7 @@ async def get_task(
     task_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     task = await db.get(Task, task_id)
     if task is None or task.org_id != auth.org_id:
         raise PlatformError(
@@ -178,8 +195,9 @@ async def post_message(
     body: MessageBody,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
+    temporal: TemporalPlatformClient = Depends(get_temporal),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     route = f"POST /v1/tasks/{task_id}/messages"
     stored = await begin_idempotent_command(
         db, org_id=auth.org_id, route=route, key=idempotency_key
@@ -192,8 +210,14 @@ async def post_message(
             "Not Found", status=404, detail="task not found", error_code="not_found"
         )
     require_task_actor(task, auth)
+    store = TaskStore(db)
     try:
-        msg = await add_message(db, task_id=task_id, content=body.content, kind=body.kind)
+        task, msg, turn = await store.append_message(
+            task_id=task_id,
+            content=body.content,
+            kind=body.kind,
+            allow_reopen=False,
+        )
     except ValueError as exc:
         raise PlatformError(
             "Invalid message",
@@ -201,7 +225,8 @@ async def post_message(
             detail=str(exc),
             error_code="invalid_message_kind",
         ) from exc
-    response = {"message_id": str(msg.message_id), "kind": msg.kind}
+
+    response: dict[str, object] = {"message_id": str(msg.message_id), "kind": msg.kind}
     await finish_idempotent_command(
         db,
         org_id=auth.org_id,
@@ -210,6 +235,8 @@ async def post_message(
         status=200,
         body=response,
     )
+    await db.commit()
+    await temporal.submit_turn(task_id=task.task_id, org_id=task.org_id, turn=turn)
     return response
 
 
@@ -219,8 +246,9 @@ async def post_cancel(
     body: CancelBody,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
+    temporal: TemporalPlatformClient = Depends(get_temporal),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     route = f"POST /v1/tasks/{task_id}/cancel"
     stored = await begin_idempotent_command(
         db, org_id=auth.org_id, route=route, key=idempotency_key
@@ -233,7 +261,10 @@ async def post_cancel(
             "Not Found", status=404, detail="task not found", error_code="not_found"
         )
     require_task_actor(task, auth)
-    task = await cancel_task(db, task_id=task_id, reason=body.reason)
+    task, needs_workflow_cancel = await TaskStore(db).request_cancel(
+        task_id=task_id,
+        reason=body.reason,
+    )
     response = task_to_dict(task)
     await finish_idempotent_command(
         db,
@@ -243,6 +274,9 @@ async def post_cancel(
         status=200,
         body=response,
     )
+    await db.commit()
+    if needs_workflow_cancel:
+        await temporal.cancel_task(task_id=task.task_id, reason=body.reason)
     return response
 
 
@@ -253,7 +287,7 @@ async def list_events(
     limit: int = Query(default=100, le=500),
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     task = await db.get(Task, task_id)
     if task is None or task.org_id != auth.org_id:
         raise PlatformError(
@@ -269,29 +303,29 @@ async def list_events(
     return {"items": [event_to_dict(e) for e in events]}
 
 
-@router.get("/tasks/{task_id}/events/stream")
-async def stream_events(
-    task_id: uuid.UUID,
-    auth: AuthContext = Depends(get_auth),
-    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
-) -> StreamingResponse:
-    async def gen():
+class TaskEventStream:
+    """SSE stream producer reading ordered task RunEvents from PostgreSQL."""
+
+    def __init__(self, *, task_id: uuid.UUID, org_id: uuid.UUID, last_event_id: str | None) -> None:
+        self.task_id = task_id
+        self.org_id = org_id
+        self.last_event_id = last_event_id
+
+    async def iterate(self) -> AsyncIterator[str]:
         try:
-            last_seq = int(last_event_id or 0)
+            last_seq = int(self.last_event_id or 0)
         except ValueError:
             last_seq = 0
-        factory = __import__(
-            "alephat_platform.common.db", fromlist=["get_session_factory"]
-        ).get_session_factory()
+        factory = get_session_factory()
         while True:
             async with factory() as session:
-                task = await session.get(Task, task_id)
-                if task is None or task.org_id != auth.org_id:
+                task = await session.get(Task, self.task_id)
+                if task is None or task.org_id != self.org_id:
                     yield f"event: error\ndata: {json.dumps({'error': 'not_found'})}\n\n"
                     return
                 result = await session.execute(
                     select(RunEvent)
-                    .where(RunEvent.task_id == task_id, RunEvent.seq > last_seq)
+                    .where(RunEvent.task_id == self.task_id, RunEvent.seq > last_seq)
                     .order_by(RunEvent.seq)
                     .limit(50)
                 )
@@ -300,13 +334,20 @@ async def stream_events(
                     last_seq = event.seq
                     data = event_to_dict(event)
                     yield f"id: {event.seq}\nevent: run_event\ndata: {json.dumps(data)}\n\n"
-                # status heartbeat
                 yield f"event: task_status\ndata: {json.dumps({'status': task.status})}\n\n"
                 if task.status in {"succeeded", "failed", "cancelled"}:
                     return
             await asyncio.sleep(1.0)
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+
+@router.get("/tasks/{task_id}/events/stream")
+async def stream_events(
+    task_id: uuid.UUID,
+    auth: AuthContext = Depends(get_auth),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+) -> StreamingResponse:
+    stream = TaskEventStream(task_id=task_id, org_id=auth.org_id, last_event_id=last_event_id)
+    return StreamingResponse(stream.iterate(), media_type="text/event-stream")
 
 
 @router.get("/tasks/{task_id}/runs")
@@ -314,7 +355,7 @@ async def list_runs(
     task_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     task = await db.get(Task, task_id)
     if task is None or task.org_id != auth.org_id:
         raise PlatformError(
@@ -331,7 +372,7 @@ async def get_run(
     run_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     run = await db.get(Run, run_id)
     if run is None:
         raise PlatformError("Not Found", status=404, detail="run not found", error_code="not_found")
@@ -346,7 +387,7 @@ async def pending_approvals(
     task_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     task = await db.get(Task, task_id)
     if task is None or task.org_id != auth.org_id:
         raise PlatformError(
@@ -364,8 +405,9 @@ async def approval_decision(
     body: ApprovalBody,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
+    temporal: TemporalPlatformClient = Depends(get_temporal),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     route = f"POST /v1/approvals/{approval_id}/decision"
     stored = await begin_idempotent_command(
         db, org_id=auth.org_id, route=route, key=idempotency_key
@@ -390,8 +432,7 @@ async def approval_decision(
             "Not Found", status=404, detail="approval not found", error_code="not_found"
         )
     require_task_actor(existing_task, auth)
-    approval = await decide_approval(
-        db,
+    task, approval, resolution = await TaskStore(db).record_approval_decision(
         approval_id=approval_id,
         decision=body.decision,
         user_id=auth.user_id,
@@ -406,4 +447,6 @@ async def approval_decision(
         status=200,
         body=response,
     )
+    await db.commit()
+    await temporal.submit_approval(task_id=task.task_id, resolution=resolution)
     return response

@@ -1,0 +1,90 @@
+log:
+  stdout: true
+  level: info
+
+persistence:
+  numHistoryShards: 4
+  defaultStore: default
+  visibilityStore: visibility
+  datastores:
+    default:
+      sql:
+        pluginName: "postgres12"
+        databaseName: "temporal"
+        connectAddr: "__POSTGRES_SEEDS__:__DB_PORT__"
+        connectProtocol: "tcp"
+        user: "__POSTGRES_USER__"
+        password: "__POSTGRES_PWD__"
+        maxConns: 20
+        maxIdleConns: 20
+        maxConnLifetime: 1h
+    visibility:
+      sql:
+        pluginName: "postgres12"
+        databaseName: "temporal_visibility"
+        connectAddr: "__POSTGRES_SEEDS__:__DB_PORT__"
+        connectProtocol: "tcp"
+        user: "__POSTGRES_USER__"
+        password: "__POSTGRES_PWD__"
+        maxConns: 10
+        maxIdleConns: 10
+        maxConnLifetime: 1h
+
+global:
+  membership:
+    maxJoinDuration: 30s
+    broadcastAddress: "__TEMPORAL_BROADCAST_ADDRESS__"
+  pprof:
+    port: 0
+
+services:
+  frontend:
+    rpc:
+      grpcPort: 7233
+      membershipPort: 6933
+      bindOnIP: "__BIND_ON_IP__"
+      httpPort: 7243
+  matching:
+    rpc:
+      grpcPort: 7235
+      membershipPort: 6935
+      bindOnIP: "__BIND_ON_IP__"
+  history:
+    rpc:
+      grpcPort: 7234
+      membershipPort: 6934
+      bindOnIP: "__BIND_ON_IP__"
+  worker:
+    rpc:
+      grpcPort: 7239
+      membershipPort: 6939
+      bindOnIP: "__BIND_ON_IP__"
+
+clusterMetadata:
+  enableGlobalNamespace: false
+  failoverVersionIncrement: 10
+  masterClusterName: "active"
+  currentClusterName: "active"
+  clusterInformation:
+    active:
+      enabled: true
+      initialFailoverVersion: 1
+      rpcName: "frontend"
+      rpcAddress: "__TEMPORAL_BROADCAST_ADDRESS__:7233"
+      httpAddress: "__TEMPORAL_BROADCAST_ADDRESS__:7243"
+
+dcRedirectionPolicy:
+  policy: "noop"
+
+archival:
+  history:
+    state: "disabled"
+  visibility:
+    state: "disabled"
+
+namespaceDefaults:
+  archival:
+    history:
+      state: "disabled"
+    visibility:
+      state: "disabled"

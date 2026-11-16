@@ -49,10 +49,10 @@ dependencies = [
     "langchain-typesafe==0.0.1a3",
     "langchain-quickjs==0.3.11",
     "langchain-daytona>=0.0.8",
-    "nats-py>=2.9.0",
     "httpx>=0.28.1",
     "pydantic>=2.10.0",
     "open-swe-runtime-api",
+    "temporalio-deepagents>=0.0.3",
 ]
 
 [project.optional-dependencies]

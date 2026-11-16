@@ -1,9 +1,8 @@
-"""Signed Slack buttons resolve to authorized platform task operations."""
+"""Signed Slack buttons resolve to authorized platform Temporal operations."""
 
 import hashlib
 import logging
 import uuid
-from datetime import UTC, datetime
 
 from pydantic import BaseModel, JsonValue, TypeAdapter
 from sqlalchemy import select
@@ -13,15 +12,15 @@ from alephat_platform.common.config import get_settings
 from alephat_platform.common.db import session_scope
 from alephat_platform.common.enums import TaskStatus
 from alephat_platform.common.models import Approval, OrgMembership, Task, User
-from alephat_platform.common.outbox import enqueue_task_work
-from alephat_platform.common.slack import SlackAction, SlackActionSigner, SlackClient, SlackMessage
-from alephat_platform.common.tasks import (
-    add_message,
-    append_event,
-    cancel_task,
-    decide_approval,
+from alephat_platform.common.slack import (
+    SlackAction,
+    SlackActionSigner,
+    SlackClient,
+    SlackMessage,
 )
-from alephat_platform.webhook.handlers import accept_delivery
+from alephat_platform.common.tasks import TaskDispatcher, TaskStore
+from alephat_platform.common.temporal import TemporalPlatformClient
+from alephat_platform.webhook.handlers import IngressCommandService
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +31,18 @@ class SlackActor(BaseModel):
 
 
 class SlackActionHandler:
-    def __init__(self, org_id: str) -> None:
+    def __init__(
+        self,
+        org_id: str,
+        *,
+        temporal: TemporalPlatformClient | None = None,
+    ) -> None:
         settings = get_settings()
         self.org_id = uuid.UUID(org_id)
         self.users = TypeAdapter(dict[str, uuid.UUID]).validate_json(settings.slack_user_map)
         self.signer = SlackActionSigner(settings.slack_signing_secret or settings.slack_bot_token)
         self.client = SlackClient(settings.slack_bot_token)
+        self.temporal = temporal or TemporalPlatformClient()
 
     async def authorize(
         self, session: AsyncSession, team: str, slack_user: str, task: Task
@@ -101,28 +106,14 @@ class SlackActionHandler:
                     raise ValueError("This task has changed. Use its latest response.")
                 actor = await self.authorize(session, team, slack_user, task)
                 delivery_id = hashlib.sha256(token.encode()).hexdigest()
-                if not await accept_delivery(
-                    session,
+                ingress = IngressCommandService(session, self.temporal)
+                if not await ingress.accept_delivery(
                     provider="slack_action",
                     delivery_id=delivery_id,
                     raw_body=token.encode(),
                 ):
                     return {"accepted": True, "duplicate": True}
-                context = (
-                    str(message_obj.get("text") or "") if isinstance(message_obj, dict) else ""
-                )
-                await self.apply(session, task, actor, action, context=context)
-                await append_event(
-                    session,
-                    task_id=task.task_id,
-                    run_id=task.active_run_id,
-                    event_type="slack_action",
-                    payload={
-                        "user_id": str(actor.user_id),
-                        "action": action.action,
-                        "label": action.label,
-                    },
-                )
+
                 if message_ts and isinstance(message_obj, dict):
                     original = SlackMessage.model_validate(message_obj)
                     original.blocks = [
@@ -132,7 +123,10 @@ class SlackActionHandler:
                         {
                             "type": "context",
                             "elements": [
-                                {"type": "plain_text", "text": f"{action.label}: request received."}
+                                {
+                                    "type": "plain_text",
+                                    "text": f"{action.label}: request received.",
+                                }
                             ],
                         }
                     )
@@ -140,6 +134,21 @@ class SlackActionHandler:
                         await self.client.update(channel, message_ts, original)
                     except Exception:
                         logger.warning("Could not update clicked Slack message", exc_info=True)
+
+                await TaskStore(session).append_event(
+                    task_id=task.task_id,
+                    run_id=task.active_run_id,
+                    event_type="slack_action",
+                    payload={
+                        "user_id": str(actor.user_id),
+                        "action": action.action,
+                        "label": action.label,
+                    },
+                )
+                context = (
+                    str(message_obj.get("text") or "") if isinstance(message_obj, dict) else ""
+                )
+                await self.apply(session, task, actor, action, context=context)
         except ValueError as exc:
             logger.warning(
                 "Slack action rejected", extra={"slack_channel": channel, "reason": str(exc)}
@@ -158,6 +167,8 @@ class SlackActionHandler:
         *,
         context: str = "",
     ) -> None:
+        del context
+        dispatcher = TaskDispatcher(session, self.temporal)
         content = f'Clicked "{action.label}".' + (f"\n{action.value}" if action.value else "")
         if action.action in {"approve", "reject"}:
             approval = (
@@ -173,32 +184,27 @@ class SlackActionHandler:
             ).scalar_one_or_none()
             if approval is None or task.status != TaskStatus.PARKED.value:
                 raise ValueError("There is no pending plan approval for this task.")
-            await decide_approval(
-                session,
+            await TaskStore(session).append_message(
+                task_id=task.task_id,
+                content=content,
+            )
+            await dispatcher.decide_approval(
                 approval_id=approval.approval_id,
                 decision="approved" if action.action == "approve" else "rejected",
                 user_id=actor.user_id,
                 comment=content,
             )
-            await add_message(session, task_id=task.task_id, content=content)
         elif action.action == "cancel":
             if task.status not in {"queued", "running", "parked"}:
                 raise ValueError("This task has already finished.")
-            await add_message(session, task_id=task.task_id, content=content)
-            await cancel_task(session, task_id=task.task_id, reason="slack_button")
-        elif task.status in {"queued", "running", "parked"}:
-            await add_message(session, task_id=task.task_id, content=content)
-        else:
-            task.status = TaskStatus.QUEUED.value
-            task.park_reason = None
-            task.cancel_requested_at = None
-            task.cancel_reason = None
-            task.updated_at = datetime.now(UTC)
-            await add_message(session, task_id=task.task_id, content=content)
-            await enqueue_task_work(
-                session,
-                org_id=task.org_id,
+            await TaskStore(session).append_message(
                 task_id=task.task_id,
-                agent_type=task.agent_type,
-                reason="follow_up",
+                content=content,
+            )
+            await dispatcher.cancel(task_id=task.task_id, reason="slack_button")
+        else:
+            await dispatcher.send_message(
+                task_id=task.task_id,
+                content=content,
+                allow_reopen=True,
             )

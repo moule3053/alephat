@@ -93,32 +93,32 @@ COMPOSE_CMD := $(COMPOSE) -f deploy/docker-compose.yml --env-file deploy/.env
 
 platform-deps:
 	@test -f deploy/.env || cp deploy/.env.example deploy/.env
-	$(COMPOSE_CMD) up -d postgres nats
+	$(COMPOSE_CMD) up -d postgres temporal-schema temporal temporal-namespace temporal-ui
 
 platform-migrate:
 	$(COMPOSE_CMD) run --rm migrate
 
-# Full stack in Docker (api + webhook + harness + postgres + nats). No KEDA.
+# Full stack in Docker (api + webhook + harness + postgres + temporal + temporal-ui). No KEDA.
 platform-build:
 	@test -f deploy/.env || cp deploy/.env.example deploy/.env
 	$(COMPOSE_CMD) build
 
 platform-up:
 	@test -f deploy/.env || cp deploy/.env.example deploy/.env
-	$(COMPOSE_CMD) up --build -d
+	$(COMPOSE_CMD) up --build -d --remove-orphans
 	@echo ""
-	@echo "API     http://localhost:$${API_HOST_PORT:-8080}"
-	@echo "UI      http://localhost:$${UI_HOST_PORT:-3000}/platform"
-	@echo "Webhook http://localhost:$${WEBHOOK_HOST_PORT:-8081}"
-	@echo "NATS    nats://localhost:$${NATS_HOST_PORT:-4222}  (monitor :$${NATS_MONITOR_HOST_PORT:-8222})"
-	@echo "Harness is a separate worker container consuming JetStream TASKS."
+	@echo "API         http://localhost:$${API_HOST_PORT:-8080}"
+	@echo "UI          http://localhost:$${UI_HOST_PORT:-3005}"
+	@echo "Webhook     http://localhost:$${WEBHOOK_HOST_PORT:-8081}"
+	@echo "Temporal    localhost:$${TEMPORAL_HOST_PORT:-7233}  (UI http://localhost:$${TEMPORAL_UI_HOST_PORT:-8233})"
+	@echo "Worker is a self-hosted Temporal DeepAgents worker polling task queue alephat-agents."
 	@echo "Scale workers: $(COMPOSE_CMD) up -d --scale harness=3"
 
 platform-down:
 	$(COMPOSE_CMD) down
 
 platform-logs:
-	$(COMPOSE_CMD) logs -f api webhook harness slack-renderer ui
+	$(COMPOSE_CMD) logs -f api webhook harness temporal slack-renderer ui
 
 platform-ps:
 	$(COMPOSE_CMD) ps
@@ -206,14 +206,14 @@ mda-test:
 
 help:
 	@echo '----'
-	@echo 'platform-deps                - start postgres + nats only'
+	@echo 'platform-deps                - start postgres + self-hosted temporal + temporal-ui'
 	@echo 'platform-build               - build api/webhook/harness images'
 	@echo 'platform-up                  - build+run full stack (no KEDA)'
 	@echo 'platform-down                - stop compose stack'
 	@echo 'platform-logs / platform-ps  - logs / status'
 	@echo 'platform-api                 - host API on :8080 (needs platform-deps)'
 	@echo 'platform-webhook             - host webhooks on :8081'
-	@echo 'platform-harness             - host harness worker (picks up NATS jobs)'
+	@echo 'platform-harness             - host Temporal DeepAgents worker'
 	@echo 'dev                          - run LangGraph dev server (starts the local PostgreSQL container unless POSTGRES_URI is set)'
 	@echo 'dev-mda                      - Managed Deep Agents dev server on :2025, where every agent run goes'
 	@echo 'mda-cli                      - build the mda CLI from the vendored SDK (needs cargo)'

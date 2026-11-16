@@ -1,5 +1,4 @@
-# Requires KEDA + optional NATS scaler.
-# Scales harness Deployment so each pod runs at most one task (worker concurrency=1).
+# Scales Temporal DeepAgents workers from the alephat-agents Task Queue backlog via KEDA's native temporal scaler.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -8,17 +7,15 @@ metadata:
 spec:
   scaleTargetRef:
     name: alephat-harness
-  minReplicaCount: 1
+  minReplicaCount: 2
   maxReplicaCount: 50
-  cooldownPeriod: 120
+  cooldownPeriod: 300
   pollingInterval: 15
   triggers:
-    - type: nats-jetstream
+    - type: temporal
       metadata:
-        natsServerMonitoringEndpoint: nats.alephat.svc:8222
-        account: "$G"
-        stream: TASKS
-        consumer: harness-workers
-        lagThreshold: "1"
-        activationLagThreshold: "0"
-        useHttps: "false"
+        endpoint: temporal.alephat.svc:7233
+        namespace: default
+        taskQueue: alephat-agents
+        targetQueueSize: "4"
+        unsafeSsl: "true"

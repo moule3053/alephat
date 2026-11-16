@@ -6,22 +6,24 @@ Implementation of [`SERVICE_CONTRACTS.md`](./SERVICE_CONTRACTS.md).
 
 | Service | Module | Image / Dockerfile | Port | Role |
 |---|---|---|---|---|
-| **API** | `alephat_platform.api.app:app` | `deploy/Dockerfile.api` | 8080 | Tasks, approvals, MCP CRUD, SSE, **outbox → NATS** |
-| **Webhook** | `alephat_platform.webhook.app:app` | `deploy/Dockerfile.webhook` | 8081 | GitHub/Slack ingress → Postgres + outbox |
-| **Harness** | `alephat_platform.harness.worker` | `deploy/Dockerfile.harness` | — | **NATS consumer**; lease, LiteLLM, sandboxes, MCP, Postgres checkpoints |
-| **UI** | `ui/` | `deploy/Dockerfile.ui` | 3000 | `/platform` task console; same-origin proxy to API |
+| **API** | `alephat_platform.api.app:app` | `deploy/Dockerfile.api` | 8080 | Tasks, approvals, MCP CRUD, Temporal Schedules, SSE, **Temporal `Update-With-Start`** |
+| **Webhook** | `alephat_platform.webhook.app:app` | `deploy/Dockerfile.webhook` | 8081 | GitHub/Slack ingress + Socket Mode → Postgres + **Temporal Updates / Standalone Activities** |
+| **Harness** | `alephat_platform.harness.worker` | `deploy/Dockerfile.harness` | — | **Self-hosted Temporal Worker** (`DeepAgentsPlugin` + `TemporalBackend`, LiteLLM/direct models, sandboxes, MCP) |
+| **Temporal** | `temporalio/server:1.32.2` | `deploy/temporal-config.yaml` | 7233 | Self-hosted Temporal Service backed by PostgreSQL 16 + SQL Advanced Visibility |
+| **Temporal UI** | `temporalio/ui:latest` | official image | 8233 | Web UI for inspecting Workflows, Event History, Schedules, and Standalone Activities |
+| **UI** | `ui/` | `deploy/Dockerfile.ui` | 3005 → 3000 | Dashboard & task console; same-origin proxy to API |
 
 ### Does the harness run separately?
 
 **Yes.**
-The harness is a pure worker:
+The harness is a pure self-hosted Temporal Worker:
 
-1. API/webhook write tasks + outbox rows in Postgres.
-1. Outbox publisher (in API and webhook) publishes `task.enqueue` to **NATS JetStream `TASKS`**.
-1. Harness **pull-subscribes** to that stream, claims a task (Postgres lease), runs the agent, checkpoints, completes/parks.
+1. API and webhook write relational task/message records in Postgres and dispatch turns atomically to **Temporal** via `Update-With-Start` (`alephat.TaskAgentWorkflow`).
+1. Temporal durably schedules Workflow Tasks and Activity Tasks (`deepagents.invoke_model`, `deepagents.backend_op`, `alephat.*`) onto the `alephat-agents` Task Queue.
+1. Harness workers poll `alephat-agents`, replay completed steps deterministically on crash/restart without re-running LLM calls, pause on `interrupt_on` approvals with zero held worker slots, and roll long histories over via `Continue-As-New`.
 
 You can start/stop/scale harness without restarting API or webhooks.
-If harness is down, jobs stay in JetStream / `queued` until a worker appears.
+If harness is down, Workflows and Activities stay durably queued in Temporal until a worker polls `alephat-agents`.
 No KEDA is required locally — use Compose scale:
 
 ```bash
@@ -33,9 +35,10 @@ docker-compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --scale
 
 | Dep | Compose service | Notes |
 |---|---|---|
-| PostgreSQL | `postgres` | `migrate` job applies the idempotent schema before services start |
-| NATS JetStream | `nats` | `-js` enabled; monitor on `:8222` |
-| LLM providers | env on harness | Direct OpenAI/Anthropic/Fireworks/Google (**default**) |
+| PostgreSQL | `postgres` | Hosts `alephat`, `temporal`, and `temporal_visibility` databases |
+| Temporal Service | `temporal` + `temporal-schema` + `temporal-namespace` | Self-hosted `temporalio/server:1.32.2` on `:7233` |
+| Temporal Web UI | `temporal-ui` | Inspect live agent workflows & schedules at `http://localhost:8233` |
+| LLM providers | env on harness | Direct OpenAI/Anthropic/Fireworks/Google (**default**, `max_retries=0` so Temporal owns retries) |
 | LiteLLM | `litellm` (profile `with-litellm`) | **Optional** proxy when `LITELLM_ENABLED=true` |
 
 Sandboxes: `agent_sandbox` (default), `local`, `daytona`, `opensandbox`.
@@ -47,7 +50,7 @@ Stub sandboxes are fail-closed by default and can only be enabled explicitly wit
 
 Files:
 
-- `deploy/docker-compose.yml` — postgres, nats, migration, api, webhook, harness, UI (+ optional litellm)
+- `deploy/docker-compose.yml` — postgres, temporal-schema, temporal, temporal-namespace, temporal-ui, migration, api, webhook, harness, slack-renderer, UI (+ optional litellm)
 - `deploy/Dockerfile.api` / `Dockerfile.webhook` / `Dockerfile.harness` / `Dockerfile.ui`
 - `deploy/.env.example` — template (committed)
 - `deploy/.env` — local values (gitignored; created from example)
@@ -123,12 +126,12 @@ docker-compose -f deploy/docker-compose.yml --env-file deploy/.env --profile wit
 ## Host processes (deps in Docker only)
 
 ```bash
-make platform-deps          # postgres + nats
+make platform-deps          # postgres + self-hosted temporal + temporal-ui
 export DATABASE_URL=postgresql+asyncpg://alephat:alephat@localhost:5432/alephat
-export NATS_URL=nats://localhost:4222
+export TEMPORAL_ADDRESS=localhost:7233
 make platform-api           # terminal 1
 make platform-webhook       # terminal 2
-make platform-harness       # terminal 3 — can start later; drains backlog
+make platform-harness       # terminal 3 — Temporal DeepAgents worker; drains backlog
 make platform-slack-renderer # terminal 4 — rich Slack messages, loopback :8082
 ```
 
@@ -181,10 +184,10 @@ Keep `SLACK_USER_MAP` operator-managed; it grants identity access, not a model-c
 
 ```text
 alephat_platform/
-  common/     # enums, db, models, outbox, tasks, resolution, messaging
-  api/        # FastAPI control plane
-  webhook/    # FastAPI public ingress
-  harness/    # worker, agents registry, sandboxes, litellm, mcp
+  common/     # enums, db, models, tasks, temporal client/codec, resolution, crypto
+  api/        # FastAPI control plane + dashboard compatibility
+  webhook/    # FastAPI public ingress + Slack Socket Mode
+  harness/    # Temporal DeepAgents worker, workflows, activities, sandboxes, mcp
 migrations/
 deploy/
   Dockerfile.api
@@ -192,6 +195,7 @@ deploy/
   Dockerfile.harness
   Dockerfile.ui
   docker-compose.yml
+  temporal-config.yaml
   .env.example
   litellm_config.yaml
   gke-deploy.sh     # End-to-end GKE cluster, Kata/gVisor, ESO, LiteLLM, KEDA & Traefik deploy

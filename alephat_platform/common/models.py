@@ -1,8 +1,7 @@
-"""SQLAlchemy ORM models for the platform schema."""
+"""SQLAlchemy ORM models for the platform relational read & identity schema."""
 
 import uuid
 from datetime import datetime
-from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -24,20 +23,20 @@ class Base(DeclarativeBase):
     pass
 
 
-def _uuid() -> uuid.UUID:
-    return uuid.uuid4()
-
-
 class Org(Base):
     __tablename__ = "orgs"
-    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class User(Base):
     __tablename__ = "users"
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
     email: Mapped[str | None] = mapped_column(Text)
     display_name: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -62,7 +61,7 @@ class OrgSettings(Base):
     mcp_stdio_allowed: Mapped[bool] = mapped_column(Boolean, default=False)
     max_mcp_servers_per_run: Mapped[int] = mapped_column(Integer, default=10)
     sandbox_fallback: Mapped[bool] = mapped_column(Boolean, default=False)
-    settings: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    settings: Mapped[dict[str, object]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -74,14 +73,14 @@ class UserSettings(Base):
     default_mcp_server_ids: Mapped[list[uuid.UUID]] = mapped_column(
         ARRAY(UUID(as_uuid=True)), server_default=text("ARRAY[]::uuid[]")
     )
-    settings: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    settings: Mapped[dict[str, object]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class McpServer(Base):
     __tablename__ = "mcp_servers"
     mcp_server_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=_uuid
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     scope: Mapped[str] = mapped_column(Text, nullable=False)
     org_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
@@ -90,7 +89,7 @@ class McpServer(Base):
     transport: Mapped[str] = mapped_column(Text, nullable=False)
     url: Mapped[str | None] = mapped_column(Text)
     command: Mapped[str | None] = mapped_column(Text)
-    args: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    args: Mapped[list[object]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
     auth_ciphertext: Mapped[str | None] = mapped_column(Text)
     headers_ciphertext: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -120,7 +119,9 @@ class Task(Base):
     __tablename__ = "tasks"
     __table_args__ = (UniqueConstraint("org_id", "thread_id"),)
 
-    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
     org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     thread_id: Mapped[str] = mapped_column(Text, nullable=False)
     source: Mapped[str] = mapped_column(Text, nullable=False)
@@ -136,14 +137,16 @@ class Task(Base):
     mcp_server_ids: Mapped[list[uuid.UUID]] = mapped_column(
         ARRAY(UUID(as_uuid=True)), server_default=text("ARRAY[]::uuid[]")
     )
-    mcp_snapshot: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    mcp_snapshot: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB, server_default=text("'[]'::jsonb")
+    )
     park_reason: Mapped[str | None] = mapped_column(Text)
     cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancel_reason: Mapped[str | None] = mapped_column(Text)
     active_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
-    metadata_: Mapped[dict[str, Any]] = mapped_column(
+    metadata_: Mapped[dict[str, object]] = mapped_column(
         "metadata", JSONB, server_default=text("'{}'::jsonb")
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -152,14 +155,16 @@ class Task(Base):
 
 class Run(Base):
     __tablename__ = "runs"
-    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
     task_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=False
     )
+    temporal_run_id: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, default="pending")
     attempt: Mapped[int] = mapped_column(Integer, default=1)
     worker_id: Mapped[str | None] = mapped_column(Text)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_code: Mapped[str | None] = mapped_column(Text)
@@ -171,7 +176,7 @@ class Run(Base):
 class Message(Base):
     __tablename__ = "messages"
     message_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=_uuid
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     task_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=False
@@ -179,7 +184,9 @@ class Message(Base):
     role: Mapped[str] = mapped_column(Text, default="user")
     kind: Mapped[str] = mapped_column(Text, default="user_input")
     content: Mapped[str] = mapped_column(Text, default="")
-    blocks: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    blocks: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB, server_default=text("'[]'::jsonb")
+    )
     visibility: Mapped[str] = mapped_column(Text, default="all")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     seq: Mapped[int] = mapped_column(BigInteger, Identity())
@@ -188,12 +195,12 @@ class Message(Base):
 class Approval(Base):
     __tablename__ = "approvals"
     approval_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=_uuid
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     kind: Mapped[str] = mapped_column(Text, default="plan_approval")
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     status: Mapped[str] = mapped_column(Text, default="pending")
     decided_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -204,18 +211,20 @@ class Approval(Base):
 
 class RunEvent(Base):
     __tablename__ = "run_events"
-    event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    event_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
     task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     seq: Mapped[int] = mapped_column(BigInteger, Identity())
     event_type: Mapped[str] = mapped_column(Text, nullable=False)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    payload: Mapped[dict[str, object]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class SandboxRow(Base):
     __tablename__ = "sandboxes"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     provider: Mapped[str] = mapped_column(Text, nullable=False)
     sandbox_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -224,22 +233,8 @@ class SandboxRow(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    provider_metadata: Mapped[dict[str, Any]] = mapped_column(
+    provider_metadata: Mapped[dict[str, object]] = mapped_column(
         JSONB, server_default=text("'{}'::jsonb")
-    )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
-class GraphCheckpoint(Base):
-    __tablename__ = "graph_checkpoints"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
-    task_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    thread_key: Mapped[str] = mapped_column(Text, default="default")
-    version: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    blob: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    metadata_: Mapped[dict[str, Any]] = mapped_column(
-        "metadata", JSONB, server_default=text("'{}'::jsonb")
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -255,30 +250,11 @@ class WebhookDelivery(Base):
     )
 
 
-class Outbox(Base):
-    __tablename__ = "outbox"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
-    aggregate_type: Mapped[str] = mapped_column(Text, nullable=False)
-    aggregate_id: Mapped[str] = mapped_column(Text, nullable=False)
-    subject: Mapped[str] = mapped_column(Text, nullable=False)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class ProcessedMessage(Base):
-    __tablename__ = "processed_messages"
-    msg_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    processed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-
 class AllowedSlackBot(Base):
     __tablename__ = "allowed_slack_bots"
     __table_args__ = (UniqueConstraint("org_id", "team_id", "bot_id"),)
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     team_id: Mapped[str] = mapped_column(Text, nullable=False)
     bot_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -297,5 +273,5 @@ class CommandIdempotency(Base):
     org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     route: Mapped[str] = mapped_column(Text, primary_key=True)
     response_status: Mapped[int] = mapped_column(Integer, nullable=False)
-    response_body: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    response_body: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

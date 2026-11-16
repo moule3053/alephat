@@ -14,6 +14,7 @@ from alephat_platform.common.config import get_settings
 from alephat_platform.common.db import get_session_factory
 from alephat_platform.common.errors import ForbiddenError, PlatformError, UnauthorizedError
 from alephat_platform.common.models import OrgMembership, Task
+from alephat_platform.common.temporal import TemporalPlatformClient
 from openswe.dashboard.oauth import COOKIE_NAME, decode_session
 
 
@@ -36,6 +37,10 @@ async def get_db() -> AsyncIterator[AsyncSession]:
         except Exception:
             await session.rollback()
             raise
+
+
+def get_temporal(request: Request) -> TemporalPlatformClient:
+    return TemporalPlatformClient.from_request(request)
 
 
 async def get_auth(

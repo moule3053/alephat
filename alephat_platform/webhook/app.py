@@ -1,4 +1,4 @@
-"""Webhook FastAPI application."""
+"""Webhook FastAPI application backed by Temporal."""
 
 import asyncio
 import json
@@ -11,13 +11,13 @@ from urllib.parse import parse_qs
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import JsonValue, TypeAdapter
+from sqlalchemy import text
 
 from alephat_platform.common.config import get_settings
-from alephat_platform.common.db import dispose_engine, get_session_factory, session_scope
+from alephat_platform.common.db import dispose_engine, session_scope
 from alephat_platform.common.errors import PlatformError, UnauthorizedError
-from alephat_platform.common.messaging import NatsBus
-from alephat_platform.common.outbox import outbox_supervisor_loop
-from alephat_platform.webhook.handlers import accept_delivery, apply_ingress_command
+from alephat_platform.common.temporal import TemporalPlatformClient
+from alephat_platform.webhook.handlers import IngressCommandService
 from alephat_platform.webhook.normalize import (
     normalize_github,
     normalize_slack,
@@ -30,11 +30,19 @@ logger = logging.getLogger(__name__)
 
 
 class SlackSocketModeClient:
-    """Outbound Slack Socket Mode WebSocket listener (`apps.connections.open`)."""
+    """Outbound Slack Socket Mode WebSocket listener (``apps.connections.open``)."""
 
-    def __init__(self, *, app_token: str, org_id: str, stop_event: asyncio.Event) -> None:
+    def __init__(
+        self,
+        *,
+        app_token: str,
+        org_id: str,
+        temporal: TemporalPlatformClient,
+        stop_event: asyncio.Event,
+    ) -> None:
         self.app_token = app_token
         self.org_id = org_id
+        self.temporal = temporal
         self.stop_event = stop_event
 
     async def _open_ws_url(self) -> str:
@@ -56,7 +64,7 @@ class SlackSocketModeClient:
         if not isinstance(payload, dict):
             return
         if frame.get("type") == "interactive":
-            await SlackActionHandler(self.org_id).handle(
+            await SlackActionHandler(self.org_id, temporal=self.temporal).handle(
                 TypeAdapter(dict[str, JsonValue]).validate_python(payload)
             )
             return
@@ -74,8 +82,9 @@ class SlackSocketModeClient:
         )
         raw_body = json.dumps(payload, separators=(",", ":")).encode()
         async with session_scope() as session:
-            is_new = await accept_delivery(
-                session, provider="slack", delivery_id=delivery_id, raw_body=raw_body
+            ingress = IngressCommandService(session, self.temporal)
+            is_new = await ingress.accept_delivery(
+                provider="slack", delivery_id=delivery_id, raw_body=raw_body
             )
             if not is_new:
                 logger.info(
@@ -88,7 +97,7 @@ class SlackSocketModeClient:
                 org_id=self.org_id,
                 delivery_id=delivery_id,
             )
-            result = await apply_ingress_command(session, command)
+            result = await ingress.apply(command)
             logger.info(
                 "Processed Slack Socket Mode event",
                 extra={
@@ -167,26 +176,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logging.basicConfig(level=logging.INFO, handlers=[handler])
     settings = get_settings()
     stop = asyncio.Event()
-    app.state.nats = None
+    temporal = TemporalPlatformClient(settings=settings)
+    app.state.temporal = temporal
+    supervisor_task = asyncio.create_task(temporal.supervisor_loop(stop))
 
-    def _set_connection(bus: NatsBus | None) -> None:
-        app.state.nats = bus
-
-    publisher_task = asyncio.create_task(
-        outbox_supervisor_loop(
-            get_session_factory(),
-            nats_url=settings.nats_url,
-            interval=settings.outbox_poll_interval_seconds,
-            stop_event=stop,
-            on_connection=_set_connection,
-        )
-    )
     socket_task: asyncio.Task[None] | None = None
     app_token = (settings.slack_app_token or "").strip()
     if app_token.startswith("xapp-") and app_token != "xapp-your-app-level-token":
         client = SlackSocketModeClient(
             app_token=app_token,
             org_id=settings.default_org_id,
+            temporal=temporal,
             stop_event=stop,
         )
         socket_task = asyncio.create_task(client.run())
@@ -199,9 +199,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await socket_task
         except asyncio.CancelledError:
             pass
-    publisher_task.cancel()
+    supervisor_task.cancel()
     try:
-        await publisher_task
+        await supervisor_task
     except asyncio.CancelledError:
         pass
     await dispose_engine()
@@ -221,14 +221,14 @@ def create_app() -> FastAPI:
     @app.get("/readyz")
     async def readyz(request: Request) -> dict[str, str]:
         async with session_scope() as session:
-            await session.execute(__import__("sqlalchemy", fromlist=["text"]).text("SELECT 1"))
-        bus = getattr(request.app.state, "nats", None)
-        if bus is None or not bus.connected:
+            await session.execute(text("SELECT 1"))
+        temporal = TemporalPlatformClient.from_request(request)
+        if not await temporal.check_health():
             raise PlatformError(
                 "Not ready",
                 status=503,
-                detail="NATS publisher is not connected",
-                error_code="nats_unavailable",
+                detail="Temporal service is not reachable",
+                error_code="temporal_unavailable",
             )
         return {"status": "ready"}
 
@@ -238,7 +238,7 @@ def create_app() -> FastAPI:
         x_github_event: str | None = Header(default=None, alias="X-GitHub-Event"),
         x_github_delivery: str | None = Header(default=None, alias="X-GitHub-Delivery"),
         x_hub_signature_256: str | None = Header(default=None, alias="X-Hub-Signature-256"),
-    ) -> dict:
+    ) -> dict[str, object]:
         settings = get_settings()
         body = await request.body()
         if settings.webhook_signatures_required and not settings.github_webhook_secret:
@@ -254,10 +254,12 @@ def create_app() -> FastAPI:
         delivery_id = x_github_delivery or str(uuid.uuid4())
         event = x_github_event or "unknown"
         payload = json.loads(body.decode() or "{}")
+        temporal = TemporalPlatformClient.from_request(request)
 
         async with session_scope() as session:
-            is_new = await accept_delivery(
-                session, provider="github", delivery_id=delivery_id, raw_body=body
+            ingress = IngressCommandService(session, temporal)
+            is_new = await ingress.accept_delivery(
+                provider="github", delivery_id=delivery_id, raw_body=body
             )
             if not is_new:
                 return {"duplicate": True, "accepted": True}
@@ -268,8 +270,7 @@ def create_app() -> FastAPI:
                 delivery_id=delivery_id,
                 org_id=settings.default_org_id,
             )
-            result = await apply_ingress_command(session, command)
-            return result
+            return await ingress.apply(command)
 
     @app.post("/hooks/slack")
     @app.post("/webhooks/slack")
@@ -279,7 +280,7 @@ def create_app() -> FastAPI:
         x_slack_request_timestamp: str | None = Header(
             default=None, alias="X-Slack-Request-Timestamp"
         ),
-    ) -> dict:
+    ) -> dict[str, object]:
         settings = get_settings()
         body = await request.body()
         if settings.webhook_signatures_required and not settings.slack_signing_secret:
@@ -301,24 +302,30 @@ def create_app() -> FastAPI:
             payload = json.loads(parse_qs(body.decode()).get("payload", ["{}"])[0])
         else:
             payload = json.loads(body.decode() or "{}")
+
+        temporal = TemporalPlatformClient.from_request(request)
         if payload.get("type") == "block_actions":
             if not settings.slack_signing_secret:
                 raise UnauthorizedError("Interactive Slack requests require signature verification")
-            return await SlackActionHandler(settings.default_org_id).handle(
+            handled = await SlackActionHandler(settings.default_org_id, temporal=temporal).handle(
                 TypeAdapter(dict[str, JsonValue]).validate_python(payload)
             )
+            return dict(handled)
         if payload.get("type") == "url_verification":
             return {"challenge": payload.get("challenge")}
 
+        raw_event = payload.get("event")
+        event_dict = raw_event if isinstance(raw_event, dict) else {}
         delivery_id = (
             (payload.get("event_id") if isinstance(payload.get("event_id"), str) else None)
-            or payload.get("event", {}).get("client_msg_id")
+            or event_dict.get("client_msg_id")
             or str(uuid.uuid4())
         )
 
         async with session_scope() as session:
-            is_new = await accept_delivery(
-                session, provider="slack", delivery_id=str(delivery_id), raw_body=body
+            ingress = IngressCommandService(session, temporal)
+            is_new = await ingress.accept_delivery(
+                provider="slack", delivery_id=str(delivery_id), raw_body=body
             )
             if not is_new:
                 return {"duplicate": True, "accepted": True}
@@ -330,8 +337,7 @@ def create_app() -> FastAPI:
             )
             if command.get("challenge"):
                 return {"challenge": command["challenge"]}
-            result = await apply_ingress_command(session, command)
-            return result
+            return await ingress.apply(command)
 
     return app
 

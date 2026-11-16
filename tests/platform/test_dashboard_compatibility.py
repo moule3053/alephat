@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from alephat_platform.api import routes_dashboard as routes_dashboard_mod
 from alephat_platform.api.deps import AuthContext
 from alephat_platform.api.routes_dashboard import (
     AgentInstructionsCreate,
@@ -40,34 +41,35 @@ from alephat_platform.common.models import Message, OrgSettings, Task, UserSetti
 
 
 @pytest.mark.asyncio
-async def test_get_messages_includes_uncheckpointed_db_messages(patch_load_checkpoint=None):
+async def test_get_messages_reads_ordered_db_messages():
     db = AsyncMock()
     task_id = uuid.uuid4()
 
-    mock_cp = MagicMock()
-    mock_cp.blob = {
-        "last_message_seq": 1,
-        "messages": [{"type": "human", "data": {"id": "msg-0", "content": "hello"}}],
-    }
-
-    mock_msg = Message(
+    first_msg = Message(
+        message_id=uuid.uuid4(),
+        task_id=task_id,
+        seq=1,
+        role="user",
+        content="hello",
+        blocks=[],
+        created_at=datetime.now(UTC),
+    )
+    second_msg = Message(
         message_id=uuid.uuid4(),
         task_id=task_id,
         seq=2,
         role="user",
         content="who is the US president now",
+        blocks=[],
         created_at=datetime.now(UTC),
     )
 
     mock_result = MagicMock()
-    mock_result.scalars.return_value.all.return_value = [mock_msg]
+    mock_result.scalars.return_value.all.return_value = [first_msg, second_msg]
     db.execute.return_value = mock_result
 
-    with patch(
-        "alephat_platform.api.routes_dashboard.load_latest_checkpoint", return_value=mock_cp
-    ):
-        lg_messages = await _get_langgraph_messages_for_task(db, task_id)
-        ui_messages = await _get_messages_for_task(db, task_id)
+    lg_messages = await _get_langgraph_messages_for_task(db, task_id)
+    ui_messages = await _get_messages_for_task(db, task_id)
 
     assert len(lg_messages) == 2
     assert lg_messages[0]["content"] == "hello"
@@ -82,55 +84,86 @@ async def test_get_messages_includes_uncheckpointed_db_messages(patch_load_check
 async def test_get_messages_flattens_structured_text_content():
     db = AsyncMock()
     task_id = uuid.uuid4()
-    mock_cp = MagicMock()
-    mock_cp.blob = {
-        "last_message_seq": 0,
-        "messages": [
+    tool_call_msg = Message(
+        message_id=uuid.uuid4(),
+        task_id=task_id,
+        seq=1,
+        role="ai",
+        content="",
+        blocks=[
             {
-                "type": "ai",
-                "data": {
-                    "id": "msg-tool-call",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": "tool-1",
-                            "name": "read_file",
-                            "args": {"path": "README.md"},
-                        }
-                    ],
-                },
-            },
-            {
-                "type": "tool",
-                "data": {
-                    "id": "msg-tool-result",
-                    "content": "the entire raw README should stay compacted",
-                    "tool_call_id": "tool-1",
-                },
-            },
-            {
-                "type": "ai",
-                "data": {
-                    "id": "msg-0",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "structured response",
-                            "extras": {"signature": "provider-metadata"},
-                        }
-                    ],
-                },
-            },
+                "langgraph": {
+                    "type": "ai",
+                    "data": {
+                        "id": "msg-tool-call",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "tool-1",
+                                "name": "read_file",
+                                "args": {"path": "README.md"},
+                            }
+                        ],
+                    },
+                }
+            }
         ],
-    }
+        created_at=datetime.now(UTC),
+    )
+    tool_result_msg = Message(
+        message_id=uuid.uuid4(),
+        task_id=task_id,
+        seq=2,
+        role="tool",
+        content="the entire raw README should stay compacted",
+        blocks=[
+            {
+                "langgraph": {
+                    "type": "tool",
+                    "data": {
+                        "id": "msg-tool-result",
+                        "content": "the entire raw README should stay compacted",
+                        "tool_call_id": "tool-1",
+                    },
+                }
+            }
+        ],
+        created_at=datetime.now(UTC),
+    )
+    answer_msg = Message(
+        message_id=uuid.uuid4(),
+        task_id=task_id,
+        seq=3,
+        role="ai",
+        content="structured response",
+        blocks=[
+            {
+                "langgraph": {
+                    "type": "ai",
+                    "data": {
+                        "id": "msg-0",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "structured response",
+                                "extras": {"signature": "provider-metadata"},
+                            }
+                        ],
+                    },
+                }
+            }
+        ],
+        created_at=datetime.now(UTC),
+    )
     mock_result = MagicMock()
-    mock_result.scalars.return_value.all.return_value = []
+    mock_result.scalars.return_value.all.return_value = [
+        tool_call_msg,
+        tool_result_msg,
+        answer_msg,
+    ]
     db.execute.return_value = mock_result
 
-    with patch(
-        "alephat_platform.api.routes_dashboard.load_latest_checkpoint", return_value=mock_cp
-    ):
-        messages = await _get_messages_for_task(db, task_id)
+    messages = await _get_messages_for_task(db, task_id)
 
     assert len(messages) == 1
     assert messages[0]["id"] == "msg-tool-call"
@@ -281,10 +314,11 @@ async def test_commands_preserve_the_optimistic_message_id():
             "alephat_platform.api.routes_dashboard._get_task_by_id_or_thread_id",
             return_value=None,
         ),
-        patch(
-            "alephat_platform.api.routes_tasks.create_task",
+        patch.object(
+            routes_dashboard_mod.TaskDispatcher,
+            "create_and_start",
             new=AsyncMock(return_value=task),
-        ) as create_task,
+        ) as create_and_start,
     ):
         response = await post_thread_commands(
             thread_id,
@@ -293,10 +327,10 @@ async def test_commands_preserve_the_optimistic_message_id():
             AuthContext(org_id=org_id, user_id=user_id),
         )
 
-    assert create_task.await_args.kwargs["prompt_message_id"] == message_id
-    assert create_task.await_args.kwargs["model"] == "anthropic:claude-sonnet-5"
-    assert create_task.await_args.kwargs["repo"] == "acme/test-repo"
-    assert create_task.await_args.kwargs["metadata"] == {
+    assert create_and_start.await_args.kwargs["prompt_message_id"] == message_id
+    assert create_and_start.await_args.kwargs["model"] == "anthropic:claude-sonnet-5"
+    assert create_and_start.await_args.kwargs["repo"] == "acme/test-repo"
+    assert create_and_start.await_args.kwargs["metadata"] == {
         "agent_effort": "high",
         "plan_mode": True,
         "custom_instructions": "Run the repository contract tests.",
@@ -304,26 +338,25 @@ async def test_commands_preserve_the_optimistic_message_id():
     assert response["type"] == "success"
 
 
-def test_message_id_survives_worker_context_and_checkpoint():
-    from alephat_platform.harness import agents
-    from alephat_platform.harness.worker import _message_input
+def test_message_id_survives_transcript_projection():
+    from langchain_core.load import dumpd
+
+    from alephat_platform.harness.activities import TranscriptProjector
+    from alephat_platform.harness.agents import PROMPT_BUILDER
 
     message_id = uuid.uuid4()
-    db_message = Message(
-        message_id=message_id,
-        task_id=uuid.uuid4(),
+    langchain_message = PROMPT_BUILDER.to_langchain_message(
         role="user",
-        kind="user_input",
         content="Reply once",
+        message_id=str(message_id),
     )
+    dumped = dumpd(langchain_message)
+    assert isinstance(dumped, dict)
+    _role, raw_id, _text, lg_dict = TranscriptProjector().normalize_dumped_entry(dumped, 0)
+    streamed_message = _normalize_langgraph_message(lg_dict, 0)
 
-    context_message = _message_input(db_message)
-    langchain_message = agents._context_message(context_message)
-    checkpoint_message = agents._checkpoint_messages([langchain_message])[0]
-    streamed_message = _normalize_langgraph_message(checkpoint_message, 0)
-
-    assert context_message["id"] == str(message_id)
     assert langchain_message.id == str(message_id)
+    assert raw_id == str(message_id)
     assert streamed_message["id"] == str(message_id)
 
 
@@ -569,16 +602,15 @@ async def test_message_arriving_after_terminal_transition_starts_follow_up_run()
         updated_at=datetime.now(UTC),
     )
     db = AsyncMock()
+    db.get.return_value = task
+    temporal = MagicMock()
+    temporal.submit_turn = AsyncMock()
 
     with (
         patch(
             "alephat_platform.api.routes_dashboard._get_task_by_id_or_thread_id",
             return_value=task,
         ),
-        patch("alephat_platform.api.routes_dashboard.add_message", new=AsyncMock()) as add_message,
-        patch(
-            "alephat_platform.api.routes_dashboard.enqueue_task_work", new=AsyncMock()
-        ) as enqueue,
         patch(
             "alephat_platform.api.routes_dashboard._get_messages_for_task",
             return_value=[],
@@ -589,12 +621,13 @@ async def test_message_arriving_after_terminal_transition_starts_follow_up_run()
             DashboardMessageRequest(content="One more question", client_message_id=str(message_id)),
             db,
             auth,
+            temporal,
         )
 
     assert task.status == "queued"
-    add_message.assert_awaited_once()
-    assert add_message.await_args.kwargs["message_id"] == message_id
-    assert enqueue.await_args.kwargs["reason"] == "follow_up_race"
+    temporal.submit_turn.assert_awaited_once()
+    submitted_turn = temporal.submit_turn.await_args.kwargs["turn"]
+    assert submitted_turn.message_id == str(message_id)
     assert response["status"] == "running"
 
 

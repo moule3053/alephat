@@ -1,0 +1,228 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: temporal-server-config
+data:
+  config.template.yaml: |
+    log:
+      stdout: true
+      level: info
+    persistence:
+      numHistoryShards: 4
+      defaultStore: default
+      visibilityStore: visibility
+      datastores:
+        default:
+          sql:
+            pluginName: "postgres12"
+            databaseName: "temporal"
+            connectAddr: "__POSTGRES_SEEDS__:__DB_PORT__"
+            connectProtocol: "tcp"
+            user: "__POSTGRES_USER__"
+            password: "__POSTGRES_PWD__"
+            maxConns: 20
+            maxIdleConns: 20
+            maxConnLifetime: 1h
+        visibility:
+          sql:
+            pluginName: "postgres12"
+            databaseName: "temporal_visibility"
+            connectAddr: "__POSTGRES_SEEDS__:__DB_PORT__"
+            connectProtocol: "tcp"
+            user: "__POSTGRES_USER__"
+            password: "__POSTGRES_PWD__"
+            maxConns: 10
+            maxIdleConns: 10
+            maxConnLifetime: 1h
+    global:
+      membership:
+        maxJoinDuration: 30s
+        broadcastAddress: "__TEMPORAL_BROADCAST_ADDRESS__"
+    services:
+      frontend:
+        rpc:
+          grpcPort: 7233
+          membershipPort: 6933
+          bindOnIP: "__BIND_ON_IP__"
+          httpPort: 7243
+      matching:
+        rpc:
+          grpcPort: 7235
+          membershipPort: 6935
+          bindOnIP: "__BIND_ON_IP__"
+      history:
+        rpc:
+          grpcPort: 7234
+          membershipPort: 6934
+          bindOnIP: "__BIND_ON_IP__"
+      worker:
+        rpc:
+          grpcPort: 7239
+          membershipPort: 6939
+          bindOnIP: "__BIND_ON_IP__"
+    clusterMetadata:
+      enableGlobalNamespace: false
+      failoverVersionIncrement: 10
+      masterClusterName: "active"
+      currentClusterName: "active"
+      clusterInformation:
+        active:
+          enabled: true
+          initialFailoverVersion: 1
+          rpcName: "frontend"
+          rpcAddress: "__TEMPORAL_BROADCAST_ADDRESS__:7233"
+          httpAddress: "__TEMPORAL_BROADCAST_ADDRESS__:7243"
+    dcRedirectionPolicy:
+      policy: "noop"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: temporal
+  template:
+    metadata:
+      labels:
+        app: temporal
+    spec:
+      initContainers:
+        - name: temporal-schema
+          image: temporalio/admin-tools:1.32.2
+          env:
+            - name: POSTGRES_SEEDS
+              value: alephat-postgresql
+            - name: DB_PORT
+              value: "5432"
+            - name: POSTGRES_USER
+              value: alephat
+            - name: SQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-postgres
+                  key: password
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              temporal-sql-tool --plugin postgres12 --ep "$POSTGRES_SEEDS" -u "$POSTGRES_USER" -p "$DB_PORT" --db temporal create || true
+              temporal-sql-tool --plugin postgres12 --ep "$POSTGRES_SEEDS" -u "$POSTGRES_USER" -p "$DB_PORT" --db temporal setup-schema -v 0.0 || true
+              temporal-sql-tool --plugin postgres12 --ep "$POSTGRES_SEEDS" -u "$POSTGRES_USER" -p "$DB_PORT" --db temporal update-schema -d /etc/temporal/schema/postgresql/v12/temporal/versioned
+              temporal-sql-tool --plugin postgres12 --ep "$POSTGRES_SEEDS" -u "$POSTGRES_USER" -p "$DB_PORT" --db temporal_visibility create || true
+              temporal-sql-tool --plugin postgres12 --ep "$POSTGRES_SEEDS" -u "$POSTGRES_USER" -p "$DB_PORT" --db temporal_visibility setup-schema -v 0.0 || true
+              temporal-sql-tool --plugin postgres12 --ep "$POSTGRES_SEEDS" -u "$POSTGRES_USER" -p "$DB_PORT" --db temporal_visibility update-schema -d /etc/temporal/schema/postgresql/v12/visibility/versioned
+      containers:
+        - name: temporal
+          image: temporalio/server:1.32.2
+          ports:
+            - name: grpc
+              containerPort: 7233
+          env:
+            - name: BIND_ON_IP
+              value: "0.0.0.0"
+            - name: DB
+              value: postgres12
+            - name: DB_PORT
+              value: "5432"
+            - name: POSTGRES_USER
+              value: alephat
+            - name: POSTGRES_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-postgres
+                  key: password
+            - name: POSTGRES_SEEDS
+              value: alephat-postgresql
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              BROADCAST_IP="$(getent hosts "$(hostname)" | awk '{print $1}')"
+              sed -e "s|__POSTGRES_SEEDS__|$POSTGRES_SEEDS|g" \
+                  -e "s|__DB_PORT__|$DB_PORT|g" \
+                  -e "s|__POSTGRES_USER__|$POSTGRES_USER|g" \
+                  -e "s|__POSTGRES_PWD__|$POSTGRES_PWD|g" \
+                  -e "s|__BIND_ON_IP__|$BIND_ON_IP|g" \
+                  -e "s|__TEMPORAL_BROADCAST_ADDRESS__|$BROADCAST_IP|g" \
+                  /etc/temporal/config/config.template.yaml > /tmp/temporal-config.yaml
+              exec temporal-server --allow-no-auth --config-file /tmp/temporal-config.yaml start
+          volumeMounts:
+            - name: config
+              mountPath: /etc/temporal/config
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: config
+          configMap:
+            name: temporal-server-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal
+spec:
+  selector:
+    app: temporal
+  ports:
+    - name: grpc
+      port: 7233
+      targetPort: grpc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: temporal-ui
+  template:
+    metadata:
+      labels:
+        app: temporal-ui
+    spec:
+      containers:
+        - name: temporal-ui
+          image: temporalio/ui:latest
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: TEMPORAL_ADDRESS
+              value: temporal:7233
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-ui
+spec:
+  selector:
+    app: temporal-ui
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

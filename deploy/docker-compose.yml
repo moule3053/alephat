@@ -1,16 +1,20 @@
-# Alephat multi-service stack for local development.
+# Alephat self-hosted Temporal (v1.32+) + DeepAgents multi-service stack.
 #
 #   cp deploy/.env.example deploy/.env
-#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up --build -d
+#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up --build -d --remove-orphans
 #
-# UI: http://localhost:3005
-# API: http://localhost:8080
+# UI:          http://localhost:3005
+# API:         http://localhost:8080
+# Webhook:     http://localhost:8081
+# Temporal UI: http://localhost:8233
 
 name: ${COMPOSE_PROJECT_NAME:-alephat}
 
 x-runtime: &runtime
   DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://alephat:alephat@postgres:5432/alephat}
-  NATS_URL: ${NATS_URL:-nats://nats:4222}
+  TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
+  TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+  TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-alephat-agents}
   DEFAULT_MODEL: ${DEFAULT_MODEL:-openai:gpt-4o-mini}
   DEFAULT_SANDBOX_PROVIDER: ${DEFAULT_SANDBOX_PROVIDER:-local}
   DEFAULT_ORG_ID: ${DEFAULT_ORG_ID:-00000000-0000-4000-8000-000000000001}
@@ -40,15 +44,89 @@ services:
       retries: 12
       start_period: 5s
 
-  nats:
-    image: nats:2.10-alpine
+  temporal-schema:
+    image: temporalio/admin-tools:${TEMPORAL_VERSION:-1.32.2}
+    restart: "no"
+    environment:
+      POSTGRES_SEEDS: postgres
+      DB_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-alephat}
+      SQL_PASSWORD: ${POSTGRES_PASSWORD:-alephat}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        temporal-sql-tool --plugin postgres12 --ep "$$POSTGRES_SEEDS" -u "$$POSTGRES_USER" -p "$$DB_PORT" --db temporal create || true
+        temporal-sql-tool --plugin postgres12 --ep "$$POSTGRES_SEEDS" -u "$$POSTGRES_USER" -p "$$DB_PORT" --db temporal setup-schema -v 0.0 || true
+        temporal-sql-tool --plugin postgres12 --ep "$$POSTGRES_SEEDS" -u "$$POSTGRES_USER" -p "$$DB_PORT" --db temporal update-schema -d /etc/temporal/schema/postgresql/v12/temporal/versioned
+        temporal-sql-tool --plugin postgres12 --ep "$$POSTGRES_SEEDS" -u "$$POSTGRES_USER" -p "$$DB_PORT" --db temporal_visibility create || true
+        temporal-sql-tool --plugin postgres12 --ep "$$POSTGRES_SEEDS" -u "$$POSTGRES_USER" -p "$$DB_PORT" --db temporal_visibility setup-schema -v 0.0 || true
+        temporal-sql-tool --plugin postgres12 --ep "$$POSTGRES_SEEDS" -u "$$POSTGRES_USER" -p "$$DB_PORT" --db temporal_visibility update-schema -d /etc/temporal/schema/postgresql/v12/visibility/versioned
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  temporal:
+    image: temporalio/server:${TEMPORAL_VERSION:-1.32.2}
     restart: unless-stopped
-    command: ["-js", "-m", "8222", "-sd", "/data"]
-    ports:
-      - "${NATS_HOST_PORT:-4222}:4222"
-      - "${NATS_MONITOR_HOST_PORT:-8222}:8222"
+    environment:
+      BIND_ON_IP: 0.0.0.0
+      POSTGRES_SEEDS: postgres
+      DB_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-alephat}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-alephat}
     volumes:
-      - alephat_nats:/data
+      - ./temporal-config.yaml:/etc/temporal/config.template.yaml:ro
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        BROADCAST_IP="$$(getent hosts "$$(hostname)" | awk '{print $$1}')"
+        sed -e "s|__POSTGRES_SEEDS__|$$POSTGRES_SEEDS|g" \
+            -e "s|__DB_PORT__|$$DB_PORT|g" \
+            -e "s|__POSTGRES_USER__|$$POSTGRES_USER|g" \
+            -e "s|__POSTGRES_PWD__|$$POSTGRES_PWD|g" \
+            -e "s|__BIND_ON_IP__|$$BIND_ON_IP|g" \
+            -e "s|__TEMPORAL_BROADCAST_ADDRESS__|$$BROADCAST_IP|g" \
+            /etc/temporal/config.template.yaml > /tmp/temporal-config.yaml
+        exec temporal-server --allow-no-auth --config-file /tmp/temporal-config.yaml start
+    ports:
+      - "${TEMPORAL_HOST_PORT:-7233}:7233"
+    depends_on:
+      temporal-schema:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 7233"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  temporal-namespace:
+    image: temporalio/admin-tools:${TEMPORAL_VERSION:-1.32.2}
+    restart: "no"
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        until temporal operator cluster health --address "$$TEMPORAL_ADDRESS" >/dev/null 2>&1; do sleep 1; done
+        temporal operator namespace describe -n "$$TEMPORAL_NAMESPACE" --address "$$TEMPORAL_ADDRESS" >/dev/null 2>&1 \
+          || temporal operator namespace create -n "$$TEMPORAL_NAMESPACE" --address "$$TEMPORAL_ADDRESS"
+    depends_on:
+      temporal:
+        condition: service_healthy
+
+  temporal-ui:
+    image: temporalio/ui:${TEMPORAL_UI_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000,http://localhost:3005
+    ports:
+      - "${TEMPORAL_UI_HOST_PORT:-8233}:8080"
+    depends_on:
+      temporal-namespace:
+        condition: service_completed_successfully
 
   litellm:
     image: ghcr.io/berriai/litellm:main-latest
@@ -94,19 +172,21 @@ services:
       PLATFORM_JWT_SECRET: ${PLATFORM_JWT_SECRET:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3005}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
-      OUTBOX_POLL_INTERVAL_SECONDS: ${OUTBOX_POLL_INTERVAL_SECONDS:-1}
       MCP_STDIO_ALLOWED: ${MCP_STDIO_ALLOWED:-false}
       MCP_ALLOW_PRIVATE_NETWORKS: ${MCP_ALLOW_PRIVATE_NETWORKS:-false}
       MCP_TOOL_TIMEOUT_SECONDS: ${MCP_TOOL_TIMEOUT_SECONDS:-120}
       MAX_MCP_SERVERS_PER_RUN: ${MAX_MCP_SERVERS_PER_RUN:-10}
+      GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
+      GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
     command: ["uvicorn", "alephat_platform.api.app:app", "--host", "0.0.0.0", "--port", "8080"]
     ports:
       - "${API_HOST_PORT:-8080}:8080"
     depends_on:
       migrate:
         condition: service_completed_successfully
-      nats:
-        condition: service_started
+      temporal-namespace:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/readyz"]
       interval: 10s
@@ -120,6 +200,7 @@ services:
     environment:
       <<: *runtime
       SERVICE_NAME: webhook
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
       SLACK_APP_TOKEN: ${SLACK_APP_TOKEN:-}
@@ -127,15 +208,14 @@ services:
       SLACK_BOT_USER_ID: ${SLACK_BOT_USER_ID:-}
       SLACK_USER_MAP: ${SLACK_USER_MAP:-}
       WEBHOOK_SIGNATURES_REQUIRED: ${WEBHOOK_SIGNATURES_REQUIRED:-false}
-      OUTBOX_POLL_INTERVAL_SECONDS: ${OUTBOX_POLL_INTERVAL_SECONDS:-1}
     command: ["uvicorn", "alephat_platform.webhook.app:app", "--host", "0.0.0.0", "--port", "8081"]
     ports:
       - "${WEBHOOK_HOST_PORT:-8081}:8081"
     depends_on:
       migrate:
         condition: service_completed_successfully
-      nats:
-        condition: service_started
+      temporal-namespace:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/readyz"]
       interval: 10s
@@ -167,8 +247,6 @@ services:
       FIREWORKS_BASE_URL: ${FIREWORKS_BASE_URL:-https://api.fireworks.ai/inference/v1}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
-      LEASE_TTL_SECONDS: ${LEASE_TTL_SECONDS:-60}
-      HEARTBEAT_INTERVAL_SECONDS: ${HEARTBEAT_INTERVAL_SECONDS:-15}
       MAX_RUN_DURATION_SECONDS: ${MAX_RUN_DURATION_SECONDS:-14400}
       MAX_RUN_RETRIES: ${MAX_RUN_RETRIES:-3}
       LOCAL_SANDBOX_ROOT_DIR: ${LOCAL_SANDBOX_ROOT_DIR:-/workspace}
@@ -187,12 +265,16 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-      nats:
-        condition: service_started
+      temporal-namespace:
+        condition: service_completed_successfully
       slack-renderer:
         condition: service_healthy
     healthcheck:
-      disable: true
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   slack-renderer:
     build:
@@ -227,5 +309,4 @@ services:
 
 volumes:
   alephat_pg:
-  alephat_nats:
   alephat_workspaces:

@@ -14,14 +14,12 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from alephat_platform.api.deps import AuthContext, get_auth, get_db
-from alephat_platform.api.routes_tasks import add_message, cancel_task, decide_approval
+from alephat_platform.api.deps import AuthContext, get_auth, get_db, get_temporal
 from alephat_platform.common.config import get_settings
 from alephat_platform.common.enums import ApprovalStatus, TaskStatus
 from alephat_platform.common.models import Approval, Message, OrgSettings, Task, UserSettings
-from alephat_platform.common.outbox import enqueue_task_work
-from alephat_platform.common.state_machine import is_terminal
-from alephat_platform.common.tasks import load_latest_checkpoint
+from alephat_platform.common.tasks import TaskDispatcher
+from alephat_platform.common.temporal import TemporalPlatformClient
 
 logger = logging.getLogger(__name__)
 
@@ -245,7 +243,8 @@ def _agent_instruction_records(org: OrgSettings | None) -> dict[str, dict[str, A
 
 
 def _team_settings_response(org: OrgSettings | None) -> dict[str, Any]:
-    values = dict((org.settings or {}).get("team_settings", {})) if org else {}
+    raw_team = (org.settings or {}).get("team_settings") if org else None
+    values = dict(raw_team) if isinstance(raw_team, dict) else {}
     default_model = org.default_model if org and org.default_model else get_settings().default_model
     return {
         "review_draft_prs": values.get("review_draft_prs", False),
@@ -630,7 +629,8 @@ async def list_reviews(
         meta = task.metadata_ or {}
         full_name = str(meta.get("full_name") or task.repo or "")
         owner, _, repo = full_name.partition("/")
-        pr_number = int(meta.get("pr_number") or 0)
+        raw_pr = meta.get("pr_number")
+        pr_number = int(raw_pr) if isinstance(raw_pr, int | str) and raw_pr else 0
         if not owner or not repo or not pr_number:
             continue
         reviews.append(
@@ -673,8 +673,10 @@ async def get_agent_usage_leaderboard(
     for task in tasks:
         model_counts[task.model] = model_counts.get(task.model, 0) + 1
         meta = task.metadata_ or {}
-        additions += int(meta.get("additions") or 0)
-        deletions += int(meta.get("deletions") or 0)
+        raw_add = meta.get("additions")
+        raw_del = meta.get("deletions")
+        additions += int(raw_add) if isinstance(raw_add, int | str) and raw_add else 0
+        deletions += int(raw_del) if isinstance(raw_del, int | str) and raw_del else 0
         prs_opened += int(bool(meta.get("pr_url")))
         merged_prs += int(bool(meta.get("pr_merged")))
     favorite_model = max(model_counts, key=model_counts.__getitem__) if model_counts else ""
@@ -824,8 +826,6 @@ def _merge_ui_text_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def _get_messages_for_task(session: AsyncSession, task_id: uuid.UUID) -> list[dict[str, Any]]:
-    cp = await load_latest_checkpoint(session, task_id=task_id)
-    checkpoint_last_seq = int((cp.blob if cp else {}).get("last_message_seq", 0))
     messages: list[dict[str, Any]] = []
     agent_turn: dict[str, Any] | None = None
 
@@ -850,9 +850,17 @@ async def _get_messages_for_task(session: AsyncSession, task_id: uuid.UUID) -> l
         agent_turn["timestamp"] = timestamp
         agent_turn["chunks"].extend(chunks)
 
-    if cp and cp.blob and "messages" in cp.blob:
-        for i, m in enumerate(cp.blob["messages"]):
-            normalized = _normalize_langgraph_message(m, i)
+    msg_result = await session.execute(
+        select(Message).where(Message.task_id == task_id).order_by(Message.seq)
+    )
+    db_messages = list(msg_result.scalars().all())
+    for i, m in enumerate(db_messages):
+        timestamp = m.created_at.isoformat() if m.created_at else datetime.now(UTC).isoformat()
+        lg_block = (
+            m.blocks[0].get("langgraph") if m.blocks and isinstance(m.blocks[0], dict) else None
+        )
+        if isinstance(lg_block, dict):
+            normalized = _normalize_langgraph_message(lg_block, i)
             msg_type = normalized["type"]
             if msg_type in {"tool", "system"}:
                 continue
@@ -877,7 +885,6 @@ async def _get_messages_for_task(session: AsyncSession, task_id: uuid.UUID) -> l
                     )
             if not chunks:
                 continue
-            timestamp = datetime.now(UTC).isoformat()
             if msg_type == "human":
                 flush_agent_turn()
                 messages.append(
@@ -890,28 +897,22 @@ async def _get_messages_for_task(session: AsyncSession, task_id: uuid.UUID) -> l
                 )
             elif msg_type == "ai":
                 append_agent_chunks(normalized["id"], timestamp, chunks)
+            continue
 
-    msg_result = await session.execute(
-        select(Message)
-        .where(Message.task_id == task_id, Message.seq > checkpoint_last_seq)
-        .order_by(Message.seq)
-    )
-    db_messages = list(msg_result.scalars().all())
-    for m in db_messages:
         if m.role in {"user", "human", "user_guidance"}:
             flush_agent_turn()
             messages.append(
                 {
                     "id": str(m.message_id),
                     "author": {"name": "user"},
-                    "timestamp": m.created_at.isoformat(),
+                    "timestamp": timestamp,
                     "chunks": [{"kind": "text", "text": m.content}],
                 }
             )
         elif m.role in {"assistant", "agent", "ai"}:
             append_agent_chunks(
                 str(m.message_id),
-                m.created_at.isoformat(),
+                timestamp,
                 [{"kind": "text", "text": m.content}],
             )
     flush_agent_turn()
@@ -921,21 +922,18 @@ async def _get_messages_for_task(session: AsyncSession, task_id: uuid.UUID) -> l
 async def _get_langgraph_messages_for_task(
     session: AsyncSession, task_id: uuid.UUID
 ) -> list[dict[str, Any]]:
-    cp = await load_latest_checkpoint(session, task_id=task_id)
-    checkpoint_last_seq = int((cp.blob if cp else {}).get("last_message_seq", 0))
-    messages = []
-    if cp and cp.blob and "messages" in cp.blob:
-        messages.extend(
-            [_normalize_langgraph_message(m, i) for i, m in enumerate(cp.blob["messages"])]
-        )
-
     msg_result = await session.execute(
-        select(Message)
-        .where(Message.task_id == task_id, Message.seq > checkpoint_last_seq)
-        .order_by(Message.seq)
+        select(Message).where(Message.task_id == task_id).order_by(Message.seq)
     )
     db_messages = list(msg_result.scalars().all())
-    for m in db_messages:
+    messages: list[dict[str, Any]] = []
+    for i, m in enumerate(db_messages):
+        lg_block = (
+            m.blocks[0].get("langgraph") if m.blocks and isinstance(m.blocks[0], dict) else None
+        )
+        if isinstance(lg_block, dict):
+            messages.append(_normalize_langgraph_message(lg_block, i))
+            continue
         msg_type = (
             "human"
             if m.role in {"human", "user", "user_guidance"}
@@ -1087,7 +1085,8 @@ async def get_pinned_threads(
     items = [
         task_to_agent_thread(task)
         for task in tasks
-        if str(auth.user_id) in (task.metadata_ or {}).get("pinned_by", [])
+        if isinstance((pinned := (task.metadata_ or {}).get("pinned_by")), list)
+        and str(auth.user_id) in pinned
     ]
     if experience is not None:
         items = [thread for thread in items if thread.get("experience") == experience]
@@ -1170,7 +1169,8 @@ async def set_thread_pin(
     if task is None:
         raise HTTPException(404, "Task not found")
     metadata = dict(task.metadata_ or {})
-    pinned_by = set(metadata.get("pinned_by", []))
+    raw_pinned = metadata.get("pinned_by")
+    pinned_by = {str(u) for u in raw_pinned} if isinstance(raw_pinned, list) else set()
     if request.method == "POST":
         pinned_by.add(str(auth.user_id))
     else:
@@ -1242,6 +1242,7 @@ async def post_thread_commands(
     request: Request,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
+    temporal: TemporalPlatformClient | None = Depends(get_temporal),
 ) -> dict[str, Any]:
     try:
         body = await request.json()
@@ -1299,7 +1300,8 @@ async def post_thread_commands(
     profile = await db.get(UserSettings, auth.user_id)
     org = await db.get(OrgSettings, auth.org_id)
     profile_values = dict(profile.settings or {}) if profile else {}
-    team_values = dict((org.settings or {}).get("team_settings", {})) if org else {}
+    raw_team = (org.settings or {}).get("team_settings") if org else None
+    team_values = dict(raw_team) if isinstance(raw_team, dict) else {}
     requested_model = configurable.get("agent_model_id")
     model = requested_model if isinstance(requested_model, str) and requested_model else None
     requested_repo = configurable.get("repo")
@@ -1307,7 +1309,8 @@ async def post_thread_commands(
     if configurable.get("repo_explicitly_none") is not True and repo is None:
         default_repo = profile_values.get("default_repo") or team_values.get("default_repo")
         repo = default_repo if isinstance(default_repo, str) and default_repo else None
-    base_ref = profile_values.get("base_branch") or "main"
+    raw_base_ref = profile_values.get("base_branch")
+    base_ref = raw_base_ref if isinstance(raw_base_ref, str) and raw_base_ref else "main"
     target_repo = repo or (task.repo if task else None)
     instructions = _agent_instruction_records(org).get(str(target_repo), {}).get("instructions")
     run_metadata: dict[str, Any] = {
@@ -1320,11 +1323,10 @@ async def post_thread_commands(
         run_metadata["github_login"] = auth.github_login
     if isinstance(instructions, str) and instructions.strip():
         run_metadata["custom_instructions"] = instructions.strip()
+    resolved_temporal = temporal if hasattr(temporal, "submit_turn") else get_temporal(request)
+    dispatcher = TaskDispatcher(db, resolved_temporal)
     if task is None:
-        from alephat_platform.api.routes_tasks import create_task
-
-        task = await create_task(
-            db,
+        task = await dispatcher.create_and_start(
             org_id=auth.org_id,
             user_id=auth.user_id,
             title=content[:100] if content else "New Chat Run",
@@ -1344,41 +1346,17 @@ async def post_thread_commands(
             platform_default_model=settings.default_model,
             platform_default_sandbox_provider=settings.default_sandbox_provider,
         )
-        await db.commit()
-    else:
-        if content:
-            if model:
-                task.model = model
-            task.metadata_ = {**(task.metadata_ or {}), **run_metadata}
-            was_terminal = is_terminal(task.status)
-            if was_terminal or task.status in {TaskStatus.PARKED.value, TaskStatus.QUEUED.value}:
-                task.status = TaskStatus.QUEUED.value
-                task.park_reason = None
-                task.updated_at = datetime.now(UTC)
-                await add_message(
-                    db,
-                    task_id=task.task_id,
-                    content=content,
-                    kind="user_guidance",
-                    message_id=submitted_message_id,
-                )
-                await enqueue_task_work(
-                    db,
-                    org_id=task.org_id,
-                    task_id=task.task_id,
-                    agent_type=task.agent_type,
-                    reason="follow_up" if was_terminal else "resumed",
-                )
-                await db.commit()
-            elif task.status == TaskStatus.RUNNING.value:
-                await add_message(
-                    db,
-                    task_id=task.task_id,
-                    content=content,
-                    kind="user_guidance",
-                    message_id=submitted_message_id,
-                )
-                await db.commit()
+    elif content:
+        if model:
+            task.model = model
+        task.metadata_ = {**(task.metadata_ or {}), **run_metadata}
+        task, _ = await dispatcher.send_message(
+            task_id=task.task_id,
+            content=content,
+            kind="user_guidance",
+            message_id=submitted_message_id,
+            allow_reopen=True,
+        )
 
     return _protocol_success(command_id, str(task.active_run_id or task.task_id))
 
@@ -1389,6 +1367,7 @@ async def post_thread_message(
     body: DashboardMessageRequest,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
+    temporal: TemporalPlatformClient | None = Depends(get_temporal),
 ) -> dict[str, Any]:
     task = await _get_task_by_id_or_thread_id(db, auth.org_id, thread_id, for_update=True)
 
@@ -1397,30 +1376,14 @@ async def post_thread_message(
 
         raise HTTPException(status_code=404, detail="Task not found")
 
-    should_enqueue = is_terminal(task.status)
-    if should_enqueue:
-        task.status = TaskStatus.QUEUED.value
-        task.park_reason = None
-        task.cancel_requested_at = None
-        task.cancel_reason = None
-        task.updated_at = datetime.now(UTC)
-
-    await add_message(
-        db,
+    resolved_temporal = temporal if hasattr(temporal, "submit_turn") else TemporalPlatformClient()
+    task, _ = await TaskDispatcher(db, resolved_temporal).send_message(
         task_id=task.task_id,
         content=body.content,
         kind="user_guidance",
         message_id=body.client_message_id,
+        allow_reopen=True,
     )
-    if should_enqueue:
-        await enqueue_task_work(
-            db,
-            org_id=task.org_id,
-            task_id=task.task_id,
-            agent_type=task.agent_type,
-            reason="follow_up_race",
-        )
-    await db.commit()
 
     parsed_messages = await _get_messages_for_task(db, task.task_id)
     return task_to_agent_thread(task, parsed_messages)
@@ -1431,6 +1394,7 @@ async def post_cancel_thread(
     thread_id: str,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
+    temporal: TemporalPlatformClient | None = Depends(get_temporal),
 ) -> dict[str, Any]:
     task = await _get_task_by_id_or_thread_id(db, auth.org_id, thread_id)
 
@@ -1439,8 +1403,10 @@ async def post_cancel_thread(
 
         raise HTTPException(status_code=404, detail="Task not found")
 
-    await cancel_task(db, task_id=task.task_id, reason="user_requested")
-    await db.commit()
+    resolved_temporal = temporal if hasattr(temporal, "submit_turn") else TemporalPlatformClient()
+    task = await TaskDispatcher(db, resolved_temporal).cancel(
+        task_id=task.task_id, reason="user_requested"
+    )
 
     parsed_messages = await _get_messages_for_task(db, task.task_id)
     return task_to_agent_thread(task, parsed_messages)
@@ -1478,6 +1444,7 @@ async def delete_thread(
     thread_id: str,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
+    temporal: TemporalPlatformClient | None = Depends(get_temporal),
 ) -> None:
     task = await _get_task_by_id_or_thread_id(db, auth.org_id, thread_id)
     if task is None or task.org_id != auth.org_id:
@@ -1485,6 +1452,8 @@ async def delete_thread(
 
         raise HTTPException(status_code=404, detail="Task not found")
 
+    resolved_temporal = temporal if hasattr(temporal, "submit_turn") else TemporalPlatformClient()
+    await resolved_temporal.terminate_task(task_id=task.task_id, reason="thread_deleted")
     await db.delete(task)
     await db.commit()
 
@@ -1598,6 +1567,7 @@ async def approve_workflow_push_fingerprint(
     fingerprint: str,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
+    temporal: TemporalPlatformClient | None = Depends(get_temporal),
 ) -> dict[str, Any]:
     task = await _get_task_by_id_or_thread_id(db, auth.org_id, thread_id)
 
@@ -1623,10 +1593,12 @@ async def approve_workflow_push_fingerprint(
 
         raise HTTPException(status_code=404, detail="Pending approval not found")
 
-    await decide_approval(
-        db, approval_id=target_approval.approval_id, user_id=auth.user_id, decision="approved"
+    resolved_temporal = temporal if hasattr(temporal, "submit_turn") else TemporalPlatformClient()
+    await TaskDispatcher(db, resolved_temporal).decide_approval(
+        approval_id=target_approval.approval_id,
+        user_id=auth.user_id,
+        decision="approved",
     )
-    await db.commit()
     return {"status": "approved", "fingerprint": fingerprint}
 
 
@@ -1636,6 +1608,7 @@ async def reject_workflow_push_fingerprint(
     fingerprint: str,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
+    temporal: TemporalPlatformClient | None = Depends(get_temporal),
 ) -> dict[str, Any]:
     task = await _get_task_by_id_or_thread_id(db, auth.org_id, thread_id)
 
@@ -1661,10 +1634,12 @@ async def reject_workflow_push_fingerprint(
 
         raise HTTPException(status_code=404, detail="Pending approval not found")
 
-    await decide_approval(
-        db, approval_id=target_approval.approval_id, user_id=auth.user_id, decision="rejected"
+    resolved_temporal = temporal if hasattr(temporal, "submit_turn") else TemporalPlatformClient()
+    await TaskDispatcher(db, resolved_temporal).decide_approval(
+        approval_id=target_approval.approval_id,
+        user_id=auth.user_id,
+        decision="rejected",
     )
-    await db.commit()
     return {"status": "rejected", "fingerprint": fingerprint}
 
 
@@ -2255,7 +2230,8 @@ async def get_workspaces_options(
     auth: AuthContext = Depends(get_auth),
 ) -> dict[str, Any]:
     org = await db.get(OrgSettings, auth.org_id)
-    team_values = dict((org.settings or {}).get("team_settings", {})) if org else {}
+    raw_team = (org.settings or {}).get("team_settings") if org else None
+    team_values = dict(raw_team) if isinstance(raw_team, dict) else {}
     default_repo = team_values.get("default_repo")
     return {
         "workspaces": [
@@ -2286,7 +2262,8 @@ async def get_my_preferences(
     auth: AuthContext = Depends(get_auth),
 ) -> dict[str, Any]:
     row = await db.get(UserSettings, auth.user_id)
-    prefs = dict((row.settings or {}).get("preferences", {})) if row else {}
+    raw_prefs = (row.settings or {}).get("preferences") if row else None
+    prefs = dict(raw_prefs) if isinstance(raw_prefs, dict) else {}
     return {
         "default_visibility": prefs.get("default_visibility", "public"),
         "default_workspace": prefs.get("default_workspace", "default"),
@@ -2589,6 +2566,7 @@ async def create_schedule(
     body: ScheduleCreateBody,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
+    temporal: TemporalPlatformClient | None = Depends(get_temporal),
 ) -> dict[str, Any]:
     org = await _get_or_create_org_settings(db, auth.org_id)
     settings_dict = dict(org.settings or {})
@@ -2597,6 +2575,14 @@ async def create_schedule(
     now = datetime.now(UTC).isoformat()
     triggers, cron_value = _normalize_triggers(body.triggers)
     default_model = org.default_model or get_settings().default_model
+    resolved_temporal = temporal if hasattr(temporal, "submit_turn") else TemporalPlatformClient()
+    cron_id = await resolved_temporal.sync_schedule(
+        schedule_id,
+        org_id=auth.org_id,
+        user_id=auth.user_id,
+        cron_expression=cron_value,
+        enabled=True,
+    )
     record: dict[str, Any] = {
         "id": schedule_id,
         "name": (body.name or "").strip() or body.prompt.strip()[:60] or "Automation",
@@ -2609,7 +2595,7 @@ async def create_schedule(
         "model": body.model_id or default_model,
         "effort": body.effort or "medium",
         "enabled": True,
-        "cronId": None,
+        "cronId": cron_id,
         "lastThreadId": None,
         "lastRunId": None,
         "lastTriggeredAt": None,
@@ -2634,6 +2620,7 @@ async def update_schedule(
     body: ScheduleUpdateBody,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
+    temporal: TemporalPlatformClient | None = Depends(get_temporal),
 ) -> dict[str, Any]:
     org = await _get_or_create_org_settings(db, auth.org_id)
     settings_dict = dict(org.settings or {})
@@ -2659,6 +2646,14 @@ async def update_schedule(
         record["enabled"] = body.enabled
     if body.workspace is not None:
         record["workspace"] = body.workspace
+    resolved_temporal = temporal if hasattr(temporal, "submit_turn") else TemporalPlatformClient()
+    record["cronId"] = await resolved_temporal.sync_schedule(
+        schedule_id,
+        org_id=auth.org_id,
+        user_id=auth.user_id,
+        cron_expression=record.get("schedule") if isinstance(record.get("schedule"), str) else None,
+        enabled=bool(record.get("enabled", True)),
+    )
     record["updatedBy"] = auth.github_login or "moule3053"
     record["updatedAt"] = datetime.now(UTC).isoformat()
     schedules[schedule_id] = record
@@ -2674,9 +2669,8 @@ async def trigger_schedule(
     schedule_id: str,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
+    temporal: TemporalPlatformClient | None = Depends(get_temporal),
 ) -> dict[str, Any]:
-    from alephat_platform.api.routes_tasks import create_task
-
     org = await _get_or_create_org_settings(db, auth.org_id)
     settings_dict = dict(org.settings or {})
     schedules = _stored_schedules(org)
@@ -2693,8 +2687,8 @@ async def trigger_schedule(
         None,
     )
     settings = get_settings()
-    task = await create_task(
-        db,
+    resolved_temporal = temporal if hasattr(temporal, "submit_turn") else TemporalPlatformClient()
+    task = await TaskDispatcher(db, resolved_temporal).create_and_start(
         org_id=auth.org_id,
         user_id=auth.user_id,
         title=str(record.get("name") or "Scheduled Run")[:100],
@@ -2742,7 +2736,10 @@ async def delete_schedule(
     schedule_id: str,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
+    temporal: TemporalPlatformClient | None = Depends(get_temporal),
 ) -> Response:
+    resolved_temporal = temporal if hasattr(temporal, "submit_turn") else TemporalPlatformClient()
+    await resolved_temporal.delete_schedule(schedule_id)
     org = await db.get(OrgSettings, auth.org_id)
     if org is not None:
         settings_dict = dict(org.settings or {})

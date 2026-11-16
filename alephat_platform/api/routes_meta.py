@@ -1,17 +1,41 @@
 """Health, sandbox catalog, settings."""
 
-from typing import Any
+import uuid
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from alephat_platform.api.deps import AuthContext, get_auth, get_db, require_admin
+from alephat_platform.api.deps import (
+    AuthContext,
+    get_auth,
+    get_db,
+    get_temporal,
+    require_admin,
+)
 from alephat_platform.common.config import get_settings
 from alephat_platform.common.enums import SandboxProvider
+from alephat_platform.common.errors import ForbiddenError, PlatformError
 from alephat_platform.common.models import OrgSettings, UserSettings
+from alephat_platform.common.temporal import TemporalPlatformClient
 
 router = APIRouter(tags=["meta"])
+
+
+class OrgModelCatalog:
+    """Read and normalize configured model lists from OrgSettings."""
+
+    def resolve(self, row: OrgSettings | None, default_model: str) -> list[str]:
+        configured = (row.settings or {}).get("models") if row else None
+        if isinstance(configured, list):
+            models = [str(model) for model in configured if str(model).strip()]
+            if models:
+                return models
+        return [row.default_model if row and row.default_model else default_model]
+
+
+MODEL_CATALOG = OrgModelCatalog()
 
 
 @router.get("/healthz")
@@ -20,17 +44,17 @@ async def healthz() -> dict[str, str]:
 
 
 @router.get("/readyz")
-async def readyz(request: Request, db: AsyncSession = Depends(get_db)) -> dict[str, str]:
-    await db.execute(__import__("sqlalchemy", fromlist=["text"]).text("SELECT 1"))
-    bus = getattr(request.app.state, "nats", None)
-    if bus is None or not bus.connected:
-        from alephat_platform.common.errors import PlatformError
-
+async def readyz(
+    db: AsyncSession = Depends(get_db),
+    temporal: TemporalPlatformClient = Depends(get_temporal),
+) -> dict[str, str]:
+    await db.execute(text("SELECT 1"))
+    if not await temporal.check_health():
         raise PlatformError(
             "Not ready",
             status=503,
-            detail="NATS publisher is not connected",
-            error_code="nats_unavailable",
+            detail="Temporal service is not reachable",
+            error_code="temporal_unavailable",
         )
     return {"status": "ready"}
 
@@ -39,7 +63,7 @@ async def readyz(request: Request, db: AsyncSession = Depends(get_db)) -> dict[s
 async def sandbox_providers(
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     settings = get_settings()
     org = await db.get(OrgSettings, auth.org_id)
     enabled = (
@@ -48,15 +72,14 @@ async def sandbox_providers(
         else [p.value for p in SandboxProvider]
     )
     default = org.default_sandbox_provider if org else settings.default_sandbox_provider
-    items = []
-    for p in SandboxProvider:
-        items.append(
-            {
-                "id": p.value,
-                "enabled": p.value in enabled,
-                "default": p.value == default,
-            }
-        )
+    items = [
+        {
+            "id": p.value,
+            "enabled": p.value in enabled,
+            "default": p.value == default,
+        }
+        for p in SandboxProvider
+    ]
     return {"items": items, "default": default}
 
 
@@ -70,7 +93,7 @@ class MeSettingsPatch(BaseModel):
 async def get_me_settings(
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     row = await db.get(UserSettings, auth.user_id)
     if row is None:
         return {
@@ -90,9 +113,7 @@ async def patch_me_settings(
     body: MeSettingsPatch,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
-) -> dict[str, Any]:
-    import uuid
-
+) -> dict[str, object]:
     row = await db.get(UserSettings, auth.user_id)
     if row is None:
         row = UserSettings(user_id=auth.user_id)
@@ -124,10 +145,8 @@ async def get_org_settings(
     org_id: str,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     if str(auth.org_id) != org_id:
-        from alephat_platform.common.errors import ForbiddenError
-
         raise ForbiddenError()
     row = await db.get(OrgSettings, auth.org_id)
     if row is None:
@@ -147,10 +166,8 @@ async def patch_org_settings(
     body: OrgSettingsPatch,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     if str(auth.org_id) != org_id:
-        from alephat_platform.common.errors import ForbiddenError
-
         raise ForbiddenError()
     require_admin(auth)
     row = await db.get(OrgSettings, auth.org_id)
@@ -174,23 +191,14 @@ class OrgModelsBody(BaseModel):
     models: list[str]
 
 
-def _org_models(row: OrgSettings | None, default_model: str) -> list[str]:
-    configured = (row.settings or {}).get("models") if row else None
-    if isinstance(configured, list):
-        models = [str(model) for model in configured if str(model).strip()]
-        if models:
-            return models
-    return [row.default_model if row and row.default_model else default_model]
-
-
 @router.get("/v1/models")
 async def list_models(
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     settings = get_settings()
     row = await db.get(OrgSettings, auth.org_id)
-    models = _org_models(row, settings.default_model)
+    models = MODEL_CATALOG.resolve(row, settings.default_model)
     return {
         "items": [
             {
@@ -207,13 +215,11 @@ async def get_org_models(
     org_id: str,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     if str(auth.org_id) != org_id:
-        from alephat_platform.common.errors import ForbiddenError
-
         raise ForbiddenError()
     row = await db.get(OrgSettings, auth.org_id)
-    return {"items": _org_models(row, get_settings().default_model)}
+    return {"items": MODEL_CATALOG.resolve(row, get_settings().default_model)}
 
 
 @router.put("/v1/orgs/{org_id}/models")
@@ -222,16 +228,12 @@ async def put_org_models(
     body: OrgModelsBody,
     db: AsyncSession = Depends(get_db),
     auth: AuthContext = Depends(get_auth),
-) -> dict[str, Any]:
+) -> dict[str, object]:
     if str(auth.org_id) != org_id:
-        from alephat_platform.common.errors import ForbiddenError
-
         raise ForbiddenError()
     require_admin(auth)
     models = list(dict.fromkeys(model.strip() for model in body.models if model.strip()))
     if not models:
-        from alephat_platform.common.errors import PlatformError
-
         raise PlatformError(
             "Models required",
             status=400,

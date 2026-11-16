@@ -1,4 +1,4 @@
-# Alephat — harness worker (consumes NATS TASKS; one active job per process)
+# Alephat — Temporal DeepAgents worker
 # Build: docker build -f deploy/Dockerfile.harness -t alephat-harness .
 # Scale independently: docker compose up --scale harness=3
 FROM python:3.14-slim-bookworm AS builder
@@ -22,9 +22,11 @@ FROM python:3.14-slim-bookworm AS runtime
 
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl \
+    ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 10001 appuser
+    && useradd --create-home --uid 10001 appuser \
+    && mkdir -p /workspace \
+    && chown appuser:appuser /workspace
 
 COPY --from=builder /app /app
 ENV PATH="/app/.venv/bin:$PATH" \
@@ -34,5 +36,5 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 USER appuser
 
-# No public HTTP port — worker only pulls from NATS JetStream.
+# No public HTTP port — worker polls self-hosted Temporal Server over gRPC.
 CMD ["python", "-m", "alephat_platform.harness.worker"]

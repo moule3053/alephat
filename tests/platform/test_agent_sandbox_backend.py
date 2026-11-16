@@ -1,16 +1,38 @@
 import json
-from typing import Any, cast
+from datetime import timedelta
 
 import httpx
 import pytest
 from deepagents.backends.protocol import FILE_NOT_FOUND, INVALID_PATH
-from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
+from temporalio import activity
+from temporalio.client import WithStartWorkflowOperation
+from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+from temporalio.deepagents import DeepAgentsPlugin
+from temporalio.deepagents.testing import mock_model_provider
+from temporalio.testing import WorkflowEnvironment
+from temporalio.worker import Worker
 
-from alephat_platform.harness import agents
+from alephat_platform.common.temporal import (
+    SUBMIT_TURN_UPDATE,
+    TASK_WORKFLOW_NAME,
+    TaskWorkflowInput,
+    TurnAccepted,
+    TurnEnvelope,
+)
 from alephat_platform.harness.agent_sandbox_backend import AgentSandboxBackend
-from alephat_platform.harness.agents import RunContext, get_agent
+from alephat_platform.harness.contracts import (
+    COMPLETE_TURN_ACTIVITY,
+    PREPARE_TURN_ACTIVITY,
+    RECORD_STEP_ACTIVITY,
+    CompleteTurnInput,
+    PreparedTurn,
+    PrepareTurnInput,
+    RecordStepInput,
+)
 from alephat_platform.harness.sandboxes import AgentSandboxProvider, SandboxRef
+from alephat_platform.harness.worker import WORKFLOW_PASSTHROUGH_MODULES
+from alephat_platform.harness.workflows import TaskAgentWorkflow
 
 
 @pytest.mark.asyncio
@@ -146,80 +168,111 @@ async def test_resolved_agent_sandbox_has_deep_agents_backend(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_agent_sandbox_executes_through_deep_agents_runtime(monkeypatch):
+async def test_agent_sandbox_executes_through_temporal_deep_agents_workflow():
     executed: list[str] = []
+    events: list[str] = []
+    completed: list[CompleteTurnInput] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         executed.append(payload["command"])
         return httpx.Response(200, json={"exit_code": 0, "stdout": "ok\n", "stderr": ""})
 
-    class FakeModel(FakeMessagesListChatModel):
-        def bind_tools(self, *_args, **_kwargs):
-            return self
-
-    model = FakeModel(
-        responses=[
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "execute",
-                        "args": {"command": "printf deep-agent-ok"},
-                        "id": "execute-1",
-                    }
-                ],
-            ),
-            AIMessage(content="deep agent complete"),
-        ]
-    )
-    monkeypatch.setattr(agents, "_make_deep_agent_model", lambda *_args, **_kwargs: model)
     backend = AgentSandboxBackend(
         "sandbox-1",
         "http://sandbox.test:8888",
         transport=httpx.MockTransport(handler),
     )
-    context = RunContext(
-        org_id="org",
-        task_id="task",
-        run_id="run",
-        thread_id="thread",
-        agent_type="coding",
-        repo=None,
-        base_ref="main",
-        model="fake:model",
-        prompt="run the command",
-        messages=[],
-        sandbox_provider="agent_sandbox",
-        sandbox_id="sandbox-1",
-        mcp_snapshot=[],
-        checkpoint=None,
-    )
-    events: list[str] = []
 
-    async def on_step(event_type: str, _payload: dict):
-        events.append(event_type)
-
-    async def on_boundary():
-        return []
-
-    result = await get_agent("coding").run(
-        context,
-        llm=cast(Any, None),
-        sandbox=cast(Any, None),
-        sandbox_ref=SandboxRef(
-            provider="agent_sandbox",
+    @activity.defn(name=PREPARE_TURN_ACTIVITY)
+    async def fake_prepare(req: PrepareTurnInput) -> PreparedTurn:
+        return PreparedTurn(
+            task_id=req.task_id,
+            run_id=req.run_id,
+            agent_type="coding",
+            repo="acme/repo",
+            base_ref="main",
+            model="openai:gpt-4o-mini",
+            effort=None,
+            sandbox_provider="agent_sandbox",
             sandbox_id="sandbox-1",
-            handle=backend,
+            sandbox_is_stub=False,
+            workspace_path="/app/repo",
+        )
+
+    @activity.defn(name=RECORD_STEP_ACTIVITY)
+    async def fake_record(req: RecordStepInput) -> None:
+        events.append(req.event_type)
+
+    @activity.defn(name=COMPLETE_TURN_ACTIVITY)
+    async def fake_complete(req: CompleteTurnInput) -> None:
+        completed.append(req)
+
+    plugin = DeepAgentsPlugin(
+        model_provider=mock_model_provider(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "execute",
+                            "args": {"command": "printf deep-agent-ok"},
+                            "id": "execute-1",
+                        }
+                    ],
+                ),
+                AIMessage(content="deep agent complete"),
+            ]
         ),
-        mcp_sessions=[],
-        on_step=on_step,
-        on_boundary=on_boundary,
+        backends={"agent_sandbox": lambda _sid: backend},
+        passthrough_modules=WORKFLOW_PASSTHROUGH_MODULES,
     )
 
-    assert result.success
-    assert result.final_message == "deep agent complete"
-    assert result.checkpoint_blob["runtime"] == "deepagents"
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        from temporalio.client import Client
+
+        cfg = env.client.config()
+        cfg["plugins"] = [plugin]
+        client = Client(**cfg)
+
+        async with Worker(
+            client,
+            task_queue="test-agent-sandbox",
+            workflows=[TaskAgentWorkflow],
+            activities=[fake_prepare, fake_record, fake_complete],
+        ):
+            start_op = WithStartWorkflowOperation(
+                TASK_WORKFLOW_NAME,
+                TaskWorkflowInput(task_id="task-1", org_id="org-1"),
+                id="alephat-task:task-1",
+                task_queue="test-agent-sandbox",
+                id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+                id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+            )
+            accepted = await client.execute_update_with_start_workflow(
+                SUBMIT_TURN_UPDATE,
+                TurnEnvelope(
+                    turn_id="turn-1",
+                    message_id="msg-1",
+                    content="run the command",
+                ),
+                start_workflow_operation=start_op,
+                id="turn-1",
+                result_type=TurnAccepted,
+            )
+            assert accepted.mode == "queued"
+
+            for _ in range(50):
+                if completed:
+                    break
+                await env.sleep(timedelta(milliseconds=100))
+
+            handle = client.get_workflow_handle("alephat-task:task-1")
+            await handle.terminate(reason="test_done")
+
+    assert len(completed) == 1
+    assert completed[0].success is True
+    assert completed[0].final_message == "deep agent complete"
     assert executed == [
         "/bin/sh -lc 'mkdir -p -- /app/repo && cd -- /app/repo && printf deep-agent-ok'"
     ]

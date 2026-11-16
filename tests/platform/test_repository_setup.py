@@ -2,12 +2,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from alephat_platform.harness import worker
+from alephat_platform.harness.activities import RepositoryProvisioner
 from alephat_platform.harness.sandboxes import ExecResult, SandboxRef
 
 
 def test_repository_setup_command_clones_selected_repo_at_sandbox_root():
-    command = worker._repository_setup_command(
+    provisioner = RepositoryProvisioner()
+    command = provisioner.setup_command(
         "acme/private-repo",
         "develop",
         "secret-token",
@@ -24,14 +25,15 @@ def test_repository_setup_command_clones_selected_repo_at_sandbox_root():
 
 @pytest.mark.parametrize("repo", ["missing-owner", "/missing-owner", "owner/"])
 def test_repository_setup_command_rejects_invalid_repo(repo):
+    provisioner = RepositoryProvisioner()
     with pytest.raises(ValueError, match="owner/name"):
-        worker._repository_setup_command(repo, "main", None)
+        provisioner.setup_command(repo, "main", None)
 
 
 @pytest.mark.asyncio
-async def test_prepare_task_repository_scopes_token_and_executes_clone(monkeypatch):
+async def test_prepare_task_repository_scopes_token_and_executes_clone():
     token = AsyncMock(return_value="installation-token")
-    monkeypatch.setattr(worker, "get_github_app_installation_token", token)
+    provisioner = RepositoryProvisioner(token_fetcher=token)
 
     class Provider:
         exec = AsyncMock(return_value=ExecResult(exit_code=0, stdout=""))
@@ -39,7 +41,7 @@ async def test_prepare_task_repository_scopes_token_and_executes_clone(monkeypat
     provider = Provider()
     sandbox_ref = SandboxRef(provider="local", sandbox_id="sandbox")
 
-    await worker._prepare_task_repository(
+    await provisioner.prepare(
         provider,
         sandbox_ref,
         repo="acme/private-repo",
@@ -53,12 +55,8 @@ async def test_prepare_task_repository_scopes_token_and_executes_clone(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_prepare_task_repository_fails_closed(monkeypatch):
-    monkeypatch.setattr(
-        worker,
-        "get_github_app_installation_token",
-        AsyncMock(return_value=None),
-    )
+async def test_prepare_task_repository_fails_closed():
+    provisioner = RepositoryProvisioner(token_fetcher=AsyncMock(return_value=None))
 
     class Provider:
         exec = AsyncMock(
@@ -66,7 +64,7 @@ async def test_prepare_task_repository_fails_closed(monkeypatch):
         )
 
     with pytest.raises(RuntimeError, match="Could not prepare acme/private-repo"):
-        await worker._prepare_task_repository(
+        await provisioner.prepare(
             Provider(),
             SandboxRef(provider="local", sandbox_id="sandbox"),
             repo="acme/private-repo",

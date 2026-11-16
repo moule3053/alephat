@@ -16,10 +16,9 @@ from alephat_platform.api.routes_oauth import router as oauth_router
 from alephat_platform.api.routes_slack_bots import router as slack_bots_router
 from alephat_platform.api.routes_tasks import router as tasks_router
 from alephat_platform.common.config import get_settings
-from alephat_platform.common.db import dispose_engine, get_session_factory
+from alephat_platform.common.db import dispose_engine
 from alephat_platform.common.errors import PlatformError
-from alephat_platform.common.messaging import NatsBus
-from alephat_platform.common.outbox import outbox_supervisor_loop
+from alephat_platform.common.temporal import TemporalPlatformClient
 
 logger = logging.getLogger(__name__)
 
@@ -28,27 +27,16 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     stop = asyncio.Event()
-    app.state.nats = None
-
-    def _set_connection(bus: NatsBus | None) -> None:
-        app.state.nats = bus
-
-    publisher_task = asyncio.create_task(
-        outbox_supervisor_loop(
-            get_session_factory(),
-            nats_url=settings.nats_url,
-            interval=settings.outbox_poll_interval_seconds,
-            stop_event=stop,
-            on_connection=_set_connection,
-        )
-    )
+    temporal = TemporalPlatformClient(settings=settings)
+    app.state.temporal = temporal
+    supervisor_task = asyncio.create_task(temporal.supervisor_loop(stop))
 
     yield
 
     stop.set()
-    publisher_task.cancel()
+    supervisor_task.cancel()
     try:
-        await publisher_task
+        await supervisor_task
     except asyncio.CancelledError:
         pass
     await dispose_engine()
