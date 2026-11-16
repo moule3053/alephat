@@ -106,9 +106,9 @@ It does not cover anything under [`vendor/`](vendor/README.md), which is not lic
 
 ## Standalone GKE deployment: Kata or gVisor, Agent Sandbox, LiteLLM, and KEDA
 
-This fork can run Alephat's API, webhook receiver (with outbound Slack Socket Mode), dashboard, worker harness (with rich Slack `@json-render/chat` sidecar), PostgreSQL, NATS JetStream, LiteLLM gateway, and code sandboxes on Kubernetes.
+This fork can run Alephat's API, webhook receiver (with outbound Slack Socket Mode), dashboard, Temporal DeepAgents worker (with rich Slack `@json-render/chat` sidecar), PostgreSQL, self-hosted Temporal Service (`temporalio/server:1.32.2` with mTLS + `temporalio/ui`), LiteLLM gateway, and code sandboxes on Kubernetes.
 It does **not** require a LangSmith deployment, a commercial sandbox account, or any Alephat license key.
-The checked-in configuration uses the open-source editions of Agent Sandbox (`v1.0.9`), Kata Containers (`4.3.1`) or gVisor, KEDA (`2.21.0`), External Secrets Operator (`2.14.0`) with Google Cloud Secret Manager, NATS (`2.12`), PostgreSQL (`17`), and LiteLLM (`1.106.6`).
+The checked-in configuration uses the open-source editions of Agent Sandbox (`v1.0.9`), Kata Containers (`4.3.1`) or gVisor, KEDA (`2.21.0`), External Secrets Operator (`2.14.0`) with Google Cloud Secret Manager, Temporal Server (`1.32.2`), PostgreSQL (`17`), and LiteLLM (`1.106.6`).
 
 ### Automated one-command deployment (`./deploy/gke-deploy.sh`)
 
@@ -148,7 +148,7 @@ You still pay for GKE and model usage, and you must supply normal authentication
 Those are service credentials, not license keys.
 LiteLLM enterprise-only metering is disabled.
 
-The following path creates a GKE Standard cluster with Intel N2 Ubuntu nodes, nested virtualization, Kata's `kata-qemu` runtime, the open-source Agent Sandbox controller, and KEDA scaling of harness workers from NATS JetStream lag.
+The following path creates a GKE Standard cluster with Intel N2 Ubuntu nodes, nested virtualization, Kata's `kata-qemu` runtime, the open-source Agent Sandbox controller, self-hosted Temporal Server with mTLS, and KEDA scaling of Temporal DeepAgents workers from Task Queue backlog.
 
 > [!IMPORTANT]
 > Google also offers a managed GKE Agent Sandbox add-on.
@@ -293,8 +293,8 @@ kubectl -n keda rollout status deployment/keda-operator --timeout=5m
 kubectl get crd scaledobjects.keda.sh
 ```
 
-The NATS JetStream scaler is included in KEDA; no separate scaler installation is required.
-The `ScaledObject` is applied after Alephat starts once, so the API has created the streams and the initial harness has created its durable consumer.
+The Temporal scaler is included in KEDA (`v2.17+`); no separate scaler installation is required.
+`deploy/k8s/harness-keda.yaml` binds a `TriggerAuthentication` to `secret/temporal-tls` (mTLS) and monitors both `workflow` and `activity` queues on `alephat-agents` with `includeRunningWorkflowCount: "true"`.
 
 ### 5. Deploy standalone LiteLLM with OpenAI, Anthropic, and Gemini routes
 
@@ -478,7 +478,7 @@ kubectl -n "$PLATFORM_NAMESPACE" create secret generic alephat-oauth \
   --from-literal=TOKEN_ENCRYPTION_KEY="$TOKEN_ENCRYPTION_KEY"
 ```
 
-`./deploy/gke-deploy.sh` installs External Secrets Operator (`2.14.0`) and syncs `alephat-oauth`, `alephat-secrets`, `alephat-postgres`, `litellm-secrets`, `litellm-postgres`, and `litellm-provider-keys` from Google Cloud Secret Manager via Workload Identity (`deploy/k8s/external-secrets.yaml`).
+`./deploy/gke-deploy.sh` also generates ECDSA CA, server, and client certificates for Temporal mTLS (`secret/temporal-tls` containing `ca.crt`, `server.crt`, `server.key`, `tls.crt`, `tls.key`) and HTTP basic-auth credentials for the Temporal Web UI (`secret/temporal-ui-auth`), installs External Secrets Operator (`2.14.0`), and syncs `alephat-oauth`, `alephat-secrets`, `alephat-postgres`, `temporal-tls`, `temporal-ui-auth`, `litellm-secrets`, `litellm-postgres`, and `litellm-provider-keys` from Google Cloud Secret Manager via Workload Identity (`deploy/k8s/external-secrets.yaml`).
 To update or rotate the GitHub OAuth secret in Google Cloud Secret Manager:
 
 ```bash
@@ -550,8 +550,7 @@ If you use a different LiteLLM release or logical model name, update `deploy/k8s
 
 The RBAC and NetworkPolicy manifests are separate because they target `alephat-sandboxes`, while the Kustomize base applies its namespace transformer to the `alephat` platform resources.
 
-If upgrading an earlier version of this fork that used `emptyDir`, first stop task submission, let queued/running tasks finish, and export PostgreSQL before the rollout.
-The old NATS stream was ephemeral, so no queued work should remain when NATS restarts:
+If upgrading an earlier version of this fork, export PostgreSQL before the rollout:
 
 ```bash
 kubectl -n "$PLATFORM_NAMESPACE" exec alephat-postgresql-0 -- \
@@ -570,6 +569,11 @@ kubectl apply -f deploy/k8s/agent-sandbox-rbac.yaml
 kubectl apply -f deploy/k8s/agent-sandbox-networkpolicy.yaml
 kubectl apply -k deploy/k8s
 
+kubectl -n "$PLATFORM_NAMESPACE" rollout status statefulset/alephat-postgresql --timeout=5m
+kubectl -n "$PLATFORM_NAMESPACE" rollout status deployment/temporal --timeout=10m
+kubectl -n "$PLATFORM_NAMESPACE" wait \
+  --for=condition=complete job/temporal-namespace --timeout=5m
+kubectl -n "$PLATFORM_NAMESPACE" rollout status deployment/temporal-ui --timeout=5m
 kubectl -n "$PLATFORM_NAMESPACE" wait \
   --for=condition=complete job/alephat-migrate --timeout=5m
 kubectl -n "$PLATFORM_NAMESPACE" rollout status deployment/alephat-api --timeout=10m
@@ -589,7 +593,7 @@ kubectl -n "$PLATFORM_NAMESPACE" get hpa
 ```
 
 The platform base intentionally does not include `harness-keda.yaml`: installing the base must remain possible before KEDA's CRDs exist.
-Once the `ScaledObject` is active, the harness can scale to zero while idle and scale out as tasks accumulate.
+Once the `ScaledObject` is active, KEDA scales `alephat-harness` from `minReplicaCount: 1` up to `50` based on `workflow` and `activity` Task Queue backlog (`includeRunningWorkflowCount: "true"` keeps workers running while workflows are active).
 
 Check all components:
 
@@ -601,10 +605,10 @@ kubectl -n keda get pods
 kubectl -n "$PLATFORM_NAMESPACE" logs deployment/alephat-harness --tail=100
 ```
 
-The checked-in Alephat PostgreSQL and NATS manifests each request a `20Gi` `standard-rwo` GKE persistent disk.
+The checked-in Alephat PostgreSQL manifest requests a `20Gi` `standard-rwo` GKE persistent disk, hosting the `alephat`, `temporal`, and `temporal_visibility` databases.
 LiteLLM's separate PostgreSQL instance requests another `20Gi` disk through its Helm values.
-PostgreSQL data and NATS JetStream state therefore survive Pod restarts and rescheduling.
-Set a different storage class or capacity in `deploy/k8s/postgresql.yaml`, `deploy/k8s/nats.yaml`, and `deploy/k8s/litellm-values.yaml` before the first apply when required.
+PostgreSQL data and Temporal Workflow Event History / Schedules / Visibility state therefore survive Pod restarts and rescheduling.
+Set a different storage class or capacity in `deploy/k8s/postgresql.yaml` and `deploy/k8s/litellm-values.yaml` before the first apply when required.
 PVC capacity can be expanded later when the selected StorageClass allows expansion, but it cannot be shrunk.
 
 ### 9. Publish Alephat with Traefik, HTTPS, and DNS
@@ -626,7 +630,7 @@ echo "$TRAEFIK_IP"
 ```
 
 Install the official Traefik chart.
-The checked-in values expose ports 80 and 443, redirect HTTP to HTTPS, persist ACME state, and configure a Let's Encrypt TLS-ALPN-01 resolver on port 443.
+The checked-in values expose ports 80 (`web`), 443 (`websecure`), and 7233 (`temporal` gRPC), redirect HTTP to HTTPS, persist ACME state, and configure a Let's Encrypt TLS-ALPN-01 resolver.
 A single replica is intentional because the open-source file-based ACME store must not be written concurrently by multiple Traefik replicas.
 
 ```bash
@@ -674,11 +678,14 @@ dig +short "$ALEPHAT_HOST"
 If DNS is hosted outside Cloud DNS, create the equivalent `A` record with that provider.
 Do not create the TLS route until public DNS resolves to `TRAEFIK_IP`; Let's Encrypt must reach port 443 for the TLS-ALPN-01 challenge.
 
-Apply the Traefik route after replacing the example hostname.
-`/hooks/*` goes directly to the webhook service; all other paths go to the UI, whose Nginx configuration proxies `/dashboard/api/*` and `/v1/*` to the API.
+Apply the Traefik routes after replacing the example hostnames (`ALEPHAT_HOST`, `TEMPORAL_UI_HOST`, `TEMPORAL_GRPC_HOST`).
+`/hooks/*` goes directly to the webhook service; all other dashboard paths go to the UI, whose Nginx configuration proxies `/dashboard/api/*` and `/v1/*` to the API; `temporal-ui` serves the Temporal Web UI behind basic auth (`secret/temporal-ui-auth`); and `temporal-grpc` exposes Temporal Frontend gRPC on `:443` and `:7233` with Let's Encrypt server certs, `TLSOption` client-certificate verification (`RequireAndVerifyClientCert`), and `ServersTransport` mTLS upstream to `temporal:7233`.
 
 ```bash
-sed "s/alephat\.example\.com/${ALEPHAT_HOST}/g" \
+sed \
+  -e "s/alephat\.example\.com/${ALEPHAT_HOST}/g" \
+  -e "s/temporal\.example\.com/${TEMPORAL_UI_HOST}/g" \
+  -e "s/temporal-grpc\.example\.com/${TEMPORAL_GRPC_HOST}/g" \
   deploy/k8s/traefik-ingressroute.yaml | kubectl apply -f -
 ```
 
@@ -757,8 +764,8 @@ The checked-in manifests are a reproducible standalone starting point, not an HA
 
 - `deploy/k8s/postgresql.yaml` gives Alephat a dedicated PostgreSQL StatefulSet backed by a GKE persistent disk.
   Configure scheduled backups and use Cloud SQL for regional HA, point-in-time recovery, and managed failover.
-- `deploy/k8s/nats.yaml` persists JetStream state on a GKE disk but remains a single NATS server.
-  Use the official NATS Helm chart with a three-node JetStream cluster and disruption budgets when queue availability must survive a node or zone failure.
+- `deploy/k8s/temporal.yaml` runs a single-node Temporal Server (`1.32.2`) with mTLS (`secret/temporal-tls`) persisted in PostgreSQL.
+  Use the official Temporal Helm chart with separated Frontend, Matching, History, and Worker Deployments when Temporal availability must survive a node or zone failure.
 - The LiteLLM chart's standalone PostgreSQL is also a getting-started option.
   Use a separate managed database, backups, and Redis for multi-replica LiteLLM.
 - Back up Traefik's ACME volume or move certificate lifecycle to cert-manager before making ingress highly available.
@@ -766,7 +773,7 @@ The checked-in manifests are a reproducible standalone starting point, not an HA
 - Pin container, Helm chart, Agent Sandbox, and Kata versions and test upgrades in a non-production cluster.
 
 Deleting the namespace or any PVC can delete its underlying disk, depending on the StorageClass reclaim policy.
-Take a database backup and a JetStream snapshot before destructive maintenance.
+Take a PostgreSQL backup (`alephat`, `temporal`, and `temporal_visibility` databases) before destructive maintenance.
 
 Delete the cluster and associated resources when they are no longer needed:
 
@@ -778,4 +785,4 @@ Delete the cluster and associated resources when they are no longer needed:
   --cluster-name "$CLUSTER_NAME"
 ```
 
-References: [GKE Agent Sandbox](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/machine-learning/agent-sandbox), [Agent Sandbox releases](https://github.com/kubernetes-sigs/agent-sandbox/releases), [Kata installation](https://github.com/kata-containers/kata-containers/blob/main/docs/installation.md), [KEDA installation](https://keda.sh/docs/2.20/deploy/), [KEDA NATS JetStream scaler](https://keda.sh/docs/2.20/scalers/nats-jetstream/), [Traefik Kubernetes installation](https://doc.traefik.io/traefik/getting-started/kubernetes/), [GKE static LoadBalancer addresses](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/service-load-balancer-parameters), [Cloud DNS records](https://docs.cloud.google.com/dns/docs/records), and [GitHub App OAuth callbacks](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-user-authorization-callback-url).
+References: [GKE Agent Sandbox](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/machine-learning/agent-sandbox), [Agent Sandbox releases](https://github.com/kubernetes-sigs/agent-sandbox/releases), [Kata installation](https://github.com/kata-containers/kata-containers/blob/main/docs/installation.md), [KEDA installation](https://keda.sh/docs/2.21/deploy/), [KEDA Temporal scaler](https://keda.sh/docs/2.21/scalers/temporal/), [Traefik Kubernetes installation](https://doc.traefik.io/traefik/getting-started/kubernetes/), [GKE static LoadBalancer addresses](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/service-load-balancer-parameters), [Cloud DNS records](https://docs.cloud.google.com/dns/docs/records), and [GitHub App OAuth callbacks](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-user-authorization-callback-url).

@@ -60,6 +60,19 @@ class Settings:
     temporal_workflow_idle_seconds: int = field(
         default_factory=lambda: _ENV.get_int("TEMPORAL_WORKFLOW_IDLE_SECONDS", 3600)
     )
+    temporal_tls_enabled: bool = field(default_factory=lambda: _ENV.get_bool("TEMPORAL_TLS", False))
+    temporal_tls_ca_cert_path: str | None = field(
+        default_factory=lambda: _ENV.get("TEMPORAL_TLS_CA_CERT_PATH")
+    )
+    temporal_tls_client_cert_path: str | None = field(
+        default_factory=lambda: _ENV.get("TEMPORAL_TLS_CLIENT_CERT_PATH")
+    )
+    temporal_tls_client_key_path: str | None = field(
+        default_factory=lambda: _ENV.get("TEMPORAL_TLS_CLIENT_KEY_PATH")
+    )
+    temporal_tls_server_name: str | None = field(
+        default_factory=lambda: _ENV.get("TEMPORAL_TLS_SERVER_NAME")
+    )
     token_encryption_key: str | None = field(
         default_factory=lambda: _ENV.get("TOKEN_ENCRYPTION_KEY")
     )

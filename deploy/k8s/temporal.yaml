@@ -2,6 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: temporal-server-config
+  namespace: alephat
 data:
   config.template.yaml: |
     log:
@@ -38,6 +39,29 @@ data:
       membership:
         maxJoinDuration: 30s
         broadcastAddress: "__TEMPORAL_BROADCAST_ADDRESS__"
+      tls:
+        internode:
+          server:
+            certFile: /etc/temporal/tls/server.crt
+            keyFile: /etc/temporal/tls/server.key
+            requireClientAuth: true
+            clientCaFiles:
+              - /etc/temporal/tls/ca.crt
+          client:
+            serverName: temporal.alephat.svc.cluster.local
+            rootCaFiles:
+              - /etc/temporal/tls/ca.crt
+        frontend:
+          server:
+            certFile: /etc/temporal/tls/server.crt
+            keyFile: /etc/temporal/tls/server.key
+            requireClientAuth: true
+            clientCaFiles:
+              - /etc/temporal/tls/ca.crt
+          client:
+            serverName: temporal.alephat.svc.cluster.local
+            rootCaFiles:
+              - /etc/temporal/tls/ca.crt
     services:
       frontend:
         rpc:
@@ -79,6 +103,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: temporal
+  namespace: alephat
 spec:
   replicas: 1
   strategy:
@@ -155,6 +180,9 @@ spec:
             - name: config
               mountPath: /etc/temporal/config
               readOnly: true
+            - name: tls
+              mountPath: /etc/temporal/tls
+              readOnly: true
           readinessProbe:
             tcpSocket:
               port: grpc
@@ -171,11 +199,15 @@ spec:
         - name: config
           configMap:
             name: temporal-server-config
+        - name: tls
+          secret:
+            secretName: temporal-tls
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: temporal
+  namespace: alephat
 spec:
   selector:
     app: temporal
@@ -184,10 +216,58 @@ spec:
       port: 7233
       targetPort: grpc
 ---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: temporal-namespace
+  namespace: alephat
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app: temporal-namespace
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: namespace-setup
+          image: temporalio/admin-tools:1.32.2
+          env:
+            - name: TEMPORAL_ADDRESS
+              value: temporal.alephat.svc.cluster.local:7233
+            - name: TEMPORAL_NAMESPACE
+              value: default
+            - name: TEMPORAL_TLS
+              value: "true"
+            - name: TEMPORAL_TLS_SERVER_CA_CERT_PATH
+              value: /etc/temporal/tls/ca.crt
+            - name: TEMPORAL_TLS_CLIENT_CERT_PATH
+              value: /etc/temporal/tls/tls.crt
+            - name: TEMPORAL_TLS_CLIENT_KEY_PATH
+              value: /etc/temporal/tls/tls.key
+            - name: TEMPORAL_TLS_SERVER_NAME
+              value: temporal.alephat.svc.cluster.local
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              until temporal operator cluster health >/dev/null 2>&1; do sleep 2; done
+              temporal operator namespace describe -n "$TEMPORAL_NAMESPACE" >/dev/null 2>&1 \
+                || temporal operator namespace create -n "$TEMPORAL_NAMESPACE"
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/temporal/tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: temporal-tls
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: temporal-ui
+  namespace: alephat
 spec:
   replicas: 1
   selector:
@@ -206,7 +286,26 @@ spec:
               containerPort: 8080
           env:
             - name: TEMPORAL_ADDRESS
-              value: temporal:7233
+              value: temporal.alephat.svc.cluster.local:7233
+            - name: TEMPORAL_TLS_CA
+              value: /etc/temporal/tls/ca.crt
+            - name: TEMPORAL_TLS_CERT
+              value: /etc/temporal/tls/tls.crt
+            - name: TEMPORAL_TLS_KEY
+              value: /etc/temporal/tls/tls.key
+            - name: TEMPORAL_TLS_SERVER_NAME
+              value: temporal.alephat.svc.cluster.local
+            - name: TEMPORAL_TLS_ENABLE_HOST_VERIFICATION
+              value: "true"
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/temporal/tls
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
           resources:
             requests:
               cpu: 50m
@@ -214,11 +313,16 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+      volumes:
+        - name: tls
+          secret:
+            secretName: temporal-tls
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: temporal-ui
+  namespace: alephat
 spec:
   selector:
     app: temporal-ui

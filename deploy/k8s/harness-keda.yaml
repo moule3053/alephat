@@ -1,4 +1,23 @@
-# Scales Temporal DeepAgents workers from the alephat-agents Task Queue backlog via KEDA's native temporal scaler.
+# KEDA TriggerAuthentication + ScaledObject for Temporal DeepAgents workers.
+# Authenticates to Temporal Frontend over mTLS using secret/temporal-tls and scales
+# on both workflow and activity backlogs while keeping pods alive for in-flight workflows.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: keda-trigger-auth-temporal
+  namespace: alephat
+spec:
+  secretTargetRef:
+    - parameter: ca
+      name: temporal-tls
+      key: ca.crt
+    - parameter: cert
+      name: temporal-tls
+      key: tls.crt
+    - parameter: key
+      name: temporal-tls
+      key: tls.key
+---
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -7,15 +26,35 @@ metadata:
 spec:
   scaleTargetRef:
     name: alephat-harness
-  minReplicaCount: 2
+  minReplicaCount: 1
   maxReplicaCount: 50
   cooldownPeriod: 300
   pollingInterval: 15
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 15
+        scaleDown:
+          stabilizationWindowSeconds: 180
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 60
   triggers:
     - type: temporal
+      authenticationRef:
+        name: keda-trigger-auth-temporal
       metadata:
-        endpoint: temporal.alephat.svc:7233
+        endpoint: temporal.alephat.svc.cluster.local:7233
         namespace: default
         taskQueue: alephat-agents
+        queueTypes: workflow,activity
         targetQueueSize: "4"
-        unsafeSsl: "true"
+        activationTargetQueueSize: "0"
+        includeRunningWorkflowCount: "true"
+        tlsServerName: temporal.alephat.svc.cluster.local

@@ -109,6 +109,37 @@ async def test_payload_codec_compresses_and_encrypts_history():
     assert decoded[0].metadata["encoding"] == b"json/plain"
 
 
+def test_temporal_tls_builder_loads_mtls_certificates(tmp_path):
+    from temporalio.service import TLSConfig
+
+    from alephat_platform.common.config import Settings
+    from alephat_platform.common.temporal import TemporalTlsBuilder
+
+    assert TemporalTlsBuilder(Settings(temporal_tls_enabled=False)).build() is False
+
+    ca = tmp_path / "ca.crt"
+    cert = tmp_path / "tls.crt"
+    key = tmp_path / "tls.key"
+    ca.write_bytes(b"CA-PEM")
+    cert.write_bytes(b"CERT-PEM")
+    key.write_bytes(b"KEY-PEM")
+
+    tls_cfg = TemporalTlsBuilder(
+        Settings(
+            temporal_tls_enabled=True,
+            temporal_tls_ca_cert_path=str(ca),
+            temporal_tls_client_cert_path=str(cert),
+            temporal_tls_client_key_path=str(key),
+            temporal_tls_server_name="temporal.alephat.svc.cluster.local",
+        )
+    ).build()
+    assert isinstance(tls_cfg, TLSConfig)
+    assert tls_cfg.server_root_ca_cert == b"CA-PEM"
+    assert tls_cfg.client_cert == b"CERT-PEM"
+    assert tls_cfg.client_private_key == b"KEY-PEM"
+    assert tls_cfg.domain == "temporal.alephat.svc.cluster.local"
+
+
 @pytest.mark.asyncio
 async def test_workflow_plan_approval_hitl_and_followup_turns():
     parked_events: list[EnterParkedInput] = []

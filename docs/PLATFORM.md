@@ -205,7 +205,7 @@ deploy/
 
 ## Kubernetes (GKE)
 
-Automated end-to-end GKE provisioning (choosing `kata` or `gvisor` for Agent Sandbox, installing External Secrets Operator `2.14.0` backed by Google Cloud Secret Manager, KEDA `2.21.0`, LiteLLM `1.106.6`, and optional Traefik `42.3.0` HTTPS ingress) is provided by `deploy/gke-deploy.sh` and `deploy/gke-teardown.sh`:
+Automated end-to-end GKE provisioning (choosing `kata` or `gvisor` for Agent Sandbox, self-hosted Temporal `1.32.2` with mTLS (`secret/temporal-tls`), installing External Secrets Operator `2.14.0` backed by Google Cloud Secret Manager, KEDA `2.21.0` with the Temporal scaler (`deploy/k8s/harness-keda.yaml`), LiteLLM `1.106.6`, and optional Traefik `42.3.0` HTTPS/gRPC ingress for Dashboard, Temporal UI, and Temporal Frontend) is provided by `deploy/gke-deploy.sh` and `deploy/gke-teardown.sh`:
 
 ```bash
 # Deploy with Kata or gVisor, External Secrets Operator + Google Cloud Secret Manager, and Traefik HTTPS

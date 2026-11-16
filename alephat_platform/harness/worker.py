@@ -11,7 +11,11 @@ from temporalio.worker import Worker
 
 from alephat_platform.common.config import Settings, get_settings
 from alephat_platform.common.db import dispose_engine
-from alephat_platform.common.temporal import STREAMING_TOPIC, DataConverterFactory
+from alephat_platform.common.temporal import (
+    STREAMING_TOPIC,
+    DataConverterFactory,
+    TemporalTlsBuilder,
+)
 from alephat_platform.harness.activities import PlatformActivities, RepositoryProvisioner
 from alephat_platform.harness.agents import MODEL_PROVIDER
 from alephat_platform.harness.sandboxes import SANDBOX_REGISTRY
@@ -60,6 +64,7 @@ class TemporalAgentWorker:
 
     async def connect_client(self) -> Client:
         converter = DataConverterFactory(self.settings.token_encryption_key).for_worker()
+        tls_cfg = TemporalTlsBuilder(self.settings).build()
         plugin = self.build_plugin()
         while not self._stop.is_set():
             try:
@@ -67,6 +72,7 @@ class TemporalAgentWorker:
                     self.settings.temporal_address,
                     namespace=self.settings.temporal_namespace,
                     data_converter=converter,
+                    tls=tls_cfg,
                     plugins=[plugin],
                 )
             except Exception:

@@ -127,6 +127,10 @@ spec:
                 secretKeyRef:
                   name: alephat-oauth
                   key: TOKEN_ENCRYPTION_KEY
+          volumeMounts:
+            - name: temporal-tls
+              mountPath: /etc/temporal/tls
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /readyz
@@ -146,6 +150,10 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
+      volumes:
+        - name: temporal-tls
+          secret:
+            secretName: temporal-tls
 ---
 apiVersion: v1
 kind: Service

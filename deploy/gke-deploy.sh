@@ -5,8 +5,8 @@
 #   3. KEDA operator (2.21.0)
 #   4. LiteLLM gateway (1.106.6) with configurable enabled models & Workload Identity
 #   5. Cloud Build image builds (platform, ui, sandbox)
-#   6. Alephat platform (PostgreSQL 17, NATS 2.12 JetStream, API, Webhook, UI, Harness + KEDA ScaledObject)
-#   7. Optional Traefik ingress (42.3.0) with Let's Encrypt TLS & Cloud DNS
+#   6. Alephat platform (PostgreSQL 17, Temporal 1.32 mTLS Server + UI, API, Webhook, UI, Harness + KEDA Temporal ScaledObject)
+#   7. Optional Traefik ingress (42.3.0) with Let's Encrypt TLS & Cloud DNS (Dashboard, Temporal UI, and Temporal gRPC mTLS)
 
 set -euo pipefail
 
@@ -65,6 +65,10 @@ DEFAULT_MODEL="${DEFAULT_MODEL:-}"
 
 WITH_TRAEFIK=false
 ALEPHAT_HOST="${ALEPHAT_HOST:-}"
+TEMPORAL_UI_HOST="${TEMPORAL_UI_HOST:-}"
+TEMPORAL_GRPC_HOST="${TEMPORAL_GRPC_HOST:-}"
+TEMPORAL_UI_USER="${TEMPORAL_UI_USER:-admin}"
+TEMPORAL_UI_PASSWORD="${TEMPORAL_UI_PASSWORD:-}"
 DNS_DOMAIN="${DNS_DOMAIN:-}"
 DNS_ZONE="${DNS_ZONE:-}"
 ACME_EMAIL="${ACME_EMAIL:-}"
@@ -110,8 +114,10 @@ Component Versions:
   --no-external-secrets           Create plain Kubernetes Secrets instead of External Secrets + GCP Secret Manager
 
 Ingress & Lifecycle Options:
-  --with-traefik                  Deploy Traefik LoadBalancer + Let's Encrypt HTTPS
-  --host <fqdn>                   Public hostname for Traefik (e.g. alephat.example.com)
+  --with-traefik                  Deploy Traefik LoadBalancer + Let's Encrypt HTTPS (Dashboard, Temporal UI, Temporal gRPC)
+  --host <fqdn>                   Public hostname for Alephat Dashboard/Webhooks (e.g. alephat.example.com)
+  --temporal-ui-host <fqdn>       Public hostname for Temporal Web UI (default: temporal.<base-domain>)
+  --temporal-grpc-host <fqdn>     Public hostname for Temporal gRPC Frontend (default: temporal-grpc.<base-domain>)
   --dns-domain <domain>           Base DNS domain for Cloud DNS (e.g. example.com)
   --dns-zone <zone-name>          Cloud DNS managed zone name
   --acme-email <email>            Email for Let's Encrypt ACME registration
@@ -144,6 +150,8 @@ while [[ $# -gt 0 ]]; do
     --no-external-secrets) USE_EXTERNAL_SECRETS=false; shift ;;
     --with-traefik) WITH_TRAEFIK=true; shift ;;
     --host) ALEPHAT_HOST="$2"; shift 2 ;;
+    --temporal-ui-host) TEMPORAL_UI_HOST="$2"; shift 2 ;;
+    --temporal-grpc-host) TEMPORAL_GRPC_HOST="$2"; shift 2 ;;
     --dns-domain) DNS_DOMAIN="$2"; shift 2 ;;
     --dns-zone) DNS_ZONE="$2"; shift 2 ;;
     --acme-email) ACME_EMAIL="$2"; shift 2 ;;
@@ -550,8 +558,61 @@ read_k8s_secret_key() {
   local secret_name="$1"
   local key="$2"
   if kubectl -n "${PLATFORM_NAMESPACE}" get secret "${secret_name}" >/dev/null 2>&1; then
-    kubectl -n "${PLATFORM_NAMESPACE}" get secret "${secret_name}" -o "jsonpath={.data.${key}}" 2>/dev/null | base64 -d || true
+    kubectl -n "${PLATFORM_NAMESPACE}" get secret "${secret_name}" -o "go-template={{index .data \"${key}\"}}" 2>/dev/null | base64 -d || true
   fi
+}
+
+generate_temporal_tls_json() {
+  local cert_dir
+  cert_dir="$(mktemp -d)"
+  openssl ecparam -name prime256v1 -genkey -noout -out "${cert_dir}/ca.key"
+  openssl req -x509 -new -key "${cert_dir}/ca.key" -sha256 -days 3650 \
+    -subj "/CN=Alephat Temporal Root CA" \
+    -addext "basicConstraints=critical,CA:TRUE" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -out "${cert_dir}/ca.crt" >/dev/null 2>&1
+
+  local extra_san=""
+  if [[ -n "${TEMPORAL_GRPC_HOST}" ]]; then
+    extra_san=",DNS:${TEMPORAL_GRPC_HOST}"
+  fi
+  cat > "${cert_dir}/server.ext" <<EXT
+basicConstraints=CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth,clientAuth
+subjectAltName=DNS:temporal,DNS:temporal.${PLATFORM_NAMESPACE},DNS:temporal.${PLATFORM_NAMESPACE}.svc,DNS:temporal.${PLATFORM_NAMESPACE}.svc.cluster.local,DNS:localhost,IP:127.0.0.1${extra_san}
+EXT
+  openssl ecparam -name prime256v1 -genkey -noout -out "${cert_dir}/server.key"
+  openssl req -new -key "${cert_dir}/server.key" \
+    -subj "/CN=temporal.${PLATFORM_NAMESPACE}.svc.cluster.local" \
+    -out "${cert_dir}/server.csr" >/dev/null 2>&1
+  openssl x509 -req -in "${cert_dir}/server.csr" \
+    -CA "${cert_dir}/ca.crt" -CAkey "${cert_dir}/ca.key" -CAcreateserial \
+    -days 3650 -sha256 -extfile "${cert_dir}/server.ext" \
+    -out "${cert_dir}/server.crt" >/dev/null 2>&1
+
+  cat > "${cert_dir}/client.ext" <<EXT
+basicConstraints=CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=clientAuth
+EXT
+  openssl ecparam -name prime256v1 -genkey -noout -out "${cert_dir}/tls.key"
+  openssl req -new -key "${cert_dir}/tls.key" \
+    -subj "/CN=alephat-temporal-client" \
+    -out "${cert_dir}/tls.csr" >/dev/null 2>&1
+  openssl x509 -req -in "${cert_dir}/tls.csr" \
+    -CA "${cert_dir}/ca.crt" -CAkey "${cert_dir}/ca.key" -CAcreateserial \
+    -days 3650 -sha256 -extfile "${cert_dir}/client.ext" \
+    -out "${cert_dir}/tls.crt" >/dev/null 2>&1
+
+  jq -nc \
+    --arg ca "$(cat "${cert_dir}/ca.crt")" \
+    --arg scrt "$(cat "${cert_dir}/server.crt")" \
+    --arg skey "$(cat "${cert_dir}/server.key")" \
+    --arg ccrt "$(cat "${cert_dir}/tls.crt")" \
+    --arg ckey "$(cat "${cert_dir}/tls.key")" \
+    '{"ca.crt": $ca, "server.crt": $scrt, "server.key": $skey, "tls.crt": $ccrt, "tls.key": $ckey}'
+  rm -rf "${cert_dir}"
 }
 
 if [[ "${USE_EXTERNAL_SECRETS}" == "true" ]]; then
@@ -660,7 +721,19 @@ if [[ "${USE_EXTERNAL_SECRETS}" == "true" ]]; then
   LITELLM_MASTER_KEY="$(gcloud secrets versions access latest --secret=litellm-secrets --project "${PROJECT_ID}" | jq -r '.masterkey')"
   LITELLM_DB_PASSWORD="$(gcloud secrets versions access latest --secret=litellm-postgres --project "${PROJECT_ID}" | jq -r '.password')"
 
-  for s in litellm-secrets litellm-provider-keys litellm-postgres alephat-postgres alephat-secrets alephat-oauth; do
+  if ! gcloud secrets describe temporal-tls --project "${PROJECT_ID}" >/dev/null 2>&1; then
+    echo "Generating Temporal mTLS CA, Server, and Client certificates in Google Cloud Secret Manager..."
+    ensure_gsm_secret "temporal-tls" "$(generate_temporal_tls_json)"
+  fi
+
+  EXISTING_UI_USERS="$(read_k8s_secret_key temporal-ui-auth users)"
+  if [[ -z "${EXISTING_UI_USERS}" ]]; then
+    RESOLVED_UI_PW="${TEMPORAL_UI_PASSWORD:-$(openssl rand -hex 16)}"
+    EXISTING_UI_USERS="${TEMPORAL_UI_USER}:$(openssl passwd -apr1 "${RESOLVED_UI_PW}")"
+  fi
+  ensure_gsm_secret "temporal-ui-auth" "$(jq -nc --arg u "${EXISTING_UI_USERS}" '{users: $u}')"
+
+  for s in litellm-secrets litellm-provider-keys litellm-postgres alephat-postgres alephat-secrets alephat-oauth temporal-tls temporal-ui-auth; do
     if kubectl -n "${PLATFORM_NAMESPACE}" get secret "${s}" >/dev/null 2>&1; then
       owner_kind="$(kubectl -n "${PLATFORM_NAMESPACE}" get secret "${s}" -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || true)"
       if [[ "${owner_kind}" != "ExternalSecret" ]]; then
@@ -683,6 +756,8 @@ if [[ "${USE_EXTERNAL_SECRETS}" == "true" ]]; then
     externalsecret/alephat-postgres \
     externalsecret/alephat-secrets \
     externalsecret/alephat-oauth \
+    externalsecret/temporal-tls \
+    externalsecret/temporal-ui-auth \
     --timeout=3m
 else
   if kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-secrets >/dev/null 2>&1; then
@@ -772,6 +847,21 @@ if [[ "${USE_EXTERNAL_SECRETS}" != "true" ]]; then
       --from-literal=DASHBOARD_JWT_SECRET="${DASHBOARD_JWT_SECRET:-$(openssl rand -hex 32)}" \
       --from-literal=TOKEN_ENCRYPTION_KEY="${TOKEN_ENCRYPTION_KEY:-$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '\n')}"
   fi
+  if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret temporal-tls >/dev/null 2>&1; then
+    echo "Generating Kubernetes Secret 'temporal-tls' for Temporal mTLS..."
+    TLS_JSON="$(generate_temporal_tls_json)"
+    kubectl -n "${PLATFORM_NAMESPACE}" create secret generic temporal-tls \
+      --from-literal=ca.crt="$(printf '%s' "${TLS_JSON}" | jq -r '."ca.crt"')" \
+      --from-literal=server.crt="$(printf '%s' "${TLS_JSON}" | jq -r '."server.crt"')" \
+      --from-literal=server.key="$(printf '%s' "${TLS_JSON}" | jq -r '."server.key"')" \
+      --from-literal=tls.crt="$(printf '%s' "${TLS_JSON}" | jq -r '."tls.crt"')" \
+      --from-literal=tls.key="$(printf '%s' "${TLS_JSON}" | jq -r '."tls.key"')"
+  fi
+  if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret temporal-ui-auth >/dev/null 2>&1; then
+    RESOLVED_UI_PW="${TEMPORAL_UI_PASSWORD:-$(openssl rand -hex 16)}"
+    kubectl -n "${PLATFORM_NAMESPACE}" create secret generic temporal-ui-auth \
+      --from-literal=users="${TEMPORAL_UI_USER}:$(openssl passwd -apr1 "${RESOLVED_UI_PW}")"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -818,13 +908,17 @@ images:
     newName: ${SLACK_RENDERER_IMAGE%:*}
     newTag: ${SLACK_RENDERER_IMAGE##*:}
 EOF
-kubectl -n "${PLATFORM_NAMESPACE}" delete job alephat-migrate --ignore-not-found
+kubectl -n "${PLATFORM_NAMESPACE}" delete job alephat-migrate temporal-namespace --ignore-not-found
 kubectl apply -k "${TMP_KUSTOMIZE}"
 
 kubectl -n "${PLATFORM_NAMESPACE}" patch configmap alephat-config \
   --type merge \
   --patch "{\"data\":{\"DEFAULT_MODEL\":\"${DEFAULT_MODEL}\",\"LITELLM_API_KEY\":\"${LITELLM_MASTER_KEY}\"}}"
 
+kubectl -n "${PLATFORM_NAMESPACE}" rollout status statefulset/alephat-postgresql --timeout=5m
+kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/temporal --timeout=10m
+kubectl -n "${PLATFORM_NAMESPACE}" wait --for=condition=complete job/temporal-namespace --timeout=5m
+kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/temporal-ui --timeout=5m
 kubectl -n "${PLATFORM_NAMESPACE}" wait --for=condition=complete job/alephat-migrate --timeout=5m
 kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/alephat-api --timeout=10m
 kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/alephat-webhook --timeout=10m
@@ -849,9 +943,22 @@ if [[ "${WITH_TRAEFIK}" == "true" ]]; then
   TRAEFIK_IP="$(gcloud compute addresses describe "${TRAEFIK_IP_NAME}" --region "${REGION}" --format='value(address)')"
 
   if [[ -z "${ALEPHAT_HOST}" || "${ALEPHAT_HOST}" == "auto" ]]; then
-    ALEPHAT_HOST="alephat.${TRAEFIK_IP//./-}.sslip.io"
+    BASE_SSLIP="${TRAEFIK_IP//./-}.sslip.io"
+    ALEPHAT_HOST="alephat.${BASE_SSLIP}"
+    TEMPORAL_UI_HOST="${TEMPORAL_UI_HOST:-temporal.${BASE_SSLIP}}"
+    TEMPORAL_GRPC_HOST="${TEMPORAL_GRPC_HOST:-temporal-grpc.${BASE_SSLIP}}"
+  else
+    HOST_SUFFIX="${ALEPHAT_HOST#*.}"
+    if [[ "${HOST_SUFFIX}" == "${ALEPHAT_HOST}" ]]; then
+      HOST_SUFFIX="${ALEPHAT_HOST}"
+    fi
+    TEMPORAL_UI_HOST="${TEMPORAL_UI_HOST:-temporal.${HOST_SUFFIX}}"
+    TEMPORAL_GRPC_HOST="${TEMPORAL_GRPC_HOST:-temporal-grpc.${HOST_SUFFIX}}"
   fi
-  echo "Using Traefik hostname: ${ALEPHAT_HOST} (IP: ${TRAEFIK_IP})"
+  echo "Using Traefik hostnames (IP: ${TRAEFIK_IP}):"
+  echo "  Alephat UI / Webhooks: https://${ALEPHAT_HOST}"
+  echo "  Temporal Web UI:       https://${TEMPORAL_UI_HOST}"
+  echo "  Temporal gRPC (mTLS):  ${TEMPORAL_GRPC_HOST}:7233"
 
   helm repo add traefik https://traefik.github.io/charts --force-update
   helm repo update traefik
@@ -869,12 +976,14 @@ if [[ "${WITH_TRAEFIK}" == "true" ]]; then
       gcloud dns managed-zones create "${DNS_ZONE}" \
         --dns-name="${DNS_DOMAIN%.}." \
         --description="Alephat public DNS zone"
-    gcloud dns record-sets describe "${ALEPHAT_HOST%.}." --zone "${DNS_ZONE}" --type A >/dev/null 2>&1 || \
-      gcloud dns record-sets create "${ALEPHAT_HOST%.}." \
-        --zone "${DNS_ZONE}" \
-        --type A \
-        --ttl 300 \
-        --rrdatas "${TRAEFIK_IP}"
+    for fqdn in "${ALEPHAT_HOST}" "${TEMPORAL_UI_HOST}" "${TEMPORAL_GRPC_HOST}"; do
+      gcloud dns record-sets describe "${fqdn%.}." --zone "${DNS_ZONE}" --type A >/dev/null 2>&1 || \
+        gcloud dns record-sets create "${fqdn%.}." \
+          --zone "${DNS_ZONE}" \
+          --type A \
+          --ttl 300 \
+          --rrdatas "${TRAEFIK_IP}"
+    done
   fi
 
   echo "Waiting for Traefik LoadBalancer (${TRAEFIK_IP}:443) to accept connections..."
@@ -885,7 +994,10 @@ if [[ "${WITH_TRAEFIK}" == "true" ]]; then
     sleep 3
   done
 
-  sed "s/alephat\.example\.com/${ALEPHAT_HOST}/g" \
+  sed \
+    -e "s/alephat\.example\.com/${ALEPHAT_HOST}/g" \
+    -e "s/temporal\.example\.com/${TEMPORAL_UI_HOST}/g" \
+    -e "s/temporal-grpc\.example\.com/${TEMPORAL_GRPC_HOST}/g" \
     "${REPO_ROOT}/deploy/k8s/traefik-ingressroute.yaml" | kubectl apply -f -
 
   ALEPHAT_ORIGIN="https://${ALEPHAT_HOST}"
@@ -894,7 +1006,9 @@ if [[ "${WITH_TRAEFIK}" == "true" ]]; then
     --patch "{\"data\":{\"DASHBOARD_BASE_URL\":\"${ALEPHAT_ORIGIN}\",\"DASHBOARD_API_BASE_URL\":\"${ALEPHAT_ORIGIN}\",\"DASHBOARD_ALLOWED_ORIGINS\":\"${ALEPHAT_ORIGIN}\",\"CORS_ORIGINS\":\"${ALEPHAT_ORIGIN}\"}}"
   kubectl -n "${PLATFORM_NAMESPACE}" rollout restart deployment/alephat-api deployment/alephat-webhook deployment/alephat-harness
   kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/alephat-api deployment/alephat-webhook deployment/alephat-harness --timeout=5m
-  echo "Public HTTPS URL: ${ALEPHAT_ORIGIN}"
+  echo "Public HTTPS URL:        ${ALEPHAT_ORIGIN}"
+  echo "Temporal Web UI URL:     https://${TEMPORAL_UI_HOST}"
+  echo "Temporal gRPC Endpoint:  ${TEMPORAL_GRPC_HOST}:7233 (mTLS client cert in secret/temporal-tls)"
 fi
 
 echo "Deployment complete!"

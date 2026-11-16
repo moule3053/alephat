@@ -30,21 +30,64 @@ def test_postgresql_uses_gke_persistent_disk():
     assert "emptyDir" not in volume
 
 
-def test_temporal_uses_postgresql_persistence_and_keda_scaler():
+def test_temporal_uses_postgresql_persistence_mtls_traefik_and_keda_scaler():
     documents = _documents("temporal.yaml")
+    server_cfg_cm = _document(documents, "ConfigMap", "temporal-server-config")
+    cfg_yaml = yaml.safe_load(server_cfg_cm["data"]["config.template.yaml"])
+    assert cfg_yaml["global"]["tls"]["frontend"]["server"]["requireClientAuth"] is True
+    assert cfg_yaml["global"]["tls"]["internode"]["server"]["requireClientAuth"] is True
+
     deployment = _document(documents, "Deployment", "temporal")
-    env = {
-        item["name"]: item
-        for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
-    }
+    pod_spec = deployment["spec"]["template"]["spec"]
+    env = {item["name"]: item for item in pod_spec["containers"][0]["env"]}
     assert env["DB"]["value"] == "postgres12"
     assert env["POSTGRES_SEEDS"]["value"] == "alephat-postgresql"
+    assert any(v.get("secret", {}).get("secretName") == "temporal-tls" for v in pod_spec["volumes"])
+
+    for manifest, name in (
+        ("api-deployment.yaml", "alephat-api"),
+        ("webhook-deployment.yaml", "alephat-webhook"),
+        ("harness-deployment.yaml", "alephat-harness"),
+    ):
+        workload = _document(_documents(manifest), "Deployment", name)
+        vols = workload["spec"]["template"]["spec"]["volumes"]
+        assert any(v.get("secret", {}).get("secretName") == "temporal-tls" for v in vols)
 
     keda_docs = _documents("harness-keda.yaml")
+    trigger_auth = _document(keda_docs, "TriggerAuthentication", "keda-trigger-auth-temporal")
+    auth_params = {item["parameter"]: item for item in trigger_auth["spec"]["secretTargetRef"]}
+    assert set(auth_params) == {"ca", "cert", "key"}
+    assert auth_params["ca"]["name"] == "temporal-tls"
+
     scaled = _document(keda_docs, "ScaledObject", "alephat-harness")
     trigger = scaled["spec"]["triggers"][0]
     assert trigger["type"] == "temporal"
+    assert trigger["authenticationRef"]["name"] == "keda-trigger-auth-temporal"
     assert trigger["metadata"]["taskQueue"] == "alephat-agents"
+    assert trigger["metadata"]["queueTypes"] == "workflow,activity"
+    assert trigger["metadata"]["includeRunningWorkflowCount"] == "true"
+
+    with (DEPLOY_DIR / "traefik-values.yaml").open(encoding="utf-8") as traefik_values_file:
+        traefik_values = yaml.safe_load(traefik_values_file)
+    assert traefik_values["ports"]["temporal"]["exposedPort"] == 7233
+    assert traefik_values["ports"]["temporal"]["http"]["tls"]["enabled"] is True
+
+    ingress_docs = _documents("traefik-ingressroute.yaml")
+    tls_option = _document(ingress_docs, "TLSOption", "temporal-grpc-mtls")
+    assert tls_option["spec"]["clientAuth"]["clientAuthType"] == "RequireAndVerifyClientCert"
+    assert tls_option["spec"]["clientAuth"]["secretNames"] == ["temporal-tls"]
+
+    transport = _document(ingress_docs, "ServersTransport", "temporal-grpc-backend")
+    assert transport["spec"]["certificatesSecrets"] == ["temporal-tls"]
+    assert transport["spec"]["rootCAs"] == [{"secret": "temporal-tls"}]
+
+    grpc_route = _document(ingress_docs, "IngressRoute", "temporal-grpc")
+    assert grpc_route["spec"]["entryPoints"] == ["websecure", "temporal"]
+    assert grpc_route["spec"]["tls"]["certResolver"] == "letsencrypt"
+    assert (
+        _document(ingress_docs, "IngressRoute", "temporal-ui")["spec"]["tls"]["certResolver"]
+        == "letsencrypt"
+    )
 
 
 def test_litellm_postgresql_uses_gke_persistent_disk():

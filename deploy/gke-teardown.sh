@@ -15,6 +15,8 @@ CLUSTER_NAME="${CLUSTER_NAME:-alephat}"
 AR_REPOSITORY="${AR_REPOSITORY:-alephat}"
 TRAEFIK_IP_NAME="${TRAEFIK_IP_NAME:-alephat-traefik}"
 ALEPHAT_HOST="${ALEPHAT_HOST:-}"
+TEMPORAL_UI_HOST="${TEMPORAL_UI_HOST:-}"
+TEMPORAL_GRPC_HOST="${TEMPORAL_GRPC_HOST:-}"
 DNS_ZONE="${DNS_ZONE:-}"
 
 DELETE_IMAGES=false
@@ -33,6 +35,8 @@ Options:
   --cluster-name <name>      GKE cluster name (default: alephat)
   --traefik-ip-name <name>   Static IP address name (default: alephat-traefik)
   --host <fqdn>              Public hostname whose Cloud DNS A record should be deleted
+  --temporal-ui-host <fqdn>  Temporal UI hostname whose Cloud DNS A record should be deleted
+  --temporal-grpc-host <fqdn> Temporal gRPC hostname whose Cloud DNS A record should be deleted
   --dns-zone <zone-name>     Cloud DNS managed zone name
   --ar-repository <name>     Artifact Registry repository name (default: alephat)
   --delete-images            Also delete the Artifact Registry repository and images
@@ -51,6 +55,8 @@ while [[ $# -gt 0 ]]; do
     --cluster-name) CLUSTER_NAME="$2"; shift 2 ;;
     --traefik-ip-name) TRAEFIK_IP_NAME="$2"; shift 2 ;;
     --host) ALEPHAT_HOST="$2"; shift 2 ;;
+    --temporal-ui-host) TEMPORAL_UI_HOST="$2"; shift 2 ;;
+    --temporal-grpc-host) TEMPORAL_GRPC_HOST="$2"; shift 2 ;;
     --dns-zone) DNS_ZONE="$2"; shift 2 ;;
     --ar-repository) AR_REPOSITORY="$2"; shift 2 ;;
     --delete-images) DELETE_IMAGES=true; shift ;;
@@ -95,16 +101,24 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   exit 0
 fi
 
-# 1. Delete Cloud DNS A record if specified
+# 1. Delete Cloud DNS A records if specified
 if [[ -n "${ALEPHAT_HOST}" && -n "${DNS_ZONE}" ]]; then
-  if gcloud dns record-sets describe "${ALEPHAT_HOST%.}." --project "${PROJECT_ID}" --zone "${DNS_ZONE}" --type A >/dev/null 2>&1; then
-    echo "Deleting Cloud DNS A record '${ALEPHAT_HOST%.}.' from zone '${DNS_ZONE}'..."
-    gcloud dns record-sets delete "${ALEPHAT_HOST%.}." \
-      --project "${PROJECT_ID}" \
-      --zone "${DNS_ZONE}" \
-      --type A \
-      --quiet
+  HOST_SUFFIX="${ALEPHAT_HOST#*.}"
+  if [[ "${HOST_SUFFIX}" == "${ALEPHAT_HOST}" ]]; then
+    HOST_SUFFIX="${ALEPHAT_HOST}"
   fi
+  RESOLVED_UI_HOST="${TEMPORAL_UI_HOST:-temporal.${HOST_SUFFIX}}"
+  RESOLVED_GRPC_HOST="${TEMPORAL_GRPC_HOST:-temporal-grpc.${HOST_SUFFIX}}"
+  for fqdn in "${ALEPHAT_HOST}" "${RESOLVED_UI_HOST}" "${RESOLVED_GRPC_HOST}"; do
+    if gcloud dns record-sets describe "${fqdn%.}." --project "${PROJECT_ID}" --zone "${DNS_ZONE}" --type A >/dev/null 2>&1; then
+      echo "Deleting Cloud DNS A record '${fqdn%.}.' from zone '${DNS_ZONE}'..."
+      gcloud dns record-sets delete "${fqdn%.}." \
+        --project "${PROJECT_ID}" \
+        --zone "${DNS_ZONE}" \
+        --type A \
+        --quiet
+    fi
+  done
 fi
 
 # 2. Delete GKE Cluster
@@ -192,7 +206,9 @@ if [[ "${DELETE_SECRETS}" == "true" ]]; then
     litellm-provider-keys \
     alephat-postgres \
     alephat-secrets \
-    alephat-oauth; do
+    alephat-oauth \
+    temporal-tls \
+    temporal-ui-auth; do
     if gcloud secrets describe "${secret}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
       echo "Deleting Google Cloud Secret Manager secret '${secret}'..."
       gcloud secrets delete "${secret}" --project "${PROJECT_ID}" --quiet

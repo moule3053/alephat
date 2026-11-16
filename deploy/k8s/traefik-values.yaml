@@ -33,6 +33,15 @@ ports:
     http:
       tls:
         enabled: true
+  temporal:
+    port: 7233
+    expose:
+      default: true
+    exposedPort: 7233
+    protocol: TCP
+    http:
+      tls:
+        enabled: true
 
 persistence:
   enabled: true

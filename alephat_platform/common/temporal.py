@@ -8,6 +8,7 @@ import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
+from pathlib import Path
 
 from cryptography.fernet import Fernet
 from temporalio.api.common.v1 import Payload
@@ -34,7 +35,7 @@ from temporalio.common import (
 from temporalio.contrib.pydantic import PydanticPayloadConverter, ToJsonOptions
 from temporalio.contrib.workflow_streams import WorkflowStreamState
 from temporalio.converter import DataConverter, PayloadCodec
-from temporalio.service import RPCError, RPCStatusCode
+from temporalio.service import RPCError, RPCStatusCode, TLSConfig
 
 from alephat_platform.common.config import Settings, get_settings
 
@@ -233,6 +234,43 @@ class DataConverterFactory:
         return ExcludeUnsetPydanticConverter
 
 
+class TemporalTlsBuilder:
+    """Build ``temporalio.service.TLSConfig`` from platform settings and mounted PEM files."""
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+
+    def build(self) -> TLSConfig | bool:
+        has_cert_paths = bool(
+            self._settings.temporal_tls_ca_cert_path or self._settings.temporal_tls_client_cert_path
+        )
+        if not self._settings.temporal_tls_enabled and not has_cert_paths:
+            return False
+        ca_bytes = (
+            Path(self._settings.temporal_tls_ca_cert_path).read_bytes()
+            if self._settings.temporal_tls_ca_cert_path
+            else None
+        )
+        cert_bytes = (
+            Path(self._settings.temporal_tls_client_cert_path).read_bytes()
+            if self._settings.temporal_tls_client_cert_path
+            else None
+        )
+        key_bytes = (
+            Path(self._settings.temporal_tls_client_key_path).read_bytes()
+            if self._settings.temporal_tls_client_key_path
+            else None
+        )
+        if ca_bytes is None and cert_bytes is None and not self._settings.temporal_tls_server_name:
+            return True
+        return TLSConfig(
+            server_root_ca_cert=ca_bytes,
+            client_cert=cert_bytes,
+            client_private_key=key_bytes,
+            domain=self._settings.temporal_tls_server_name,
+        )
+
+
 class TemporalPlatformClient:
     """Stateful Temporal client wrapper shared by API and webhook services."""
 
@@ -247,6 +285,7 @@ class TemporalPlatformClient:
         self.namespace = cfg.temporal_namespace
         self.task_queue = cfg.temporal_task_queue
         self._encryption_key = cfg.token_encryption_key
+        self._tls_builder = TemporalTlsBuilder(cfg)
         self._client = client
         self._lock = asyncio.Lock()
 
@@ -279,6 +318,7 @@ class TemporalPlatformClient:
                     self.address,
                     namespace=self.namespace,
                     data_converter=converter,
+                    tls=self._tls_builder.build(),
                 )
             return self._client
 
