@@ -62,8 +62,9 @@ Cloud coding follow-ups reuse the thread’s context and sandbox; independent th
 
 [Deep Agents](https://github.com/langchain-ai/deepagents) supplies planning, filesystem, shell, skills, and subagent primitives.
 [LangGraph](https://github.com/langchain-ai/langgraph) provides durable execution and thread state.
-Alephat adds engineering tools, integrations, authorization, and user interfaces.
-The graph entrypoints are declared in [`langgraph.json`](langgraph.json), with an overview in [`AGENTS.md`](AGENTS.md).
+Alephat adds engineering tools, integrations, authorization, and user interfaces (web dashboard in `ui/`, experimental Electron app in `desktop/`, and the `oswe` CLI in `cli/`).
+Agent, reviewer, and review-scout runs execute through the Managed Deep Agents project in [`mda/`](mda/README.md) against the stateless backend in `openswe/` (with entrypoints declared in [`langgraph.json`](langgraph.json)), alongside the standalone multi-service Kubernetes/Compose platform in `alephat_platform/` and `slack-renderer/`.
+See [`AGENTS.md`](AGENTS.md) for the full architecture overview and conventions.
 
 Cloud coding runs in persistent, per-thread Linux sandboxes with tooling supplied by workspace scripts or snapshots.
 An unreachable coding sandbox is not silently replaced.
@@ -86,7 +87,9 @@ Local execution does not provide cloud sandbox isolation.
 
 ## Documentation
 
-- [Platform guide](docs/PLATFORM.md) — Multi-service Kubernetes platform architecture and local Compose workflow
+- [Platform guide](docs/PLATFORM.md) — Multi-service Kubernetes platform architecture, rich Slack rendering, and local Compose workflow
+- [Managed Deep Agents runtime](mda/README.md) — Unified `open-swe` graph runtime and backend `/agent-api` contract
+- [Repository & agent guide](AGENTS.md) — Architecture overview, development conventions, and testing rules
 - [Installation guide](docs/INSTALLATION.md) — Deploy for a team: LangGraph Platform or Docker, the GitHub and Slack apps, model providers, environment variables, and the optional Linear trigger
 - [Development guide](docs/DEVELOPMENT.md) — Run it on your machine, with hot reload for the dashboard and an ngrok tunnel for webhooks
 - [Customization guide](docs/CUSTOMIZATION.md) — Models, sandboxes, tools, skills, prompts, triggers, and middleware
@@ -414,7 +417,7 @@ Set these repository permissions:
 - Actions: Read-only when the agent should inspect GitHub Actions logs
 - Organization members: Read-only when `ALLOWED_GITHUB_ORGS` is used to gate login
 
-Subscribe to `Issue comment`, `Pull request review`, `Pull request review comment`, `Check run`, `Check suite`, and `Workflow run`.
+Subscribe to `Issues`, `Issue comment`, `Pull request review`, `Pull request review comment`, `Check run`, `Check suite`, and `Workflow run`.
 The [detailed GitHub App permissions guide](docs/INSTALLATION.md#3-create-a-github-app) explains optional status events and why each permission is needed.
 
 After creating the app:
@@ -589,7 +592,7 @@ kubectl -n "$PLATFORM_NAMESPACE" get hpa
 ```
 
 The platform base intentionally does not include `harness-keda.yaml`: installing the base must remain possible before KEDA's CRDs exist.
-Once the `ScaledObject` is active, the harness can scale to zero while idle and scale out as tasks accumulate.
+Once the `ScaledObject` is active, KEDA keeps one harness replica running while idle (`minReplicaCount: 1`, so claimed tasks are not interrupted) and scales out up to 50 replicas as pending tasks accumulate, with each worker running up to 4 tasks concurrently.
 
 Check all components:
 
@@ -749,7 +752,7 @@ kubectl -n "$SANDBOX_NAMESPACE" exec "$SANDBOX_POD" -- git diff --stat
 
 The first command must print `kata-qemu`.
 A successful task should show model events in the UI, command/tool events from the sandbox, and a final response.
-After the cooldown period, KEDA should return the harness to zero replicas if no tasks remain.
+After the cooldown period, KEDA should return the harness to one replica (`minReplicaCount: 1`) if no tasks remain.
 
 ### 11. Production hardening and cleanup
 
