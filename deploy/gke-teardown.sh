@@ -140,8 +140,8 @@ done < <(
   gcloud compute disks list \
     --project "${PROJECT_ID}" \
     --zones "${ZONE}" \
-    --filter="NOT users:* AND labels.goog-k8s-cluster-name=${CLUSTER_NAME}" \
-    --format="value(name)" 2>/dev/null || true
+    --format=json 2>/dev/null \
+    | jq -r --arg c "${CLUSTER_NAME}" '.[] | select(((.users // []) | length == 0) and .labels["goog-k8s-cluster-name"] == $c) | .name' || true
 )
 if [[ ${#ORPHANED_DISKS[@]} -gt 0 ]]; then
   echo "Deleting unattached PVC persistent disks in '${ZONE}': ${ORPHANED_DISKS[*]}..."
