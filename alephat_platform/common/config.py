@@ -131,6 +131,9 @@ class Settings:
     max_run_duration_seconds: int = field(
         default_factory=lambda: _ENV.get_int("MAX_RUN_DURATION_SECONDS", 4 * 3600)
     )
+    agent_recursion_limit: int = field(
+        default_factory=lambda: _ENV.get_int("AGENT_RECURSION_LIMIT", 1000)
+    )
     max_run_retries: int = field(default_factory=lambda: _ENV.get_int("MAX_RUN_RETRIES", 3))
     api_auth_disabled: bool = field(
         default_factory=lambda: _ENV.get_bool("API_AUTH_DISABLED", True)

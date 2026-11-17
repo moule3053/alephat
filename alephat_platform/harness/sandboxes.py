@@ -179,6 +179,10 @@ class AgentSandboxProvider(SandboxProviderBase):
     """Kubernetes-sigs/agent-sandbox provider using in-cluster Kubernetes REST."""
 
     name = SandboxProvider.AGENT_SANDBOX.value
+    _CACHE_TTL_SECONDS = 60.0
+
+    def __init__(self) -> None:
+        self._resolved_cache: dict[str, tuple[float, SandboxRef]] = {}
 
     def _kube_config(self) -> tuple[str, dict[str, str], ssl.SSLContext]:
         token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
@@ -361,14 +365,20 @@ class AgentSandboxProvider(SandboxProviderBase):
         raise TimeoutError(f"Timed out waiting for agent-sandbox claim {sid}")
 
     async def connect(self, sandbox_id: str) -> SandboxRef:
+        now = asyncio.get_running_loop().time()
+        cached = self._resolved_cache.get(sandbox_id)
+        if cached is not None and (now - cached[0]) < self._CACHE_TTL_SECONDS:
+            return cached[1]
         settings = get_settings()
-        return await self._resolve_ref(
+        resolved = await self._resolve_ref(
             SandboxRef(
                 provider=self.name,
                 sandbox_id=sandbox_id,
                 metadata={"namespace": settings.agent_sandbox_namespace},
             )
         )
+        self._resolved_cache[sandbox_id] = (now, resolved)
+        return resolved
 
     async def exec(self, ref: SandboxRef, command: str, timeout: int = 120) -> ExecResult:
         if not isinstance(ref.handle, AgentSandboxBackend):
@@ -381,6 +391,7 @@ class AgentSandboxProvider(SandboxProviderBase):
         logger.info("Stopping agent_sandbox", extra={"sandbox_id": ref.sandbox_id})
 
     async def delete(self, ref: SandboxRef) -> None:
+        self._resolved_cache.pop(ref.sandbox_id, None)
         settings = get_settings()
         try:
             await self._request(

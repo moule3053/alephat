@@ -612,7 +612,7 @@ class TaskAgentWorkflow:
             },
         )
         runnable_cfg: RunnableConfig = {
-            "recursion_limit": 100,
+            "recursion_limit": max(prepared.recursion_limit, 100),
             "configurable": {"thread_id": f"{self._task_id}:{run_id}"},
         }
 

@@ -682,6 +682,7 @@ class PlatformActivities:
             slack_instructions=slack_instructions,
             mcp_tools=mcp_wire_specs,
             prior_messages=prior_messages,
+            recursion_limit=self.settings.agent_recursion_limit,
         )
 
     @activity.defn(name=RECORD_STEP_ACTIVITY)

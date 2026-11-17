@@ -54,6 +54,7 @@ class PreparedTurn:
     slack_instructions: str = ""
     mcp_tools: list[McpToolWireSpec] = field(default_factory=list)
     prior_messages: list[dict[str, object]] = field(default_factory=list)
+    recursion_limit: int = 1000
 
 
 @dataclass
