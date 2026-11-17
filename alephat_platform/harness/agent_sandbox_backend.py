@@ -1,5 +1,6 @@
 """Deep Agents backend for the Kubernetes Agent Sandbox Python runtime."""
 
+import asyncio
 import posixpath
 import secrets
 import shlex
@@ -40,10 +41,12 @@ class AgentSandboxBackend(BaseSandbox):
         sandbox_id: str,
         base_url: str,
         *,
+        fallback_url: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._id = sandbox_id
         self.base_url = base_url.rstrip("/")
+        self.fallback_url = fallback_url.rstrip("/") if fallback_url else None
         self._transport = transport
 
     @property
@@ -92,12 +95,26 @@ class AgentSandboxBackend(BaseSandbox):
         timeout: int | float,
         **kwargs: Any,
     ) -> httpx.Response:
-        async with httpx.AsyncClient(
-            base_url=self.base_url,
-            timeout=timeout,
-            transport=self._transport,
-        ) as client:
-            return await client.request(method, path, **kwargs)
+        last_exc: httpx.ConnectError | None = None
+        candidates = [self.base_url]
+        if self.fallback_url and self.fallback_url != self.base_url:
+            candidates.append(self.fallback_url)
+        for attempt in range(8):
+            for target_url in candidates:
+                try:
+                    async with httpx.AsyncClient(
+                        base_url=target_url,
+                        timeout=timeout,
+                        transport=self._transport,
+                    ) as client:
+                        return await client.request(method, path, **kwargs)
+                except httpx.ConnectError as exc:
+                    last_exc = exc
+            if self._transport is not None or attempt == 7:
+                break
+            await asyncio.sleep(min(0.5 * (attempt + 1), 2.0))
+        assert last_exc is not None
+        raise last_exc
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         raise NotImplementedError

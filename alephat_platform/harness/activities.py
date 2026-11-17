@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+import httpx
 from langchain_core.load import dumpd
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.messages import message_to_dict as langchain_message_to_dict
@@ -574,17 +575,20 @@ class PlatformActivities:
                     base_ref=snapshot_base_ref,
                 )
             except Exception as exc:
-                async with session_scope() as session:
-                    await TaskStore(session).append_event(
-                        task_id=task_id,
-                        run_id=run_id,
-                        event_type="repository_error",
-                        payload={"repo": snapshot_repo, "error": str(exc)},
-                    )
+                is_transient = isinstance(exc, (httpx.HTTPError, TimeoutError, OSError))
+                attempt = activity.info().attempt if activity.in_activity() else 3
+                if not is_transient or attempt >= 3:
+                    async with session_scope() as session:
+                        await TaskStore(session).append_event(
+                            task_id=task_id,
+                            run_id=run_id,
+                            event_type="repository_error",
+                            payload={"repo": snapshot_repo, "error": str(exc)},
+                        )
                 raise ApplicationError(
                     str(exc),
                     type="RepositorySetupError",
-                    non_retryable=True,
+                    non_retryable=not is_transient,
                 ) from exc
             async with session_scope() as session:
                 await TaskStore(session).append_event(

@@ -315,6 +315,13 @@ EOF
           ports:
             - name: toolbox
               containerPort: 8888
+          readinessProbe:
+            tcpSocket:
+              port: toolbox
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            timeoutSeconds: 2
+            failureThreshold: 30
           resources:
             requests:
               cpu: 250m

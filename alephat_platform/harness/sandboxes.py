@@ -301,11 +301,23 @@ class AgentSandboxProvider(SandboxProviderBase):
                     raise
             host = f"{service_name}.{settings.agent_sandbox_namespace}.svc.cluster.local"
         base_url = f"http://{host}:8888"
+        pod_ips = status.get("podIPs")
+        first_ip = (
+            str(pod_ips[0]).strip()
+            if isinstance(pod_ips, list) and pod_ips and isinstance(pod_ips[0], str)
+            else ""
+        )
+        fallback_url = f"http://{first_ip}:8888" if first_ip and ":" not in first_ip else None
         return SandboxRef(
             provider=self.name,
             sandbox_id=ref.sandbox_id,
-            metadata={**ref.metadata, "sandbox_name": str(sandbox_name), "base_url": base_url},
-            handle=AgentSandboxBackend(ref.sandbox_id, base_url),
+            metadata={
+                **ref.metadata,
+                "sandbox_name": str(sandbox_name),
+                "base_url": base_url,
+                **({"pod_ip": first_ip} if first_ip else {}),
+            },
+            handle=AgentSandboxBackend(ref.sandbox_id, base_url, fallback_url=fallback_url),
         )
 
     async def create(

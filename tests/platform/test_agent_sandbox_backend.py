@@ -155,6 +155,7 @@ async def test_resolved_agent_sandbox_has_deep_agents_backend(monkeypatch):
             "status": {
                 "conditions": [{"type": "Ready", "status": "True"}],
                 "serviceFQDN": "sandbox-1.alephat-sandboxes.svc.cluster.local",
+                "podIPs": ["10.32.2.26"],
             }
         }
 
@@ -165,6 +166,25 @@ async def test_resolved_agent_sandbox_has_deep_agents_backend(monkeypatch):
     assert isinstance(ref.handle, AgentSandboxBackend)
     assert ref.handle.id == "sandbox-1"
     assert ref.handle.workspace == "/app/repo"
+    assert ref.handle.fallback_url == "http://10.32.2.26:8888"
+
+    seen_hosts: list[str] = []
+
+    async def dns_race_handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host or "")
+        if request.url.host == "sandbox-1.alephat-sandboxes.svc.cluster.local":
+            raise httpx.ConnectError("headless service DNS not propagated yet", request=request)
+        return httpx.Response(200, json={"exit_code": 0, "stdout": "cloned\n", "stderr": ""})
+
+    fallback_backend = AgentSandboxBackend(
+        "sandbox-1",
+        "http://sandbox-1.alephat-sandboxes.svc.cluster.local:8888",
+        fallback_url="http://10.32.2.26:8888",
+        transport=httpx.MockTransport(dns_race_handler),
+    )
+    res = await fallback_backend.aexecute("git status")
+    assert res.exit_code == 0
+    assert seen_hosts == ["sandbox-1.alephat-sandboxes.svc.cluster.local", "10.32.2.26"]
 
 
 @pytest.mark.asyncio
