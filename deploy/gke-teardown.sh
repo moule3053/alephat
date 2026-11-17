@@ -140,7 +140,7 @@ done < <(
   gcloud compute disks list \
     --project "${PROJECT_ID}" \
     --zones "${ZONE}" \
-    --filter="-users:* AND labels.goog-k8s-cluster-name=${CLUSTER_NAME}" \
+    --filter="NOT users:* AND labels.goog-k8s-cluster-name=${CLUSTER_NAME}" \
     --format="value(name)" 2>/dev/null || true
 )
 if [[ ${#ORPHANED_DISKS[@]} -gt 0 ]]; then
