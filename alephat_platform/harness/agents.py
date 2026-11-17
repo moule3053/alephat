@@ -100,7 +100,13 @@ class PlatformModelProvider:
         if resolve_llm_mode() == "litellm":
             from langchain_openai import ChatOpenAI
 
-            openai_effort = effort if effort in {"low", "medium", "high"} else None
+            openai_effort = (
+                "high"
+                if effort in {"high", "xhigh", "max"}
+                else effort
+                if effort in {"low", "medium"}
+                else None
+            )
             return ChatOpenAI(
                 model=model_id,
                 api_key=settings.litellm_api_key,

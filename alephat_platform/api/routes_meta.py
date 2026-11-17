@@ -26,12 +26,19 @@ router = APIRouter(tags=["meta"])
 class OrgModelCatalog:
     """Read and normalize configured model lists from OrgSettings."""
 
-    def resolve(self, row: OrgSettings | None, default_model: str) -> list[str]:
+    def resolve(
+        self,
+        row: OrgSettings | None,
+        default_model: str,
+        enabled_models: tuple[str, ...] = (),
+    ) -> list[str]:
         configured = (row.settings or {}).get("models") if row else None
         if isinstance(configured, list):
             models = [str(model) for model in configured if str(model).strip()]
             if models:
                 return models
+        if enabled_models:
+            return list(enabled_models)
         return [row.default_model if row and row.default_model else default_model]
 
 
@@ -198,7 +205,7 @@ async def list_models(
 ) -> dict[str, object]:
     settings = get_settings()
     row = await db.get(OrgSettings, auth.org_id)
-    models = MODEL_CATALOG.resolve(row, settings.default_model)
+    models = MODEL_CATALOG.resolve(row, settings.default_model, settings.enabled_models)
     return {
         "items": [
             {

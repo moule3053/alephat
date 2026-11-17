@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, MultiFernet
 from temporalio.api.common.v1 import Payload
 from temporalio.client import (
     Client,
@@ -143,7 +143,20 @@ class PlatformPayloadCodec(PayloadCodec):
     """Compresses large payloads and optionally encrypts Event History at rest."""
 
     def __init__(self, encryption_key: str | None = None) -> None:
-        self._fernet = Fernet(encryption_key.encode()) if encryption_key else None
+        self._fernet = self._build_fernet(encryption_key)
+
+    @staticmethod
+    def _build_fernet(encryption_key: str | None) -> MultiFernet | None:
+        if not encryption_key:
+            return None
+        fernets: list[Fernet] = []
+        for raw_part in encryption_key.replace("\n", ",").split(","):
+            part = raw_part.strip()
+            if not part:
+                continue
+            padded = part + ("=" * ((4 - len(part) % 4) % 4))
+            fernets.append(Fernet(padded.encode()))
+        return MultiFernet(fernets) if fernets else None
 
     async def encode(self, payloads: Sequence[Payload]) -> list[Payload]:
         encoded: list[Payload] = []

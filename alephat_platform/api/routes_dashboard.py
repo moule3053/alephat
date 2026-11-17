@@ -5,7 +5,7 @@ import json
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, NotRequired, TypedDict
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -351,19 +351,50 @@ async def get_repos() -> dict[str, Any]:
     }
 
 
-@router.get("/options")
-async def get_options() -> dict[str, Any]:
-    from openswe.dashboard.options import model_profile_context_window
+class DashboardModelOption(TypedDict):
+    id: str
+    label: str
+    efforts: list[str]
+    default_effort: str
+    supports_images: bool
+    context_window: NotRequired[int]
 
-    settings = get_settings()
-    default_model = settings.default_model or "google:gemini-3.5-flash"
-    models: list[dict[str, Any]] = [
+
+class DashboardOptionsResponse(TypedDict):
+    models: list[DashboardModelOption]
+    default_agent_model: str
+    default_agent_reasoning_effort: str
+    default_agent_subagent_model: str
+    default_agent_subagent_reasoning_effort: str
+
+
+class DashboardModelCatalog:
+    """Resolve model selector options for the dashboard from known profiles and ENABLED_MODELS."""
+
+    KNOWN_MODELS: tuple[DashboardModelOption, ...] = (
+        {
+            "id": "google:gemini-4-hydrogen",
+            "label": "Gemini 4 Hydrogen",
+            "efforts": ["low", "medium", "high", "xhigh"],
+            "default_effort": "high",
+            "supports_images": True,
+            "context_window": 1048576,
+        },
+        {
+            "id": "google:gemini-4-carbon",
+            "label": "Gemini 4 Carbon",
+            "efforts": ["low", "medium", "high"],
+            "default_effort": "medium",
+            "supports_images": True,
+            "context_window": 1048576,
+        },
         {
             "id": "google:gemini-4-argon",
             "label": "Gemini 4 Argon",
             "efforts": ["low", "medium", "high"],
             "default_effort": "medium",
             "supports_images": True,
+            "context_window": 1048576,
         },
         {
             "id": "google_genai:gemini-4-argon",
@@ -371,6 +402,15 @@ async def get_options() -> dict[str, Any]:
             "efforts": ["low", "medium", "high"],
             "default_effort": "medium",
             "supports_images": True,
+            "context_window": 1048576,
+        },
+        {
+            "id": "google:gemini-3.8-flash",
+            "label": "Gemini 3.8 Flash",
+            "efforts": ["low", "medium", "high"],
+            "default_effort": "medium",
+            "supports_images": True,
+            "context_window": 1048576,
         },
         {
             "id": "google:gemini-3.5-flash",
@@ -378,6 +418,7 @@ async def get_options() -> dict[str, Any]:
             "efforts": ["minimal", "low", "medium", "high"],
             "default_effort": "medium",
             "supports_images": True,
+            "context_window": 1048576,
         },
         {
             "id": "google_genai:gemini-3.5-flash",
@@ -385,6 +426,31 @@ async def get_options() -> dict[str, Any]:
             "efforts": ["minimal", "low", "medium", "high"],
             "default_effort": "medium",
             "supports_images": True,
+            "context_window": 1048576,
+        },
+        {
+            "id": "google:gemini-3.1-pro-preview",
+            "label": "Gemini 3.1 Pro Preview",
+            "efforts": ["low", "medium", "high"],
+            "default_effort": "medium",
+            "supports_images": True,
+            "context_window": 1048576,
+        },
+        {
+            "id": "google:gemini-2.5-pro",
+            "label": "Gemini 2.5 Pro",
+            "efforts": ["low", "medium", "high"],
+            "default_effort": "medium",
+            "supports_images": True,
+            "context_window": 1048576,
+        },
+        {
+            "id": "google:gemini-2.5-flash",
+            "label": "Gemini 2.5 Flash",
+            "efforts": ["minimal", "low", "medium", "high"],
+            "default_effort": "medium",
+            "supports_images": True,
+            "context_window": 1048576,
         },
         {
             "id": "openai:gpt-4o",
@@ -421,16 +487,62 @@ async def get_options() -> dict[str, Any]:
             "default_effort": "medium",
             "supports_images": False,
         },
-    ]
-    for model in models:
-        profile_id = (
-            f"google_genai:{model['id'].split(':', 1)[1]}"
-            if model["id"].startswith("google:")
-            else model["id"]
-        )
-        context_window = model_profile_context_window(profile_id)
-        if context_window is not None:
-            model["context_window"] = context_window
+    )
+
+    def build_entry(self, model_id: str) -> DashboardModelOption:
+        from openswe.dashboard.options import model_profile_context_window
+
+        by_id: dict[str, DashboardModelOption] = {item["id"]: item for item in self.KNOWN_MODELS}
+        known = by_id.get(model_id)
+        if known is not None:
+            entry: DashboardModelOption = {
+                "id": known["id"],
+                "label": known["label"],
+                "efforts": list(known["efforts"]),
+                "default_effort": known["default_effort"],
+                "supports_images": known["supports_images"],
+            }
+            if "context_window" in known:
+                entry["context_window"] = known["context_window"]
+        else:
+            short = model_id.split(":", 1)[-1]
+            is_gemini = model_id.startswith(("google:", "google_genai:", "gemini"))
+            efforts: list[str] = ["low", "medium", "high"] if is_gemini else []
+            fallback: DashboardModelOption = {
+                "id": model_id,
+                "label": short,
+                "efforts": efforts,
+                "default_effort": "medium" if is_gemini else "",
+                "supports_images": True,
+            }
+            if is_gemini:
+                fallback["context_window"] = 1048576
+            entry = fallback
+        if "context_window" not in entry:
+            profile_id = (
+                f"google_genai:{model_id.split(':', 1)[1]}"
+                if model_id.startswith("google:")
+                else model_id
+            )
+            context_window = model_profile_context_window(profile_id)
+            if context_window is not None:
+                entry["context_window"] = context_window
+        return entry
+
+    def resolve(self, enabled_models: tuple[str, ...]) -> list[DashboardModelOption]:
+        if enabled_models:
+            return [self.build_entry(model_id) for model_id in enabled_models]
+        return [self.build_entry(item["id"]) for item in self.KNOWN_MODELS]
+
+
+DASHBOARD_MODEL_CATALOG = DashboardModelCatalog()
+
+
+@router.get("/options")
+async def get_options() -> DashboardOptionsResponse:
+    settings = get_settings()
+    default_model = settings.default_model or "google:gemini-4-hydrogen"
+    models = DASHBOARD_MODEL_CATALOG.resolve(settings.enabled_models)
     return {
         "models": models,
         "default_agent_model": default_model,

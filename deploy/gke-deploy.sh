@@ -14,8 +14,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 if [[ -f "${SCRIPT_DIR}/.env" ]]; then
-  while IFS='=' read -r k v; do
-    [[ -z "${k}" || "${k}" =~ ^# ]] && continue
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# || "${line}" != *"="* ]] && continue
+    k="${line%%=*}"
+    v="${line#*=}"
     v="${v#\"}"
     v="${v%\"}"
     v="${v#\'}"
@@ -43,7 +45,9 @@ ZONE="${ZONE:-}"
 CLUSTER_NAME="${CLUSTER_NAME:-alephat}"
 SANDBOX_RUNTIME="${SANDBOX_RUNTIME:-kata}"          # kata | gvisor
 NODE_SIZE="${NODE_SIZE:-n2-standard-4}"
-NUM_NODES="${NUM_NODES:-2}"
+NUM_NODES="${NUM_NODES:-3}"
+MIN_NODES="${MIN_NODES:-2}"
+MAX_NODES="${MAX_NODES:-6}"
 K8S_VERSION="${K8S_VERSION:-latest}"
 RELEASE_CHANNEL="${RELEASE_CHANNEL:-regular}"
 
@@ -60,7 +64,7 @@ AR_REPOSITORY="${AR_REPOSITORY:-alephat}"
 PLATFORM_NAMESPACE="${PLATFORM_NAMESPACE:-alephat}"
 SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-alephat-sandboxes}"
 
-ENABLED_MODELS="${ENABLED_MODELS:-google:gemini-4-argon,google_genai:gemini-4-argon,google:gemini-3.5-flash,gemini-5.6-flash,openai:gpt-4o-mini,anthropic:claude-3-5-sonnet}"
+ENABLED_MODELS="${ENABLED_MODELS:-google:gemini-4-hydrogen,google:gemini-4-carbon,google:gemini-4-argon,google:gemini-3.8-flash,google:gemini-3.5-flash,google:gemini-3.1-pro-preview,google:gemini-2.5-pro,google:gemini-2.5-flash}"
 DEFAULT_MODEL="${DEFAULT_MODEL:-}"
 
 WITH_TRAEFIK=false
@@ -218,16 +222,16 @@ render_litellm_model_list() {
     else
       alias="${entry}"
       case "${alias}" in
-        google:gemini-4-argon|google_genai:gemini-4-argon|gemini-4-argon)
-          target="gemini/gemini-4-argon"
-          api_key_line="        api_key: os.environ/GEMINI_API_KEY"
-          ;;
-        google:gemini-3.5-flash|google_genai:gemini-3.5-flash)
-          target="gemini/gemini-3.5-flash"
-          api_key_line="        api_key: os.environ/GEMINI_API_KEY"
-          ;;
         gemini-5.6-flash)
           target="vertex_ai/gemini-2.5-flash"
+          ;;
+        google:*|google_genai:*|gemini:*)
+          target="gemini/${alias#*:}"
+          api_key_line="        api_key: os.environ/GEMINI_API_KEY"
+          ;;
+        gemini-*)
+          target="gemini/${alias}"
+          api_key_line="        api_key: os.environ/GEMINI_API_KEY"
           ;;
         openai:*)
           target="openai/${alias#openai:}"
@@ -438,6 +442,38 @@ gcloud services enable \
   iamcredentials.googleapis.com \
   secretmanager.googleapis.com
 
+TRAEFIK_IP=""
+if [[ "${WITH_TRAEFIK}" == "true" ]]; then
+  if [[ -z "${ACME_EMAIL}" ]]; then
+    ACME_EMAIL="$(gcloud config get-value account 2>/dev/null || true)"
+  fi
+  if [[ -z "${ACME_EMAIL}" ]]; then
+    echo "Error: --with-traefik requires --acme-email <email> (or an active gcloud account)." >&2
+    exit 1
+  fi
+  gcloud compute addresses describe "${TRAEFIK_IP_NAME}" --region "${REGION}" >/dev/null 2>&1 || \
+    gcloud compute addresses create "${TRAEFIK_IP_NAME}" --region "${REGION}" --network-tier PREMIUM
+  TRAEFIK_IP="$(gcloud compute addresses describe "${TRAEFIK_IP_NAME}" --region "${REGION}" --format='value(address)')"
+
+  if [[ -z "${ALEPHAT_HOST}" || "${ALEPHAT_HOST}" == "auto" ]]; then
+    BASE_SSLIP="${TRAEFIK_IP//./-}.sslip.io"
+    ALEPHAT_HOST="alephat.${BASE_SSLIP}"
+    TEMPORAL_UI_HOST="${TEMPORAL_UI_HOST:-temporal.${BASE_SSLIP}}"
+    TEMPORAL_GRPC_HOST="${TEMPORAL_GRPC_HOST:-temporal-grpc.${BASE_SSLIP}}"
+  else
+    HOST_SUFFIX="${ALEPHAT_HOST#*.}"
+    if [[ "${HOST_SUFFIX}" == "${ALEPHAT_HOST}" ]]; then
+      HOST_SUFFIX="${ALEPHAT_HOST}"
+    fi
+    TEMPORAL_UI_HOST="${TEMPORAL_UI_HOST:-temporal.${HOST_SUFFIX}}"
+    TEMPORAL_GRPC_HOST="${TEMPORAL_GRPC_HOST:-temporal-grpc.${HOST_SUFFIX}}"
+  fi
+  echo "Reserved Traefik IP ${TRAEFIK_IP}:"
+  echo "  Alephat UI / Webhooks: https://${ALEPHAT_HOST}"
+  echo "  Temporal Web UI:       https://${TEMPORAL_UI_HOST}"
+  echo "  Temporal gRPC (mTLS):  ${TEMPORAL_GRPC_HOST}:7233"
+fi
+
 # ---------------------------------------------------------------------------
 # 2. Provision GKE Cluster & Sandbox Runtime (Kata or gVisor)
 # ---------------------------------------------------------------------------
@@ -455,6 +491,9 @@ else
       --release-channel "${RELEASE_CHANNEL}" \
       --cluster-version "${K8S_VERSION}" \
       --num-nodes "${NUM_NODES}" \
+      --enable-autoscaling \
+      --min-nodes "${MIN_NODES}" \
+      --max-nodes "${MAX_NODES}" \
       --machine-type "${NODE_SIZE}" \
       --image-type UBUNTU_CONTAINERD \
       --enable-dataplane-v2 \
@@ -469,6 +508,9 @@ else
       --release-channel "${RELEASE_CHANNEL}" \
       --cluster-version "${K8S_VERSION}" \
       --num-nodes "${NUM_NODES}" \
+      --enable-autoscaling \
+      --min-nodes "${MIN_NODES}" \
+      --max-nodes "${MAX_NODES}" \
       --machine-type "${NODE_SIZE}" \
       --image-type COS_CONTAINERD \
       --enable-dataplane-v2 \
@@ -481,20 +523,21 @@ fi
 gcloud container clusters get-credentials "${CLUSTER_NAME}" --zone "${ZONE}"
 
 if [[ "${SANDBOX_RUNTIME}" == "kata" ]]; then
-  echo "Installing Kata Containers ${KATA_VERSION} and registering RuntimeClass/${RUNTIME_CLASS_NAME}..."
-  kubectl apply -f "https://raw.githubusercontent.com/kata-containers/kata-containers/${KATA_VERSION}/tools/packaging/kata-deploy/kata-rbac/base/kata-rbac.yaml"
-  kubectl apply -f "https://raw.githubusercontent.com/kata-containers/kata-containers/${KATA_VERSION}/tools/packaging/kata-deploy/kata-deploy/base/kata-deploy.yaml"
+  echo "Installing Kata Containers ${KATA_VERSION} via OCI Helm chart and registering RuntimeClass/${RUNTIME_CLASS_NAME}..."
+  helm upgrade --install kata-deploy \
+    oci://ghcr.io/kata-containers/kata-deploy-charts/kata-deploy \
+    --namespace kube-system \
+    --version "${KATA_VERSION}" \
+    --set deploymentMode=daemonset \
+    --set k8sDistribution=k8s \
+    --set shims.disableAll=true \
+    --set shims.qemu.enabled=true \
+    --set shims.qemu-runtime-rs.enabled=true \
+    --set runtimeClasses.enabled=true \
+    --wait \
+    --timeout 10m
   kubectl -n kube-system rollout status daemonset/kata-deploy --timeout=10m
-  cat <<EOF | kubectl apply -f -
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-  name: ${RUNTIME_CLASS_NAME}
-handler: ${RUNTIME_CLASS_NAME}
-scheduling:
-  nodeSelector:
-    kubernetes.io/os: linux
-EOF
+  kubectl get runtimeclass "${RUNTIME_CLASS_NAME}"
 else
   if ! gcloud container node-pools describe sandbox-pool --cluster "${CLUSTER_NAME}" --zone "${ZONE}" >/dev/null 2>&1; then
     echo "Creating gVisor node pool 'sandbox-pool'..."
@@ -865,24 +908,34 @@ if [[ "${USE_EXTERNAL_SECRETS}" != "true" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 7. Build & Push Container Images
+# 7. Build & Push Container Images (in parallel)
 # ---------------------------------------------------------------------------
 if [[ "${SKIP_BUILD}" != "true" ]]; then
   gcloud artifacts repositories describe "${AR_REPOSITORY}" --location "${REGION}" >/dev/null 2>&1 || \
     gcloud artifacts repositories create "${AR_REPOSITORY}" --repository-format docker --location "${REGION}"
 
+  echo "Submitting Cloud Builds for platform, ui, slack-renderer, and sandbox images in parallel..."
+  BUILD_PIDS=()
   gcloud builds submit "${REPO_ROOT}" \
     --config "${REPO_ROOT}/cloudbuild.platform.yaml" \
-    --substitutions="_PLATFORM_IMAGE=${PLATFORM_IMAGE}"
+    --substitutions="_PLATFORM_IMAGE=${PLATFORM_IMAGE}" &
+  BUILD_PIDS+=($!)
   gcloud builds submit "${REPO_ROOT}" \
     --config "${REPO_ROOT}/cloudbuild.ui.yaml" \
-    --substitutions="_UI_IMAGE=${UI_IMAGE}"
+    --substitutions="_UI_IMAGE=${UI_IMAGE}" &
+  BUILD_PIDS+=($!)
   gcloud builds submit "${REPO_ROOT}" \
     --config "${REPO_ROOT}/cloudbuild.slack-renderer.yaml" \
-    --substitutions="_SLACK_RENDERER_IMAGE=${SLACK_RENDERER_IMAGE}"
+    --substitutions="_SLACK_RENDERER_IMAGE=${SLACK_RENDERER_IMAGE}" &
+  BUILD_PIDS+=($!)
   gcloud builds submit "${REPO_ROOT}" \
     --config "${REPO_ROOT}/cloudbuild.sandbox.yaml" \
-    --substitutions="_SANDBOX_IMAGE=${SANDBOX_IMAGE}"
+    --substitutions="_SANDBOX_IMAGE=${SANDBOX_IMAGE}" &
+  BUILD_PIDS+=($!)
+
+  for bpid in "${BUILD_PIDS[@]}"; do
+    wait "${bpid}"
+  done
 fi
 
 # ---------------------------------------------------------------------------
@@ -896,6 +949,7 @@ kubectl apply -f "${REPO_ROOT}/deploy/k8s/agent-sandbox-networkpolicy.yaml"
 TMP_KUSTOMIZE="$(mktemp -d)"
 trap 'rm -rf "${TMP_LITELLM_VALUES}" "${TMP_KUSTOMIZE}"' EXIT
 cp "${REPO_ROOT}"/deploy/k8s/*.yaml "${TMP_KUSTOMIZE}/"
+ENABLED_MODELS_CSV="$(IFS=','; echo "${MODEL_ENTRIES[*]%%=*}")"
 cat <<EOF >> "${TMP_KUSTOMIZE}/kustomization.yaml"
 images:
   - name: us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-platform
@@ -909,11 +963,21 @@ images:
     newTag: ${SLACK_RENDERER_IMAGE##*:}
 EOF
 kubectl -n "${PLATFORM_NAMESPACE}" delete job alephat-migrate temporal-namespace --ignore-not-found
+kubectl apply -f "${TMP_KUSTOMIZE}/configmap.yaml"
+if [[ "${WITH_TRAEFIK}" == "true" ]]; then
+  ALEPHAT_ORIGIN="https://${ALEPHAT_HOST}"
+  kubectl -n "${PLATFORM_NAMESPACE}" patch configmap alephat-config \
+    --type merge \
+    --patch "{\"data\":{\"DEFAULT_MODEL\":\"${DEFAULT_MODEL}\",\"ENABLED_MODELS\":\"${ENABLED_MODELS_CSV}\",\"LITELLM_API_KEY\":\"${LITELLM_MASTER_KEY}\",\"DASHBOARD_BASE_URL\":\"${ALEPHAT_ORIGIN}\",\"DASHBOARD_API_BASE_URL\":\"${ALEPHAT_ORIGIN}\",\"DASHBOARD_ALLOWED_ORIGINS\":\"${ALEPHAT_ORIGIN}\",\"CORS_ORIGINS\":\"${ALEPHAT_ORIGIN}\"}}"
+else
+  kubectl -n "${PLATFORM_NAMESPACE}" patch configmap alephat-config \
+    --type merge \
+    --patch "{\"data\":{\"DEFAULT_MODEL\":\"${DEFAULT_MODEL}\",\"ENABLED_MODELS\":\"${ENABLED_MODELS_CSV}\",\"LITELLM_API_KEY\":\"${LITELLM_MASTER_KEY}\"}}"
+fi
+rm -f "${TMP_KUSTOMIZE}/configmap.yaml"
+sed -i.bak '/- configmap\.yaml/d' "${TMP_KUSTOMIZE}/kustomization.yaml" && rm -f "${TMP_KUSTOMIZE}/kustomization.yaml.bak"
 kubectl apply -k "${TMP_KUSTOMIZE}"
-
-kubectl -n "${PLATFORM_NAMESPACE}" patch configmap alephat-config \
-  --type merge \
-  --patch "{\"data\":{\"DEFAULT_MODEL\":\"${DEFAULT_MODEL}\",\"LITELLM_API_KEY\":\"${LITELLM_MASTER_KEY}\"}}"
+kubectl -n "${PLATFORM_NAMESPACE}" rollout restart deployment/alephat-api deployment/alephat-webhook deployment/alephat-harness deployment/alephat-ui
 
 kubectl -n "${PLATFORM_NAMESPACE}" rollout status statefulset/alephat-postgresql --timeout=5m
 kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/temporal --timeout=10m
@@ -931,35 +995,6 @@ kubectl apply -f "${REPO_ROOT}/deploy/k8s/harness-keda.yaml"
 # 9. Optional Traefik Public Ingress & TLS
 # ---------------------------------------------------------------------------
 if [[ "${WITH_TRAEFIK}" == "true" ]]; then
-  if [[ -z "${ACME_EMAIL}" ]]; then
-    ACME_EMAIL="$(gcloud config get-value account 2>/dev/null || true)"
-  fi
-  if [[ -z "${ACME_EMAIL}" ]]; then
-    echo "Error: --with-traefik requires --acme-email <email> (or an active gcloud account)." >&2
-    exit 1
-  fi
-  gcloud compute addresses describe "${TRAEFIK_IP_NAME}" --region "${REGION}" >/dev/null 2>&1 || \
-    gcloud compute addresses create "${TRAEFIK_IP_NAME}" --region "${REGION}" --network-tier PREMIUM
-  TRAEFIK_IP="$(gcloud compute addresses describe "${TRAEFIK_IP_NAME}" --region "${REGION}" --format='value(address)')"
-
-  if [[ -z "${ALEPHAT_HOST}" || "${ALEPHAT_HOST}" == "auto" ]]; then
-    BASE_SSLIP="${TRAEFIK_IP//./-}.sslip.io"
-    ALEPHAT_HOST="alephat.${BASE_SSLIP}"
-    TEMPORAL_UI_HOST="${TEMPORAL_UI_HOST:-temporal.${BASE_SSLIP}}"
-    TEMPORAL_GRPC_HOST="${TEMPORAL_GRPC_HOST:-temporal-grpc.${BASE_SSLIP}}"
-  else
-    HOST_SUFFIX="${ALEPHAT_HOST#*.}"
-    if [[ "${HOST_SUFFIX}" == "${ALEPHAT_HOST}" ]]; then
-      HOST_SUFFIX="${ALEPHAT_HOST}"
-    fi
-    TEMPORAL_UI_HOST="${TEMPORAL_UI_HOST:-temporal.${HOST_SUFFIX}}"
-    TEMPORAL_GRPC_HOST="${TEMPORAL_GRPC_HOST:-temporal-grpc.${HOST_SUFFIX}}"
-  fi
-  echo "Using Traefik hostnames (IP: ${TRAEFIK_IP}):"
-  echo "  Alephat UI / Webhooks: https://${ALEPHAT_HOST}"
-  echo "  Temporal Web UI:       https://${TEMPORAL_UI_HOST}"
-  echo "  Temporal gRPC (mTLS):  ${TEMPORAL_GRPC_HOST}:7233"
-
   helm repo add traefik https://traefik.github.io/charts --force-update
   helm repo update traefik
   helm upgrade --install traefik traefik/traefik \
@@ -1000,13 +1035,7 @@ if [[ "${WITH_TRAEFIK}" == "true" ]]; then
     -e "s/temporal-grpc\.example\.com/${TEMPORAL_GRPC_HOST}/g" \
     "${REPO_ROOT}/deploy/k8s/traefik-ingressroute.yaml" | kubectl apply -f -
 
-  ALEPHAT_ORIGIN="https://${ALEPHAT_HOST}"
-  kubectl -n "${PLATFORM_NAMESPACE}" patch configmap alephat-config \
-    --type merge \
-    --patch "{\"data\":{\"DASHBOARD_BASE_URL\":\"${ALEPHAT_ORIGIN}\",\"DASHBOARD_API_BASE_URL\":\"${ALEPHAT_ORIGIN}\",\"DASHBOARD_ALLOWED_ORIGINS\":\"${ALEPHAT_ORIGIN}\",\"CORS_ORIGINS\":\"${ALEPHAT_ORIGIN}\"}}"
-  kubectl -n "${PLATFORM_NAMESPACE}" rollout restart deployment/alephat-api deployment/alephat-webhook deployment/alephat-harness
-  kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/alephat-api deployment/alephat-webhook deployment/alephat-harness --timeout=5m
-  echo "Public HTTPS URL:        ${ALEPHAT_ORIGIN}"
+  echo "Public HTTPS URL:        https://${ALEPHAT_HOST}"
   echo "Temporal Web UI URL:     https://${TEMPORAL_UI_HOST}"
   echo "Temporal gRPC Endpoint:  ${TEMPORAL_GRPC_HOST}:7233 (mTLS client cert in secret/temporal-tls)"
 fi

@@ -11,3 +11,11 @@ node_modules/
 **/*.key
 *.pyc
 *.log
+outputs/
+generated_images/
+logs/
+.pytest_cache/
+.ruff_cache/
+.rumdl_cache/
+.agents/
+.gstack/

@@ -29,10 +29,6 @@ metadata:
   namespace: alephat
 spec:
   minVersion: VersionTLS12
-  sniStrict: true
-  alpnProtocols:
-    - h2
-    - acme-tls/1
   clientAuth:
     secretNames:
       - temporal-tls

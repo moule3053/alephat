@@ -14,7 +14,8 @@ def _parse_keys(raw: str) -> list[bytes]:
     for part in raw.replace("\n", ",").split(","):
         stripped = part.strip()
         if stripped:
-            keys.append(stripped.encode())
+            padded = stripped + ("=" * ((4 - len(stripped) % 4) % 4))
+            keys.append(padded.encode())
     return keys
 
 

@@ -113,6 +113,13 @@ class Settings:
             _ENV.get("DEFAULT_MODEL", "openai:gpt-4o-mini") or "openai:gpt-4o-mini"
         )
     )
+    enabled_models: tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            model.strip()
+            for model in (_ENV.get("ENABLED_MODELS", "") or "").split(",")
+            if model.strip()
+        )
+    )
     default_sandbox_provider: str = field(
         default_factory=lambda: (
             _ENV.get("DEFAULT_SANDBOX_PROVIDER", "agent_sandbox") or "agent_sandbox"
