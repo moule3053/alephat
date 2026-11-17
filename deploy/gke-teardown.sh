@@ -132,7 +132,7 @@ else
   echo "GKE cluster '${CLUSTER_NAME}' not found in zone '${ZONE}'; skipping."
 fi
 
-# 2b. Delete any unattached GCE persistent disks created for alephat/traefik PVCs in the zone
+# 2b. Delete any unattached GCE persistent disks created by this GKE cluster
 ORPHANED_DISKS=()
 while IFS= read -r disk_name; do
   [[ -n "${disk_name}" ]] && ORPHANED_DISKS+=("${disk_name}")
@@ -140,7 +140,7 @@ done < <(
   gcloud compute disks list \
     --project "${PROJECT_ID}" \
     --zones "${ZONE}" \
-    --filter="-users:* AND (description ~ '\"kubernetes.io/created-for/pvc/namespace\":\"alephat\"' OR description ~ '\"kubernetes.io/created-for/pvc/namespace\":\"traefik\"')" \
+    --filter="-users:* AND labels.goog-k8s-cluster-name=${CLUSTER_NAME}" \
     --format="value(name)" 2>/dev/null || true
 )
 if [[ ${#ORPHANED_DISKS[@]} -gt 0 ]]; then
