@@ -1,0 +1,281 @@
+# -----------------------------------------------------------------------------
+# Namespace Topology: Alephat in its own namespace; every dependency isolated
+# in its own dedicated namespace.
+# -----------------------------------------------------------------------------
+namespaces:
+  create: true
+  alephat: alephat
+  postgresql: postgresql
+  temporal: temporal
+  litellm: litellm
+  sandboxes: alephat-sandboxes
+  agentSandboxSystem: agent-sandbox-system
+  kata: kata-system
+  keda: keda
+  externalSecrets: external-secrets
+  traefik: traefik
+
+# -----------------------------------------------------------------------------
+# Sandbox Runtime & Agent Sandbox Controller
+# -----------------------------------------------------------------------------
+sandboxRuntime:
+  # "kata" (installs Kata Containers 4.3.1 + kata-qemu RuntimeClass) or "gvisor"
+  type: kata
+  kata:
+    version: "4.3.1"
+    image: quay.io/kata-containers/kata-deploy
+    kubectlImage: quay.io/kata-containers/kubectl:latest
+    k8sDistribution: k8s
+    runtimeClassName: kata-qemu
+  gvisor:
+    runtimeClassName: gvisor
+
+agentSandbox:
+  enabled: true
+  controllerImage: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.9
+  templateName: python-runtime-template
+  sandboxImage: us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-sandbox:latest
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+# -----------------------------------------------------------------------------
+# External Secrets Operator (Google Cloud Secret Manager) or Native K8s Secrets
+# -----------------------------------------------------------------------------
+externalSecrets:
+  enabled: true
+  image: ghcr.io/external-secrets/external-secrets:v2.14.0
+  refreshInterval: 1m
+  gcp:
+    projectID: your-gcp-project-id
+    clusterLocation: us-central1-a
+    clusterName: alephat
+    serviceAccountEmail: alephat-eso@your-gcp-project-id.iam.gserviceaccount.com
+
+# Plaintext / auto-generated secret values used ONLY when externalSecrets.enabled=false
+secrets:
+  postgresPassword: ""
+  litellmMasterKey: ""
+  litellmPostgresPassword: ""
+  platformApiToken: ""
+  platformJwtSecret: ""
+  githubWebhookSecret: ""
+  dashboardJwtSecret: ""
+  tokenEncryptionKey: ""
+  temporalUiUsers: ""
+  providerKeys:
+    openaiApiKey: ""
+    anthropicApiKey: ""
+    geminiApiKey: ""
+    fireworksApiKey: ""
+  githubApp:
+    appId: ""
+    clientId: ""
+    clientSecret: ""
+    installationId: ""
+    privateKey: ""
+    allowedUsers: ""
+    allowedOrgs: ""
+  slack:
+    signingSecret: ""
+    botToken: ""
+    appToken: ""
+    userMap: ""
+    appId: ""
+    botUserId: ""
+    botUsername: ""
+
+# -----------------------------------------------------------------------------
+# KEDA Operator & Temporal Autoscaler
+# -----------------------------------------------------------------------------
+keda:
+  enabled: true
+  version: "2.21.0"
+  operatorImage: ghcr.io/kedacore/keda:2.21.0
+  metricsServerImage: ghcr.io/kedacore/keda-metrics-apiserver:2.21.0
+  webhooksImage: ghcr.io/kedacore/keda-admission-webhooks:2.21.0
+  autoscaling:
+    enabled: true
+    minReplicaCount: 1
+    maxReplicaCount: 50
+    pollingInterval: 15
+    cooldownPeriod: 300
+    targetQueueSize: "4"
+    activationTargetQueueSize: "0"
+
+# -----------------------------------------------------------------------------
+# PostgreSQL (Shared by Alephat & Temporal databases)
+# -----------------------------------------------------------------------------
+postgresql:
+  enabled: true
+  image: postgres:17-alpine
+  database: alephat
+  username: alephat
+  storageClassName: standard-rwo
+  storageSize: 20Gi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+# -----------------------------------------------------------------------------
+# Self-Hosted Temporal Service (mTLS Frontend & Internode + Web UI)
+# -----------------------------------------------------------------------------
+temporal:
+  enabled: true
+  serverImage: temporalio/server:1.32.2
+  adminToolsImage: temporalio/admin-tools:1.32.2
+  uiImage: temporalio/ui:latest
+  namespace: default
+  taskQueue: alephat-agents
+  numHistoryShards: 4
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  uiResources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# -----------------------------------------------------------------------------
+# LiteLLM Gateway (Gemini Frontier & Coding Models)
+# -----------------------------------------------------------------------------
+litellm:
+  enabled: true
+  image: ghcr.io/berriai/litellm-database:v1.106.6
+  postgresImage: postgres:17-alpine
+  storageClassName: standard-rwo
+  storageSize: 20Gi
+  gcpServiceAccountEmail: ""
+  vertexProject: ""
+  vertexLocation: ""
+  defaultModel: google:gemini-4-hydrogen
+  models:
+    - alias: google:gemini-4-hydrogen
+      target: gemini/gemini-4-hydrogen
+      apiKeyEnv: GEMINI_API_KEY
+    - alias: google:gemini-4-carbon
+      target: gemini/gemini-4-carbon
+      apiKeyEnv: GEMINI_API_KEY
+    - alias: google:gemini-4-argon
+      target: gemini/gemini-4-argon
+      apiKeyEnv: GEMINI_API_KEY
+    - alias: google:gemini-3.8-flash
+      target: gemini/gemini-3.8-flash
+      apiKeyEnv: GEMINI_API_KEY
+    - alias: google:gemini-3.5-flash
+      target: gemini/gemini-3.5-flash
+      apiKeyEnv: GEMINI_API_KEY
+    - alias: google:gemini-3.1-pro-preview
+      target: gemini/gemini-3.1-pro-preview
+      apiKeyEnv: GEMINI_API_KEY
+    - alias: google:gemini-2.5-pro
+      target: gemini/gemini-2.5-pro
+      apiKeyEnv: GEMINI_API_KEY
+    - alias: google:gemini-2.5-flash
+      target: gemini/gemini-2.5-flash
+      apiKeyEnv: GEMINI_API_KEY
+    - alias: anthropic:claude-opus-5-5
+      target: anthropic/claude-opus-5-5
+      apiKeyEnv: ANTHROPIC_API_KEY
+    - alias: anthropic:claude-sonnet-5-5
+      target: anthropic/claude-sonnet-5-5
+      apiKeyEnv: ANTHROPIC_API_KEY
+    - alias: anthropic:claude-haiku-5-5
+      target: anthropic/claude-haiku-5-5
+      apiKeyEnv: ANTHROPIC_API_KEY
+    - alias: anthropic:claude-opus-4-6
+      target: anthropic/claude-opus-4-6
+      apiKeyEnv: ANTHROPIC_API_KEY
+    - alias: anthropic:claude-sonnet-4-6
+      target: anthropic/claude-sonnet-4-6
+      apiKeyEnv: ANTHROPIC_API_KEY
+    - alias: anthropic:claude-sonnet-4-5
+      target: anthropic/claude-sonnet-4-5-20250929
+      apiKeyEnv: ANTHROPIC_API_KEY
+    - alias: openai:gpt-6.1-terra
+      target: openai/gpt-6.1-terra
+      apiKeyEnv: OPENAI_API_KEY
+    - alias: openai:gpt-6.1-sol
+      target: openai/gpt-6.1-sol
+      apiKeyEnv: OPENAI_API_KEY
+    - alias: openai:gpt-6-luna
+      target: openai/gpt-6-luna
+      apiKeyEnv: OPENAI_API_KEY
+    - alias: openai:gpt-6-astra
+      target: openai/gpt-6-astra
+      apiKeyEnv: OPENAI_API_KEY
+    - alias: openai:gpt-5.5
+      target: openai/gpt-5.5
+      apiKeyEnv: OPENAI_API_KEY
+    - alias: openai:gpt-4.1
+      target: openai/gpt-4.1
+      apiKeyEnv: OPENAI_API_KEY
+    - alias: openai:o4-mini
+      target: openai/o4-mini
+      apiKeyEnv: OPENAI_API_KEY
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
+# -----------------------------------------------------------------------------
+# Alephat Platform Services (API, Webhook, Temporal Harness Worker, UI)
+# -----------------------------------------------------------------------------
+alephat:
+  platformImage: us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-platform:latest
+  uiImage: us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-ui:latest
+  slackRendererImage: us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-slack-renderer:latest
+  imagePullPolicy: Always
+  apiReplicas: 2
+  webhookReplicas: 2
+  uiReplicas: 2
+  harnessReplicas: 1
+  config:
+    apiAuthDisabled: "false"
+    webhookSignaturesRequired: "true"
+    bootstrapDevDefaults: "true"
+    allowStubSandboxes: "false"
+    maxRunRetries: "3"
+    agentRecursionLimit: "1000"
+    dashboardBaseUrl: "http://127.0.0.1:18080"
+
+# -----------------------------------------------------------------------------
+# Traefik Ingress Controller, Let's Encrypt TLS & Public Hostnames
+# -----------------------------------------------------------------------------
+traefik:
+  enabled: true
+  image: docker.io/traefik:v3.7.17
+  initImage: busybox:1.36.1
+  loadBalancerIP: ""
+  serviceAnnotations:
+    cloud.google.com/network-tier: Premium
+  persistence:
+    storageClassName: standard-rwo
+    size: 1Gi
+  acme:
+    email: admin@example.com
+    caServer: ""
+
+ingress:
+  enabled: true
+  host: alephat.example.com
+  temporalUiHost: temporal.example.com
+  temporalGrpcHost: temporal-grpc.example.com

@@ -120,30 +120,49 @@ class PlatformModelProvider:
         if parsed.provider == "openai":
             from langchain_openai import ChatOpenAI
 
-            openai_effort = effort if effort in {"low", "medium", "high"} else None
+            is_reasoning_model = parsed.model.startswith(("gpt-6", "gpt-5", "o1", "o3", "o4"))
+            if is_reasoning_model:
+                reasoning_cfg: dict[str, object] | None = None
+                if effort == "none":
+                    reasoning_cfg = {"effort": "none"}
+                elif effort in {"low", "medium", "high", "xhigh", "max"}:
+                    reasoning_cfg = {"effort": effort, "summary": "auto"}
+                return ChatOpenAI(
+                    model=parsed.model,
+                    api_key=settings.openai_api_key,
+                    base_url=settings.openai_base_url,
+                    max_retries=0,
+                    streaming=streaming,
+                    use_responses_api=True,
+                    reasoning=reasoning_cfg,
+                )
             return ChatOpenAI(
                 model=parsed.model,
                 api_key=settings.openai_api_key,
                 base_url=settings.openai_base_url,
                 max_retries=0,
                 streaming=streaming,
-                reasoning_effort=openai_effort,
             )
         if parsed.provider == "anthropic":
             from langchain_anthropic import ChatAnthropic
 
+            resolved_anthropic_model = (
+                "claude-sonnet-4-5-20250929"
+                if parsed.model in {"claude-3-5-sonnet", "claude-sonnet-4-5"}
+                else parsed.model
+            )
             if effort in {"low", "medium", "high", "xhigh", "max"}:
                 return ChatAnthropic(
-                    model=parsed.model,
+                    model=resolved_anthropic_model,
                     api_key=settings.anthropic_api_key,
                     base_url=settings.anthropic_base_url,
                     max_retries=0,
                     streaming=streaming,
-                    thinking={"type": "adaptive"},
+                    thinking={"type": "adaptive", "display": "summarized"},
                     effort=effort,
                 )
             return ChatAnthropic(
-                model=parsed.model,
+                model=resolved_anthropic_model,
                 api_key=settings.anthropic_api_key,
                 base_url=settings.anthropic_base_url,
                 max_retries=0,

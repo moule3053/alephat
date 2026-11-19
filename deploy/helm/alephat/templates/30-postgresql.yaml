@@ -1,0 +1,121 @@
+{{- if .Values.postgresql.enabled }}
+{{- $pgNs := .Values.namespaces.postgresql -}}
+{{- if .Values.externalSecrets.enabled }}
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: alephat-postgres
+  namespace: {{ $pgNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  refreshInterval: {{ .Values.externalSecrets.refreshInterval }}
+  secretStoreRef:
+    name: gcp-secret-manager
+    kind: ClusterSecretStore
+  target:
+    name: alephat-postgres
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: alephat-postgres
+{{- else }}
+{{- include "alephat.generatedSecrets" . }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alephat-postgres
+  namespace: {{ $pgNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  password: {{ index ._generatedSecrets "postgresPassword" | quote }}
+{{- end }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: alephat-postgresql-data
+  namespace: {{ $pgNs }}
+  labels:
+    app: alephat-postgresql
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.postgresql.storageClassName | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.postgresql.storageSize | quote }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: alephat-postgresql
+  namespace: {{ $pgNs }}
+  labels:
+    app: alephat-postgresql
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  serviceName: alephat-postgresql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alephat-postgresql
+  template:
+    metadata:
+      labels:
+        app: alephat-postgresql
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgresql.image }}
+          ports:
+            - name: pg
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.username | quote }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-postgres
+                  key: password
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.postgresql.username | quote }}, "-d", {{ .Values.postgresql.database | quote }}]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.postgresql.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: alephat-postgresql-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alephat-postgresql
+  namespace: {{ $pgNs }}
+  labels:
+    app: alephat-postgresql
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: alephat-postgresql
+  ports:
+    - name: pg
+      port: 5432
+      targetPort: pg
+{{- end }}

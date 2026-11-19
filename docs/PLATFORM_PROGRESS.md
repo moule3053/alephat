@@ -27,7 +27,7 @@ Status against [`SERVICE_CONTRACTS.md`](./SERVICE_CONTRACTS.md), updated 2026-07
 
 ## External adapters still required
 
-- `agent_sandbox` is implemented for the upstream Python runtime service; the target cluster still needs the Sandbox CRDs/controller, runtime template, RBAC, and network policy from `deploy/k8s`.
+- `agent_sandbox` is implemented for the upstream Python runtime service; the unified Helm chart in `deploy/helm/alephat` installs the Sandbox CRDs, controller, runtime template, RBAC, and network policy across dedicated namespaces.
 - `opensandbox` needs the deployment's chosen OpenSandbox API/SDK contract.
 - End-to-end provider runs require real LLM and sandbox credentials.
   Production stubs are disabled, so missing adapters fail visibly instead of reporting fake command success.

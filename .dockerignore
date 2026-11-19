@@ -43,4 +43,4 @@ ui/.pnpm-store
 **/.tanstack
 .vite
 **/.vite
-deploy/k8s
+deploy/helm

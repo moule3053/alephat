@@ -1,0 +1,23 @@
+{{- if .Values.namespaces.create }}
+{{- $nsList := list .Values.namespaces.alephat .Values.namespaces.sandboxes -}}
+{{- if .Values.postgresql.enabled }}{{- $nsList = append $nsList .Values.namespaces.postgresql -}}{{- end }}
+{{- if .Values.temporal.enabled }}{{- $nsList = append $nsList .Values.namespaces.temporal -}}{{- end }}
+{{- if .Values.litellm.enabled }}{{- $nsList = append $nsList .Values.namespaces.litellm -}}{{- end }}
+{{- if .Values.agentSandbox.enabled }}{{- $nsList = append $nsList .Values.namespaces.agentSandboxSystem -}}{{- end }}
+{{- if eq .Values.sandboxRuntime.type "kata" }}{{- $nsList = append $nsList .Values.namespaces.kata -}}{{- end }}
+{{- if .Values.keda.enabled }}{{- $nsList = append $nsList .Values.namespaces.keda -}}{{- end }}
+{{- if .Values.externalSecrets.enabled }}{{- $nsList = append $nsList .Values.namespaces.externalSecrets -}}{{- end }}
+{{- if .Values.traefik.enabled }}{{- $nsList = append $nsList .Values.namespaces.traefik -}}{{- end }}
+{{- range ($nsList | uniq) }}
+{{- if and (ne . "kube-system") (ne . "default") (ne . $.Release.Namespace) }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ . }}
+  labels:
+    kubernetes.io/metadata.name: {{ . }}
+    {{- include "alephat.labels" $ | nindent 4 }}
+{{- end }}
+{{- end }}
+{{- end }}

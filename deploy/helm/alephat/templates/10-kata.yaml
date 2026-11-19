@@ -1,0 +1,384 @@
+{{- if eq .Values.sandboxRuntime.type "kata" }}
+{{- $kataNs := .Values.namespaces.kata -}}
+{{- if ne $kataNs "kube-system" }}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: kata-critical-pods
+  namespace: {{ $kataNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  hard:
+    pods: "1000"
+  scopeSelector:
+    matchExpressions:
+      - operator: In
+        scopeName: PriorityClass
+        values:
+          - system-node-critical
+          - system-cluster-critical
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kata-deploy-sa
+  namespace: {{ $kataNs }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kata-deploy-kata-deploy-state
+  namespace: {{ $kataNs }}
+  labels:
+    app.kubernetes.io/name: kata-deploy
+    {{- include "alephat.labels" . | nindent 4 }}
+data:
+  multiInstallSuffix: ""
+  deploymentMode: "daemonset"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kata-deploy-role
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kata-deploy-rb
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kata-deploy-role
+subjects:
+  - kind: ServiceAccount
+    name: kata-deploy-sa
+    namespace: {{ $kataNs }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kata-deploy
+  namespace: {{ $kataNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      name: kata-deploy
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        name: kata-deploy
+    spec:
+      serviceAccountName: kata-deploy-sa
+      priorityClassName: system-node-critical
+      terminationGracePeriodSeconds: 600
+      containers:
+        - name: kube-kata
+          image: "{{ .Values.sandboxRuntime.kata.image }}:{{ .Values.sandboxRuntime.kata.version }}"
+          imagePullPolicy: Always
+          command: ["/usr/bin/kata-deploy", "install"]
+          terminationMessagePolicy: FallbackToLogsOnError
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: DAEMONSET_NAME
+              value: kata-deploy
+            - name: DEBUG
+              value: "false"
+            - name: SHIMS_X86_64
+              value: "qemu qemu-runtime-rs"
+            - name: SHIMS_AARCH64
+              value: "qemu qemu-runtime-rs"
+            - name: SHIMS_S390X
+              value: "qemu qemu-runtime-rs"
+            - name: SHIMS_PPC64LE
+              value: "qemu qemu-runtime-rs"
+            - name: DEFAULT_SHIM_X86_64
+              value: "qemu-runtime-rs"
+            - name: DEFAULT_SHIM_AARCH64
+              value: "qemu-runtime-rs"
+            - name: DEFAULT_SHIM_S390X
+              value: "qemu-runtime-rs"
+            - name: DEFAULT_SHIM_PPC64LE
+              value: "qemu-runtime-rs"
+            - name: INSTALLATION_PREFIX
+              value: ""
+            - name: MULTI_INSTALL_SUFFIX
+              value: ""
+            - name: K8S_DISTRIBUTION
+              value: {{ .Values.sandboxRuntime.kata.k8sDistribution | quote }}
+            - name: HEALTH_PORT
+              value: "8090"
+          securityContext:
+            privileged: false
+            readOnlyRootFilesystem: true
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: 8090
+            initialDelaySeconds: 1
+            periodSeconds: 10
+            failureThreshold: 60
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8090
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8090
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 25m
+              memory: 16Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: crio-conf
+              mountPath: /etc/crio/
+            - name: containerd-conf
+              mountPath: /etc/containerd/
+            - name: kata-install
+              mountPath: /opt/kata
+            - name: systemd-system
+              mountPath: /etc/systemd/system
+            - name: systemd-private
+              mountPath: /run/systemd/private
+            - name: boot
+              mountPath: /boot
+              readOnly: true
+            - name: host-machine-id
+              mountPath: /host-machine-id
+              readOnly: true
+            - name: host-run-lock
+              mountPath: /host-run-lock
+            - name: host-usr-bin
+              mountPath: /host-usr/bin
+              readOnly: true
+            - name: host-usr-sbin
+              mountPath: /host-usr/sbin
+              readOnly: true
+            - name: host-usr-local-bin
+              mountPath: /host-usr-local/bin
+              readOnly: true
+            - name: host-usr-local-sbin
+              mountPath: /host-usr-local/sbin
+              readOnly: true
+            - name: host-bin
+              mountPath: /host-bin
+              readOnly: true
+            - name: host-sbin
+              mountPath: /host-sbin
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: crio-conf
+          hostPath:
+            path: /etc/crio/
+        - name: containerd-conf
+          hostPath:
+            path: /etc/containerd/
+        - name: kata-install
+          hostPath:
+            path: /opt/kata
+            type: DirectoryOrCreate
+        - name: systemd-system
+          hostPath:
+            path: /etc/systemd/system
+            type: DirectoryOrCreate
+        - name: systemd-private
+          hostPath:
+            path: /run/systemd/private
+            type: Socket
+        - name: boot
+          hostPath:
+            path: /boot
+        - name: host-machine-id
+          hostPath:
+            path: /etc/machine-id
+            type: File
+        - name: host-run-lock
+          hostPath:
+            path: /run/lock
+            type: DirectoryOrCreate
+        - name: host-usr-bin
+          hostPath:
+            path: /usr/bin
+        - name: host-usr-sbin
+          hostPath:
+            path: /usr/sbin
+        - name: host-usr-local-bin
+          hostPath:
+            path: /usr/local/bin
+        - name: host-usr-local-sbin
+          hostPath:
+            path: /usr/local/sbin
+        - name: host-bin
+          hostPath:
+            path: /bin
+        - name: host-sbin
+          hostPath:
+            path: /sbin
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-qemu
+  labels:
+    app.kubernetes.io/managed-by: kata-deploy
+    kata-deploy/instance: default
+    {{- include "alephat.labels" . | nindent 4 }}
+  annotations:
+    katacontainers.io/kata-version: {{ .Values.sandboxRuntime.kata.version | quote }}
+handler: kata-qemu
+overhead:
+  podFixed:
+    memory: "320Mi"
+    cpu: "250m"
+scheduling:
+  nodeSelector:
+    katacontainers.io/kata-runtime: "true"
+    kata-deploy.katacontainers.io/default: "true"
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-qemu-runtime-rs
+  labels:
+    app.kubernetes.io/managed-by: kata-deploy
+    kata-deploy/instance: default
+    {{- include "alephat.labels" . | nindent 4 }}
+  annotations:
+    katacontainers.io/kata-version: {{ .Values.sandboxRuntime.kata.version | quote }}
+handler: kata-qemu-runtime-rs
+overhead:
+  podFixed:
+    memory: "320Mi"
+    cpu: "250m"
+scheduling:
+  nodeSelector:
+    katacontainers.io/kata-runtime: "true"
+    kata-deploy.katacontainers.io/default: "true"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kata-deploy-sa-cleanup
+  namespace: {{ $kataNs }}
+  annotations:
+    helm.sh/hook: post-delete
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kata-deploy-cleanup-role
+  annotations:
+    helm.sh/hook: post-delete
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+    verbs: ["delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kata-deploy-cleanup-rb
+  annotations:
+    helm.sh/hook: post-delete
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kata-deploy-cleanup-role
+subjects:
+  - kind: ServiceAccount
+    name: kata-deploy-sa-cleanup
+    namespace: {{ $kataNs }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kata-deploy-rb-cleanup
+  namespace: {{ $kataNs }}
+  annotations:
+    helm.sh/hook: post-delete
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: kata-deploy-sa-cleanup
+      containers:
+        - name: rb-cleanup
+          image: {{ .Values.sandboxRuntime.kata.kubectlImage }}
+          command:
+            - bash
+            - -c
+            - |
+              set -e
+              wait_timeout=300
+              waited=0
+              while [ "$waited" -lt "$wait_timeout" ]; do
+                count=$(kubectl get pod -n "${NAMESPACE}" -l name=kata-deploy --no-headers 2>/dev/null | wc -l)
+                [ "$count" -eq 0 ] && break
+                sleep 5
+                waited=$((waited + 5))
+              done
+              kubectl delete clusterrolebinding kata-deploy-rb --ignore-not-found --wait=false
+              kubectl delete clusterrole kata-deploy-role --ignore-not-found --wait=false
+              kubectl delete serviceaccount kata-deploy-sa -n "${NAMESPACE}" --ignore-not-found --wait=false
+          env:
+            - name: NAMESPACE
+              value: {{ $kataNs | quote }}
+{{- end }}

@@ -19,3 +19,4 @@ logs/
 .rumdl_cache/
 .agents/
 .gstack/
+deploy/helm/

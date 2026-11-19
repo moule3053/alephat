@@ -107,10 +107,9 @@ def test_slack_channel_messages_require_a_mention_but_dms_do_not(monkeypatch):
         normalize_slack({"event": event}, org_id="org", delivery_id="E3")["command"]
         == "upsert_and_enqueue"
     )
-    event["text"] = "in moule3053/alephat update README.md"
+    event["text"] = "in acme/alephat update README.md"
     assert (
-        normalize_slack({"event": event}, org_id="org", delivery_id="E4")["repo"]
-        == "moule3053/alephat"
+        normalize_slack({"event": event}, org_id="org", delivery_id="E4")["repo"] == "acme/alephat"
     )
     event.update(
         {

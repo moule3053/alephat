@@ -1,15 +1,121 @@
+{{- if .Values.temporal.enabled }}
+{{- $tNs := .Values.namespaces.temporal -}}
+{{- $tHost := include "alephat.temporalHost" . -}}
+{{- $tAddr := include "alephat.temporalAddress" . -}}
+{{- $pgHost := include "alephat.postgresHost" . -}}
+{{- if .Values.externalSecrets.enabled }}
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: alephat-postgres
+  namespace: {{ $tNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  refreshInterval: {{ .Values.externalSecrets.refreshInterval }}
+  secretStoreRef:
+    name: gcp-secret-manager
+    kind: ClusterSecretStore
+  target:
+    name: alephat-postgres
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: alephat-postgres
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: temporal-tls
+  namespace: {{ $tNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  refreshInterval: {{ .Values.externalSecrets.refreshInterval }}
+  secretStoreRef:
+    name: gcp-secret-manager
+    kind: ClusterSecretStore
+  target:
+    name: temporal-tls
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: temporal-tls
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: temporal-ui-auth
+  namespace: {{ $tNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  refreshInterval: {{ .Values.externalSecrets.refreshInterval }}
+  secretStoreRef:
+    name: gcp-secret-manager
+    kind: ClusterSecretStore
+  target:
+    name: temporal-ui-auth
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: temporal-ui-auth
+{{- else }}
+{{- include "alephat.generatedSecrets" . }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alephat-postgres
+  namespace: {{ $tNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  password: {{ index ._generatedSecrets "postgresPassword" | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: temporal-tls
+  namespace: {{ $tNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  ca.crt: {{ index ._generatedSecrets "caCrt" | quote }}
+  server.crt: {{ index ._generatedSecrets "serverCrt" | quote }}
+  server.key: {{ index ._generatedSecrets "serverKey" | quote }}
+  tls.crt: {{ index ._generatedSecrets "clientCrt" | quote }}
+  tls.key: {{ index ._generatedSecrets "clientKey" | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: temporal-ui-auth
+  namespace: {{ $tNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  users: {{ default (htpasswd "admin" (randAlphaNum 20)) .Values.secrets.temporalUiUsers | quote }}
+{{- end }}
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: temporal-server-config
-  namespace: alephat
+  namespace: {{ $tNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
 data:
   config.template.yaml: |
     log:
       stdout: true
       level: info
     persistence:
-      numHistoryShards: 4
+      numHistoryShards: {{ .Values.temporal.numHistoryShards }}
       defaultStore: default
       visibilityStore: visibility
       datastores:
@@ -48,7 +154,7 @@ data:
             clientCaFiles:
               - /etc/temporal/tls/ca.crt
           client:
-            serverName: temporal.alephat.svc.cluster.local
+            serverName: {{ $tHost }}
             rootCaFiles:
               - /etc/temporal/tls/ca.crt
         frontend:
@@ -59,7 +165,7 @@ data:
             clientCaFiles:
               - /etc/temporal/tls/ca.crt
           client:
-            serverName: temporal.alephat.svc.cluster.local
+            serverName: {{ $tHost }}
             rootCaFiles:
               - /etc/temporal/tls/ca.crt
     services:
@@ -103,7 +209,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: temporal
-  namespace: alephat
+  namespace: {{ $tNs }}
+  labels:
+    app: temporal
+    {{- include "alephat.labels" . | nindent 4 }}
 spec:
   replicas: 1
   strategy:
@@ -113,19 +222,21 @@ spec:
       app: temporal
   template:
     metadata:
+      annotations:
+        checksum/config: {{ .Values.temporal.numHistoryShards | toString | sha256sum }}
       labels:
         app: temporal
     spec:
       initContainers:
         - name: temporal-schema
-          image: temporalio/admin-tools:1.32.2
+          image: {{ .Values.temporal.adminToolsImage }}
           env:
             - name: POSTGRES_SEEDS
-              value: alephat-postgresql
+              value: {{ $pgHost | quote }}
             - name: DB_PORT
               value: "5432"
             - name: POSTGRES_USER
-              value: alephat
+              value: {{ .Values.postgresql.username | quote }}
             - name: SQL_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -135,6 +246,7 @@ spec:
             - /bin/sh
             - -ec
             - |
+              until nc -z "$POSTGRES_SEEDS" "$DB_PORT" >/dev/null 2>&1; do sleep 2; done
               temporal-sql-tool --plugin postgres12 --ep "$POSTGRES_SEEDS" -u "$POSTGRES_USER" -p "$DB_PORT" --db temporal create || true
               temporal-sql-tool --plugin postgres12 --ep "$POSTGRES_SEEDS" -u "$POSTGRES_USER" -p "$DB_PORT" --db temporal setup-schema -v 0.0 || true
               temporal-sql-tool --plugin postgres12 --ep "$POSTGRES_SEEDS" -u "$POSTGRES_USER" -p "$DB_PORT" --db temporal update-schema -d /etc/temporal/schema/postgresql/v12/temporal/versioned
@@ -143,7 +255,7 @@ spec:
               temporal-sql-tool --plugin postgres12 --ep "$POSTGRES_SEEDS" -u "$POSTGRES_USER" -p "$DB_PORT" --db temporal_visibility update-schema -d /etc/temporal/schema/postgresql/v12/visibility/versioned
       containers:
         - name: temporal
-          image: temporalio/server:1.32.2
+          image: {{ .Values.temporal.serverImage }}
           ports:
             - name: grpc
               containerPort: 7233
@@ -155,14 +267,14 @@ spec:
             - name: DB_PORT
               value: "5432"
             - name: POSTGRES_USER
-              value: alephat
+              value: {{ .Values.postgresql.username | quote }}
             - name: POSTGRES_PWD
               valueFrom:
                 secretKeyRef:
                   name: alephat-postgres
                   key: password
             - name: POSTGRES_SEEDS
-              value: alephat-postgresql
+              value: {{ $pgHost | quote }}
           command:
             - /bin/sh
             - -ec
@@ -189,12 +301,7 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 5
           resources:
-            requests:
-              cpu: 250m
-              memory: 512Mi
-            limits:
-              cpu: "2"
-              memory: 2Gi
+            {{- toYaml .Values.temporal.resources | nindent 12 }}
       volumes:
         - name: config
           configMap:
@@ -207,7 +314,10 @@ apiVersion: v1
 kind: Service
 metadata:
   name: temporal
-  namespace: alephat
+  namespace: {{ $tNs }}
+  labels:
+    app: temporal
+    {{- include "alephat.labels" . | nindent 4 }}
 spec:
   selector:
     app: temporal
@@ -220,9 +330,16 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: temporal-namespace
-  namespace: alephat
+  namespace: {{ $tNs }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+  labels:
+    app: temporal-namespace
+    {{- include "alephat.labels" . | nindent 4 }}
 spec:
   backoffLimit: 10
+  ttlSecondsAfterFinished: 300
   template:
     metadata:
       labels:
@@ -231,12 +348,12 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: namespace-setup
-          image: temporalio/admin-tools:1.32.2
+          image: {{ .Values.temporal.adminToolsImage }}
           env:
             - name: TEMPORAL_ADDRESS
-              value: temporal.alephat.svc.cluster.local:7233
+              value: {{ $tAddr | quote }}
             - name: TEMPORAL_NAMESPACE
-              value: default
+              value: {{ .Values.temporal.namespace | quote }}
             - name: TEMPORAL_TLS
               value: "true"
             - name: TEMPORAL_TLS_SERVER_CA_CERT_PATH
@@ -246,7 +363,7 @@ spec:
             - name: TEMPORAL_TLS_CLIENT_KEY_PATH
               value: /etc/temporal/tls/tls.key
             - name: TEMPORAL_TLS_SERVER_NAME
-              value: temporal.alephat.svc.cluster.local
+              value: {{ $tHost | quote }}
           command:
             - /bin/sh
             - -ec
@@ -267,7 +384,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: temporal-ui
-  namespace: alephat
+  namespace: {{ $tNs }}
+  labels:
+    app: temporal-ui
+    {{- include "alephat.labels" . | nindent 4 }}
 spec:
   replicas: 1
   selector:
@@ -281,13 +401,13 @@ spec:
       enableServiceLinks: false
       containers:
         - name: temporal-ui
-          image: temporalio/ui:latest
+          image: {{ .Values.temporal.uiImage }}
           ports:
             - name: http
               containerPort: 8080
           env:
             - name: TEMPORAL_ADDRESS
-              value: temporal.alephat.svc.cluster.local:7233
+              value: {{ $tAddr | quote }}
             - name: TEMPORAL_TLS_CA
               value: /etc/temporal/tls/ca.crt
             - name: TEMPORAL_TLS_CERT
@@ -295,7 +415,7 @@ spec:
             - name: TEMPORAL_TLS_KEY
               value: /etc/temporal/tls/tls.key
             - name: TEMPORAL_TLS_SERVER_NAME
-              value: temporal.alephat.svc.cluster.local
+              value: {{ $tHost | quote }}
             - name: TEMPORAL_TLS_ENABLE_HOST_VERIFICATION
               value: "true"
           volumeMounts:
@@ -308,12 +428,7 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
-            requests:
-              cpu: 50m
-              memory: 128Mi
-            limits:
-              cpu: 500m
-              memory: 512Mi
+            {{- toYaml .Values.temporal.uiResources | nindent 12 }}
       volumes:
         - name: tls
           secret:
@@ -323,7 +438,10 @@ apiVersion: v1
 kind: Service
 metadata:
   name: temporal-ui
-  namespace: alephat
+  namespace: {{ $tNs }}
+  labels:
+    app: temporal-ui
+    {{- include "alephat.labels" . | nindent 4 }}
 spec:
   selector:
     app: temporal-ui
@@ -331,3 +449,4 @@ spec:
     - name: http
       port: 8080
       targetPort: http
+{{- end }}

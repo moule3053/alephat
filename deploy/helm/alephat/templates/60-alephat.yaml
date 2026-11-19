@@ -1,0 +1,816 @@
+{{- $appNs := .Values.namespaces.alephat -}}
+{{- $sbNs := .Values.namespaces.sandboxes -}}
+{{- $pgHost := include "alephat.postgresHost" . -}}
+{{- $tHost := include "alephat.temporalHost" . -}}
+{{- $tAddr := include "alephat.temporalAddress" . -}}
+{{- $llmUrl := include "alephat.litellmBaseUrl" . -}}
+{{- $pubOrigin := include "alephat.publicOrigin" . -}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alephat-harness
+  namespace: {{ $appNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+{{- if .Values.externalSecrets.enabled }}
+{{- range (list "alephat-postgres" "alephat-secrets" "alephat-oauth" "temporal-tls" "litellm-secrets" "litellm-provider-keys") }}
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: {{ . }}
+  namespace: {{ $appNs }}
+  labels:
+    {{- include "alephat.labels" $ | nindent 4 }}
+spec:
+  refreshInterval: {{ $.Values.externalSecrets.refreshInterval }}
+  secretStoreRef:
+    name: gcp-secret-manager
+    kind: ClusterSecretStore
+  target:
+    name: {{ . }}
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: {{ . }}
+{{- end }}
+{{- else }}
+{{- include "alephat.generatedSecrets" . }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alephat-postgres
+  namespace: {{ $appNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  password: {{ index ._generatedSecrets "postgresPassword" | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-secrets
+  namespace: {{ $appNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  masterkey: {{ index ._generatedSecrets "litellmMasterKey" | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-provider-keys
+  namespace: {{ $appNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  OPENAI_API_KEY: {{ .Values.secrets.providerKeys.openaiApiKey | quote }}
+  ANTHROPIC_API_KEY: {{ .Values.secrets.providerKeys.anthropicApiKey | quote }}
+  GEMINI_API_KEY: {{ .Values.secrets.providerKeys.geminiApiKey | quote }}
+  FIREWORKS_API_KEY: {{ .Values.secrets.providerKeys.fireworksApiKey | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: temporal-tls
+  namespace: {{ $appNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  ca.crt: {{ index ._generatedSecrets "caCrt" | quote }}
+  server.crt: {{ index ._generatedSecrets "serverCrt" | quote }}
+  server.key: {{ index ._generatedSecrets "serverKey" | quote }}
+  tls.crt: {{ index ._generatedSecrets "clientCrt" | quote }}
+  tls.key: {{ index ._generatedSecrets "clientKey" | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alephat-secrets
+  namespace: {{ $appNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  PLATFORM_API_TOKEN: {{ default (randAlphaNum 48) .Values.secrets.platformApiToken | quote }}
+  PLATFORM_JWT_SECRET: {{ default (randAlphaNum 48) .Values.secrets.platformJwtSecret | quote }}
+  GITHUB_WEBHOOK_SECRET: {{ default (randAlphaNum 48) .Values.secrets.githubWebhookSecret | quote }}
+  SLACK_SIGNING_SECRET: {{ .Values.secrets.slack.signingSecret | quote }}
+  SLACK_BOT_TOKEN: {{ .Values.secrets.slack.botToken | quote }}
+  SLACK_APP_TOKEN: {{ .Values.secrets.slack.appToken | quote }}
+  SLACK_USER_MAP: {{ .Values.secrets.slack.userMap | quote }}
+  SLACK_APP_ID: {{ .Values.secrets.slack.appId | quote }}
+  SLACK_BOT_USER_ID: {{ .Values.secrets.slack.botUserId | quote }}
+  SLACK_BOT_USERNAME: {{ .Values.secrets.slack.botUsername | quote }}
+{{- $fernetDefault := (randBytes 32 | b64enc | replace "+" "-" | replace "/" "_") }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alephat-oauth
+  namespace: {{ $appNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  GITHUB_APP_ID: {{ .Values.secrets.githubApp.appId | quote }}
+  GITHUB_APP_CLIENT_ID: {{ .Values.secrets.githubApp.clientId | quote }}
+  GITHUB_APP_CLIENT_SECRET: {{ .Values.secrets.githubApp.clientSecret | quote }}
+  GITHUB_APP_INSTALLATION_ID: {{ .Values.secrets.githubApp.installationId | quote }}
+  GITHUB_APP_PRIVATE_KEY: {{ .Values.secrets.githubApp.privateKey | quote }}
+  ALLOWED_GITHUB_USERS: {{ .Values.secrets.githubApp.allowedUsers | quote }}
+  ALLOWED_GITHUB_ORGS: {{ .Values.secrets.githubApp.allowedOrgs | quote }}
+  DASHBOARD_JWT_SECRET: {{ default (randAlphaNum 48) .Values.secrets.dashboardJwtSecret | quote }}
+  TOKEN_ENCRYPTION_KEY: {{ default $fernetDefault .Values.secrets.tokenEncryptionKey | quote }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alephat-config
+  namespace: {{ $appNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+data:
+  DATABASE_URL: ""
+  DATABASE_HOST: {{ $pgHost | quote }}
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: {{ .Values.postgresql.database | quote }}
+  DATABASE_USER: {{ .Values.postgresql.username | quote }}
+  TEMPORAL_ADDRESS: {{ $tAddr | quote }}
+  TEMPORAL_NAMESPACE: {{ .Values.temporal.namespace | quote }}
+  TEMPORAL_TASK_QUEUE: {{ .Values.temporal.taskQueue | quote }}
+  TEMPORAL_TLS: "true"
+  TEMPORAL_TLS_CA_CERT_PATH: "/etc/temporal/tls/ca.crt"
+  TEMPORAL_TLS_CLIENT_CERT_PATH: "/etc/temporal/tls/tls.crt"
+  TEMPORAL_TLS_CLIENT_KEY_PATH: "/etc/temporal/tls/tls.key"
+  TEMPORAL_TLS_SERVER_NAME: {{ $tHost | quote }}
+  LLM_MODE: "litellm"
+  LITELLM_ENABLED: "true"
+  LITELLM_BASE_URL: {{ $llmUrl | quote }}
+  DEFAULT_MODEL: {{ .Values.litellm.defaultModel | quote }}
+  ENABLED_MODELS: {{ include "alephat.enabledModelsCsv" . | quote }}
+  DEFAULT_SANDBOX_PROVIDER: "agent_sandbox"
+  BOOTSTRAP_DEV_DEFAULTS: {{ .Values.alephat.config.bootstrapDevDefaults | quote }}
+  AGENT_SANDBOX_NAMESPACE: {{ $sbNs | quote }}
+  AGENT_SANDBOX_TEMPLATE: {{ .Values.agentSandbox.templateName | quote }}
+  API_AUTH_DISABLED: {{ .Values.alephat.config.apiAuthDisabled | quote }}
+  WEBHOOK_SIGNATURES_REQUIRED: {{ .Values.alephat.config.webhookSignaturesRequired | quote }}
+  DASHBOARD_BASE_URL: {{ $pubOrigin | quote }}
+  DASHBOARD_API_BASE_URL: {{ $pubOrigin | quote }}
+  DASHBOARD_ALLOWED_ORIGINS: {{ $pubOrigin | quote }}
+  CORS_ORIGINS: {{ $pubOrigin | quote }}
+  MAX_RUN_RETRIES: {{ .Values.alephat.config.maxRunRetries | quote }}
+  AGENT_RECURSION_LIMIT: {{ .Values.alephat.config.agentRecursionLimit | quote }}
+  ALLOW_STUB_SANDBOXES: {{ .Values.alephat.config.allowStubSandboxes | quote }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: alephat-migrate
+  namespace: {{ $appNs }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+  labels:
+    app: alephat-migrate
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app: alephat-migrate
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: {{ .Values.alephat.platformImage }}
+          imagePullPolicy: {{ .Values.alephat.imagePullPolicy }}
+          command: ["python", "-m", "alephat_platform.migrate"]
+          envFrom:
+            - configMapRef:
+                name: alephat-config
+          env:
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-postgres
+                  key: password
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alephat-api
+  namespace: {{ $appNs }}
+  labels:
+    app: alephat-api
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.alephat.apiReplicas }}
+  selector:
+    matchLabels:
+      app: alephat-api
+  template:
+    metadata:
+      labels:
+        app: alephat-api
+    spec:
+      initContainers:
+        - name: migrate
+          image: {{ .Values.alephat.platformImage }}
+          imagePullPolicy: {{ .Values.alephat.imagePullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              python -c '
+              import os, socket, time
+              host = os.environ["DATABASE_HOST"]
+              port = int(os.environ.get("DATABASE_PORT", "5432"))
+              for _ in range(90):
+                  try:
+                      with socket.create_connection((host, port), timeout=2):
+                          break
+                  except OSError:
+                      time.sleep(2)
+              '
+              exec python -m alephat_platform.migrate
+          envFrom:
+            - configMapRef:
+                name: alephat-config
+          env:
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-postgres
+                  key: password
+      containers:
+        - name: api
+          image: {{ .Values.alephat.platformImage }}
+          imagePullPolicy: {{ .Values.alephat.imagePullPolicy }}
+          command: ["uvicorn", "alephat_platform.api.app:app", "--host", "0.0.0.0", "--port", "8080"]
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: alephat-config
+          env:
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-postgres
+                  key: password
+            - name: SERVICE_NAME
+              value: api
+            - name: LITELLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: masterkey
+            - name: PLATFORM_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: PLATFORM_API_TOKEN
+            - name: PLATFORM_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: PLATFORM_JWT_SECRET
+                  optional: true
+            - name: ALLOWED_GITHUB_USERS
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-oauth
+                  key: ALLOWED_GITHUB_USERS
+                  optional: true
+            - name: ALLOWED_GITHUB_ORGS
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-oauth
+                  key: ALLOWED_GITHUB_ORGS
+                  optional: true
+            - name: GITHUB_APP_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-oauth
+                  key: GITHUB_APP_CLIENT_ID
+            - name: GITHUB_APP_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-oauth
+                  key: GITHUB_APP_CLIENT_SECRET
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-oauth
+                  key: GITHUB_APP_ID
+            - name: GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-oauth
+                  key: GITHUB_APP_PRIVATE_KEY
+            - name: GITHUB_APP_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-oauth
+                  key: GITHUB_APP_INSTALLATION_ID
+            - name: DASHBOARD_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-oauth
+                  key: DASHBOARD_JWT_SECRET
+            - name: TOKEN_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-oauth
+                  key: TOKEN_ENCRYPTION_KEY
+          volumeMounts:
+            - name: temporal-tls
+              mountPath: /etc/temporal/tls
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: temporal-tls
+          secret:
+            secretName: temporal-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alephat-api
+  namespace: {{ $appNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: alephat-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alephat-webhook
+  namespace: {{ $appNs }}
+  labels:
+    app: alephat-webhook
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.alephat.webhookReplicas }}
+  selector:
+    matchLabels:
+      app: alephat-webhook
+  template:
+    metadata:
+      labels:
+        app: alephat-webhook
+    spec:
+      initContainers:
+        - name: migrate
+          image: {{ .Values.alephat.platformImage }}
+          imagePullPolicy: {{ .Values.alephat.imagePullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              python -c '
+              import os, socket, time
+              host = os.environ["DATABASE_HOST"]
+              port = int(os.environ.get("DATABASE_PORT", "5432"))
+              for _ in range(90):
+                  try:
+                      with socket.create_connection((host, port), timeout=2):
+                          break
+                  except OSError:
+                      time.sleep(2)
+              '
+              exec python -m alephat_platform.migrate
+          envFrom:
+            - configMapRef:
+                name: alephat-config
+          env:
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-postgres
+                  key: password
+      containers:
+        - name: webhook
+          image: {{ .Values.alephat.platformImage }}
+          imagePullPolicy: {{ .Values.alephat.imagePullPolicy }}
+          command: ["uvicorn", "alephat_platform.webhook.app:app", "--host", "0.0.0.0", "--port", "8081"]
+          ports:
+            - name: http
+              containerPort: 8081
+          envFrom:
+            - configMapRef:
+                name: alephat-config
+          env:
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-postgres
+                  key: password
+            - name: SERVICE_NAME
+              value: webhook
+            - name: SLACK_APP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: SLACK_APP_TOKEN
+                  optional: true
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: SLACK_BOT_TOKEN
+                  optional: true
+            - name: SLACK_BOT_USER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: SLACK_BOT_USER_ID
+                  optional: true
+            - name: SLACK_USER_MAP
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: SLACK_USER_MAP
+                  optional: true
+            - name: GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: GITHUB_WEBHOOK_SECRET
+                  optional: true
+            - name: SLACK_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: SLACK_SIGNING_SECRET
+                  optional: true
+            - name: TOKEN_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-oauth
+                  key: TOKEN_ENCRYPTION_KEY
+          volumeMounts:
+            - name: temporal-tls
+              mountPath: /etc/temporal/tls
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: temporal-tls
+          secret:
+            secretName: temporal-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alephat-webhook
+  namespace: {{ $appNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: alephat-webhook
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alephat-harness
+  namespace: {{ $appNs }}
+  labels:
+    app: alephat-harness
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.alephat.harnessReplicas }}
+  selector:
+    matchLabels:
+      app: alephat-harness
+  template:
+    metadata:
+      labels:
+        app: alephat-harness
+    spec:
+      serviceAccountName: alephat-harness
+      terminationGracePeriodSeconds: 300
+      initContainers:
+        - name: migrate
+          image: {{ .Values.alephat.platformImage }}
+          imagePullPolicy: {{ .Values.alephat.imagePullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              python -c '
+              import os, socket, time
+              host = os.environ["DATABASE_HOST"]
+              port = int(os.environ.get("DATABASE_PORT", "5432"))
+              for _ in range(90):
+                  try:
+                      with socket.create_connection((host, port), timeout=2):
+                          break
+                  except OSError:
+                      time.sleep(2)
+              '
+              exec python -m alephat_platform.migrate
+          envFrom:
+            - configMapRef:
+                name: alephat-config
+          env:
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-postgres
+                  key: password
+      containers:
+        - name: slack-renderer
+          image: {{ .Values.alephat.slackRendererImage }}
+          imagePullPolicy: {{ .Values.alephat.imagePullPolicy }}
+          env:
+            - name: HOST
+              value: "127.0.0.1"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+        - name: harness
+          image: {{ .Values.alephat.platformImage }}
+          imagePullPolicy: {{ .Values.alephat.imagePullPolicy }}
+          command: ["python", "-m", "alephat_platform.harness.worker"]
+          envFrom:
+            - configMapRef:
+                name: alephat-config
+          env:
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-postgres
+                  key: password
+            - name: SERVICE_NAME
+              value: harness
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: SLACK_BOT_TOKEN
+                  optional: true
+            - name: SLACK_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: SLACK_SIGNING_SECRET
+                  optional: true
+            - name: DAYTONA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-secrets
+                  key: DAYTONA_API_KEY
+                  optional: true
+            - name: LITELLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: masterkey
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-provider-keys
+                  key: OPENAI_API_KEY
+                  optional: true
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-provider-keys
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-provider-keys
+                  key: GEMINI_API_KEY
+                  optional: true
+            - name: TOKEN_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-oauth
+                  key: TOKEN_ENCRYPTION_KEY
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-oauth
+                  key: GITHUB_APP_ID
+            - name: GITHUB_APP_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-oauth
+                  key: GITHUB_APP_PRIVATE_KEY
+            - name: GITHUB_APP_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: alephat-oauth
+                  key: GITHUB_APP_INSTALLATION_ID
+          volumeMounts:
+            - name: temporal-tls
+              mountPath: /etc/temporal/tls
+              readOnly: true
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+      volumes:
+        - name: temporal-tls
+          secret:
+            secretName: temporal-tls
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alephat-ui
+  namespace: {{ $appNs }}
+  labels:
+    app: alephat-ui
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.alephat.uiReplicas }}
+  selector:
+    matchLabels:
+      app: alephat-ui
+  template:
+    metadata:
+      labels:
+        app: alephat-ui
+    spec:
+      containers:
+        - name: ui
+          image: {{ .Values.alephat.uiImage }}
+          imagePullPolicy: {{ .Values.alephat.imagePullPolicy }}
+          env:
+            - name: API_UPSTREAM
+              value: alephat-api:80
+            - name: NGINX_ENVSUBST_FILTER
+              value: API_UPSTREAM
+          ports:
+            - name: http
+              containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 192Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alephat-ui
+  namespace: {{ $appNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: alephat-ui
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+{{- if and .Values.keda.enabled .Values.keda.autoscaling.enabled }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: keda-trigger-auth-temporal
+  namespace: {{ $appNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  secretTargetRef:
+    - parameter: ca
+      name: temporal-tls
+      key: ca.crt
+    - parameter: cert
+      name: temporal-tls
+      key: tls.crt
+    - parameter: key
+      name: temporal-tls
+      key: tls.key
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: alephat-harness
+  namespace: {{ $appNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: alephat-harness
+  minReplicaCount: {{ .Values.keda.autoscaling.minReplicaCount }}
+  maxReplicaCount: {{ .Values.keda.autoscaling.maxReplicaCount }}
+  cooldownPeriod: {{ .Values.keda.autoscaling.cooldownPeriod }}
+  pollingInterval: {{ .Values.keda.autoscaling.pollingInterval }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 15
+        scaleDown:
+          stabilizationWindowSeconds: 180
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 60
+  triggers:
+    - type: temporal
+      authenticationRef:
+        name: keda-trigger-auth-temporal
+      metadata:
+        endpoint: {{ $tAddr | quote }}
+        namespace: {{ .Values.temporal.namespace | quote }}
+        taskQueue: {{ .Values.temporal.taskQueue | quote }}
+        queueTypes: workflow,activity
+        targetQueueSize: {{ .Values.keda.autoscaling.targetQueueSize | quote }}
+        activationTargetQueueSize: {{ .Values.keda.autoscaling.activationTargetQueueSize | quote }}
+        includeRunningWorkflowCount: "true"
+        tlsServerName: {{ $tHost | quote }}
+{{- end }}

@@ -1,0 +1,364 @@
+{{- if .Values.litellm.enabled }}
+{{- $llmNs := .Values.namespaces.litellm -}}
+{{- if .Values.externalSecrets.enabled }}
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: litellm-secrets
+  namespace: {{ $llmNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  refreshInterval: {{ .Values.externalSecrets.refreshInterval }}
+  secretStoreRef:
+    name: gcp-secret-manager
+    kind: ClusterSecretStore
+  target:
+    name: litellm-secrets
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: litellm-secrets
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: litellm-postgres
+  namespace: {{ $llmNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  refreshInterval: {{ .Values.externalSecrets.refreshInterval }}
+  secretStoreRef:
+    name: gcp-secret-manager
+    kind: ClusterSecretStore
+  target:
+    name: litellm-postgres
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: litellm-postgres
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: litellm-provider-keys
+  namespace: {{ $llmNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  refreshInterval: {{ .Values.externalSecrets.refreshInterval }}
+  secretStoreRef:
+    name: gcp-secret-manager
+    kind: ClusterSecretStore
+  target:
+    name: litellm-provider-keys
+    creationPolicy: Owner
+  dataFrom:
+    - extract:
+        key: litellm-provider-keys
+{{- else }}
+{{- include "alephat.generatedSecrets" . }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-secrets
+  namespace: {{ $llmNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  masterkey: {{ index ._generatedSecrets "litellmMasterKey" | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-postgres
+  namespace: {{ $llmNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  password: {{ index ._generatedSecrets "litellmPostgresPassword" | quote }}
+  postgres-password: {{ index ._generatedSecrets "litellmPostgresPassword" | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-provider-keys
+  namespace: {{ $llmNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  OPENAI_API_KEY: {{ .Values.secrets.providerKeys.openaiApiKey | quote }}
+  ANTHROPIC_API_KEY: {{ .Values.secrets.providerKeys.anthropicApiKey | quote }}
+  GEMINI_API_KEY: {{ .Values.secrets.providerKeys.geminiApiKey | quote }}
+  FIREWORKS_API_KEY: {{ .Values.secrets.providerKeys.fireworksApiKey | quote }}
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: litellm
+  namespace: {{ $llmNs }}
+  {{- if .Values.litellm.gcpServiceAccountEmail }}
+  annotations:
+    iam.gke.io/gcp-service-account: {{ .Values.litellm.gcpServiceAccountEmail | quote }}
+  {{- end }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: litellm-postgresql-data
+  namespace: {{ $llmNs }}
+  labels:
+    app: litellm-postgresql
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.litellm.storageClassName | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.litellm.storageSize | quote }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: litellm-postgresql
+  namespace: {{ $llmNs }}
+  labels:
+    app: litellm-postgresql
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  serviceName: litellm-postgresql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm-postgresql
+  template:
+    metadata:
+      labels:
+        app: litellm-postgresql
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.litellm.postgresImage }}
+          ports:
+            - name: pg
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: litellm
+            - name: POSTGRES_USER
+              value: litellm
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-postgres
+                  key: password
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "litellm", "-d", "litellm"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: litellm-postgresql-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-postgresql
+  namespace: {{ $llmNs }}
+  labels:
+    app: litellm-postgresql
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: litellm-postgresql
+  ports:
+    - name: pg
+      port: 5432
+      targetPort: pg
+{{- $cfgYaml := list "model_list:" -}}
+{{- range .Values.litellm.models -}}
+  {{- $cfgYaml = append $cfgYaml (printf "  - model_name: %s" .alias) -}}
+  {{- $cfgYaml = append $cfgYaml "    litellm_params:" -}}
+  {{- $cfgYaml = append $cfgYaml (printf "      model: %s" .target) -}}
+  {{- if .apiKeyEnv -}}
+    {{- $cfgYaml = append $cfgYaml (printf "      api_key: os.environ/%s" .apiKeyEnv) -}}
+  {{- end -}}
+{{- end -}}
+{{- $cfgYaml = append $cfgYaml "general_settings:" -}}
+{{- $cfgYaml = append $cfgYaml "  master_key: os.environ/PROXY_MASTER_KEY" -}}
+{{- $cfgYaml = append $cfgYaml "litellm_settings:" -}}
+{{- $cfgYaml = append $cfgYaml "  drop_params: true" -}}
+{{- $renderedCfg := join "\n" $cfgYaml }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: {{ $llmNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+{{ $renderedCfg | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: {{ $llmNs }}
+  labels:
+    app.kubernetes.io/name: litellm
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: litellm
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ $renderedCfg | sha256sum }}
+      labels:
+        app.kubernetes.io/name: litellm
+    spec:
+      serviceAccountName: litellm
+      initContainers:
+        - name: prisma-migrations
+          image: {{ .Values.litellm.image }}
+          workingDir: /app
+          env:
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-postgres
+                  key: password
+            - name: DISABLE_SCHEMA_UPDATE
+              value: "false"
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              export DATABASE_URL="postgresql://litellm:${DATABASE_PASSWORD}@litellm-postgresql:5432/litellm"
+              python -c '
+              import socket, time
+              for _ in range(60):
+                  try:
+                      with socket.create_connection(("litellm-postgresql", 5432), timeout=2):
+                          break
+                  except OSError:
+                      time.sleep(2)
+              '
+              exec python litellm/proxy/prisma_migration.py
+      containers:
+        - name: litellm
+          image: {{ .Values.litellm.image }}
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/litellm/config.yaml"]
+          ports:
+            - name: http
+              containerPort: 4000
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: litellm-provider-keys
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "4000"
+            - name: DATABASE_USERNAME
+              value: litellm
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-postgres
+                  key: password
+            - name: DATABASE_HOST
+              value: litellm-postgresql
+            - name: DATABASE_NAME
+              value: litellm
+            - name: PROXY_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: masterkey
+            - name: DISABLE_SCHEMA_UPDATE
+              value: "true"
+            {{- if .Values.litellm.vertexProject }}
+            - name: VERTEXAI_PROJECT
+              value: {{ .Values.litellm.vertexProject | quote }}
+            {{- end }}
+            {{- if .Values.litellm.vertexLocation }}
+            - name: VERTEXAI_LOCATION
+              value: {{ .Values.litellm.vertexLocation | quote }}
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: /health/readiness
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: http
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.litellm.resources | nindent 12 }}
+          volumeMounts:
+            - name: litellm-config
+              mountPath: /etc/litellm/config.yaml
+              subPath: config.yaml
+      volumes:
+        - name: litellm-config
+          configMap:
+            name: litellm-config
+            items:
+              - key: config.yaml
+                path: config.yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: {{ $llmNs }}
+  labels:
+    app.kubernetes.io/name: litellm
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: litellm
+  ports:
+    - name: http
+      port: 4000
+      targetPort: http
+{{- end }}

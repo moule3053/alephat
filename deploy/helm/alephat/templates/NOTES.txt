@@ -1,0 +1,42 @@
+Alephat and its cluster dependencies have been deployed across isolated namespaces:
+
+  - Alephat Platform (API, Webhook, Harness, UI): {{ .Values.namespaces.alephat }}
+  - Agent Sandbox Workloads ({{ include "alephat.runtimeClassName" . }}): {{ .Values.namespaces.sandboxes }}
+{{- if .Values.agentSandbox.enabled }}
+  - Agent Sandbox Controller:                     {{ .Values.namespaces.agentSandboxSystem }}
+{{- end }}
+{{- if eq .Values.sandboxRuntime.type "kata" }}
+  - Kata Containers Runtime:                      {{ .Values.namespaces.kata }}
+{{- end }}
+{{- if .Values.postgresql.enabled }}
+  - PostgreSQL Database:                          {{ .Values.namespaces.postgresql }}
+{{- end }}
+{{- if .Values.temporal.enabled }}
+  - Temporal Service & Web UI (mTLS):             {{ .Values.namespaces.temporal }}
+{{- end }}
+{{- if .Values.litellm.enabled }}
+  - LiteLLM Coding Model Gateway:                 {{ .Values.namespaces.litellm }}
+{{- end }}
+{{- if .Values.keda.enabled }}
+  - KEDA Operator & Metrics Server:               {{ .Values.namespaces.keda }}
+{{- end }}
+{{- if .Values.externalSecrets.enabled }}
+  - External Secrets Operator:                    {{ .Values.namespaces.externalSecrets }}
+{{- end }}
+{{- if .Values.traefik.enabled }}
+  - Traefik Ingress Controller:                   {{ .Values.namespaces.traefik }}
+{{- end }}
+
+{{- if and .Values.traefik.enabled .Values.ingress.enabled }}
+
+Public Endpoints:
+  - Alephat Dashboard & Webhooks: https://{{ .Values.ingress.host }}
+{{- if .Values.temporal.enabled }}
+  - Temporal Web UI:              https://{{ .Values.ingress.temporalUiHost }}
+  - Temporal Frontend gRPC (mTLS): {{ .Values.ingress.temporalGrpcHost }}:7233
+{{- end }}
+{{- else }}
+
+Port-Forward Dashboard Locally:
+  kubectl -n {{ .Values.namespaces.alephat }} port-forward svc/alephat-ui 18080:80
+{{- end }}

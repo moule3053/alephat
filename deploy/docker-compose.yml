@@ -138,6 +138,7 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       FIREWORKS_API_KEY: ${FIREWORKS_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}
     volumes:
       - ./litellm_config.yaml:/app/config.yaml:ro
     ports:
@@ -246,6 +247,7 @@ services:
       FIREWORKS_API_KEY: ${FIREWORKS_API_KEY:-}
       FIREWORKS_BASE_URL: ${FIREWORKS_BASE_URL:-https://api.fireworks.ai/inference/v1}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
       MAX_RUN_DURATION_SECONDS: ${MAX_RUN_DURATION_SECONDS:-14400}
       MAX_RUN_RETRIES: ${MAX_RUN_RETRIES:-3}

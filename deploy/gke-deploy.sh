@@ -1,17 +1,26 @@
 #!/usr/bin/env bash
-# End-to-end GKE provisioning & deployment script for Alephat:
-#   1. GKE cluster creation (Kata Containers with nested virtualization OR gVisor sandbox pool)
-#   2. Agent Sandbox controller & CRDs (v1.0.9) + SandboxTemplate (kata-qemu or gvisor)
-#   3. KEDA operator (2.21.0)
-#   4. LiteLLM gateway (1.106.6) with configurable enabled models & Workload Identity
-#   5. Cloud Build image builds (platform, ui, sandbox)
-#   6. Alephat platform (PostgreSQL 17, Temporal 1.32 mTLS Server + UI, API, Webhook, UI, Harness + KEDA Temporal ScaledObject)
-#   7. Optional Traefik ingress (42.3.0) with Let's Encrypt TLS & Cloud DNS (Dashboard, Temporal UI, and Temporal gRPC mTLS)
+# End-to-end GKE provisioning & single-chart Helm deployment for Alephat:
+#   1. GKE cluster creation (Kata nested virtualization OR gVisor sandbox pool)
+#   2. Workload Identity IAM & Google Cloud Secret Manager bootstrap (including Temporal mTLS certs)
+#   3. Parallel Cloud Build image builds (platform, ui, slack-renderer, sandbox)
+#   4. Single unified Helm release (`deploy/helm/alephat`) deploying Alephat in its own
+#      namespace and every dependency in its own dedicated namespace:
+#        - alephat              (API, Webhook, Temporal Harness + Slack Renderer, UI, ScaledObject)
+#        - alephat-sandboxes    (SandboxTemplate, RBAC, NetworkPolicy)
+#        - agent-sandbox-system (Agent Sandbox Controller v1.0.9)
+#        - kata-system          (Kata Containers 4.3.1 + kata-qemu RuntimeClass)
+#        - postgresql           (PostgreSQL 17 StatefulSet)
+#        - temporal             (Temporal 1.32.2 mTLS Server + Namespace Job + Web UI)
+#        - litellm              (LiteLLM 1.106.6 Gemini Coding Models + PostgreSQL)
+#        - keda                 (KEDA 2.21.0 Operator + Metrics Server + Webhooks)
+#        - external-secrets     (External Secrets Operator 2.14.0 + ClusterSecretStore)
+#        - traefik              (Traefik v3.7.17 LoadBalancer + Let's Encrypt TLS)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CHART_DIR="${REPO_ROOT}/deploy/helm/alephat"
 
 if [[ -f "${SCRIPT_DIR}/.env" ]]; then
   while IFS= read -r line || [[ -n "${line}" ]]; do
@@ -36,14 +45,11 @@ if [[ -f "${SCRIPT_DIR}/.env" ]]; then
   done < "${SCRIPT_DIR}/.env"
 fi
 
-# ---------------------------------------------------------------------------
-# Defaults (latest tested versions)
-# ---------------------------------------------------------------------------
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
 REGION="${REGION:-us-central1}"
 ZONE="${ZONE:-}"
 CLUSTER_NAME="${CLUSTER_NAME:-alephat}"
-SANDBOX_RUNTIME="${SANDBOX_RUNTIME:-kata}"          # kata | gvisor
+SANDBOX_RUNTIME="${SANDBOX_RUNTIME:-kata}"
 NODE_SIZE="${NODE_SIZE:-n2-standard-4}"
 NUM_NODES="${NUM_NODES:-3}"
 MIN_NODES="${MIN_NODES:-2}"
@@ -51,20 +57,23 @@ MAX_NODES="${MAX_NODES:-6}"
 K8S_VERSION="${K8S_VERSION:-latest}"
 RELEASE_CHANNEL="${RELEASE_CHANNEL:-regular}"
 
-AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v1.0.9}"
 KATA_VERSION="${KATA_VERSION:-4.3.1}"
 LITELLM_VERSION="${LITELLM_VERSION:-1.106.6}"
-KEDA_VERSION="${KEDA_VERSION:-2.21.0}"
-ESO_VERSION="${ESO_VERSION:-2.14.0}"
-TRAEFIK_VERSION="${TRAEFIK_VERSION:-42.3.0}"
-
 USE_EXTERNAL_SECRETS="${USE_EXTERNAL_SECRETS:-true}"
 
 AR_REPOSITORY="${AR_REPOSITORY:-alephat}"
+RELEASE_NAME="${RELEASE_NAME:-alephat}"
 PLATFORM_NAMESPACE="${PLATFORM_NAMESPACE:-alephat}"
 SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-alephat-sandboxes}"
+POSTGRESQL_NAMESPACE="${POSTGRESQL_NAMESPACE:-postgresql}"
+TEMPORAL_NAMESPACE_K8S="${TEMPORAL_NAMESPACE_K8S:-temporal}"
+LITELLM_NAMESPACE="${LITELLM_NAMESPACE:-litellm}"
+KATA_NAMESPACE="${KATA_NAMESPACE:-kata-system}"
+KEDA_NAMESPACE="${KEDA_NAMESPACE:-keda}"
+ESO_NAMESPACE="${ESO_NAMESPACE:-external-secrets}"
+TRAEFIK_NAMESPACE="${TRAEFIK_NAMESPACE:-traefik}"
 
-ENABLED_MODELS="${ENABLED_MODELS:-google:gemini-4-hydrogen,google:gemini-4-carbon,google:gemini-4-argon,google:gemini-3.8-flash,google:gemini-3.5-flash,google:gemini-3.1-pro-preview,google:gemini-2.5-pro,google:gemini-2.5-flash}"
+ENABLED_MODELS="${ENABLED_MODELS:-google:gemini-4-hydrogen,google:gemini-4-carbon,google:gemini-4-argon,google:gemini-3.8-flash,google:gemini-3.5-flash,google:gemini-3.1-pro-preview,google:gemini-2.5-pro,google:gemini-2.5-flash,anthropic:claude-opus-5-5,anthropic:claude-sonnet-5-5,anthropic:claude-haiku-5-5,anthropic:claude-opus-4-6,anthropic:claude-sonnet-4-6,anthropic:claude-sonnet-4-5,openai:gpt-6.1-terra,openai:gpt-6.1-sol,openai:gpt-6-luna,openai:gpt-6-astra,openai:gpt-5.5,openai:gpt-4.1,openai:o4-mini}"
 DEFAULT_MODEL="${DEFAULT_MODEL:-}"
 
 WITH_TRAEFIK=false
@@ -94,30 +103,17 @@ Cluster & Sandbox Runtime Options:
   --cluster-name <name>           GKE cluster name (default: alephat)
   --sandbox-runtime <kata|gvisor> Sandbox isolation runtime (default: kata)
   --node-size <machine-type>      GKE machine type (default: n2-standard-4)
-  --num-nodes <count>             Nodes in the primary/sandbox pool (default: 2)
+  --num-nodes <count>             Initial nodes in the primary pool (default: 3)
   --k8s-version <version>         GKE Kubernetes version (default: latest)
   --release-channel <channel>     GKE release channel (default: regular)
   --reuse-cluster                 Reuse an existing GKE cluster if present
 
 Model & LiteLLM Options:
-  --models <csv>                  Comma-separated model aliases to enable in LiteLLM.
-                                  Accepts known aliases (google:gemini-4-argon,
-                                  google_genai:gemini-4-argon, google:gemini-3.5-flash,
-                                  gemini-5.6-flash, openai:gpt-4o, openai:gpt-4o-mini,
-                                  anthropic:claude-3-5-sonnet, anthropic:claude-sonnet-5)
-                                  or custom alias=provider/model pairs.
+  --models <csv>                  Comma-separated model aliases to enable in LiteLLM
   --default-model <id>            Default model ID in alephat-config (default: first in --models)
 
-Component Versions:
-  --agent-sandbox-version <ver>   kubernetes-sigs/agent-sandbox tag (default: v1.0.9)
-  --kata-version <ver>            Kata Containers release tag (default: 4.3.1)
-  --litellm-version <ver>         LiteLLM Helm chart & image version (default: 1.106.6)
-  --keda-version <ver>            KEDA Helm chart version (default: 2.21.0)
-  --eso-version <ver>             External Secrets Operator Helm chart version (default: 2.14.0)
-  --traefik-version <ver>         Traefik Helm chart version (default: 42.3.0)
-  --no-external-secrets           Create plain Kubernetes Secrets instead of External Secrets + GCP Secret Manager
-
-Ingress & Lifecycle Options:
+Secrets & Ingress Options:
+  --no-external-secrets           Use chart-managed Kubernetes Secrets instead of External Secrets + GCP Secret Manager
   --with-traefik                  Deploy Traefik LoadBalancer + Let's Encrypt HTTPS (Dashboard, Temporal UI, Temporal gRPC)
   --host <fqdn>                   Public hostname for Alephat Dashboard/Webhooks (e.g. alephat.example.com)
   --temporal-ui-host <fqdn>       Public hostname for Temporal Web UI (default: temporal.<base-domain>)
@@ -127,7 +123,7 @@ Ingress & Lifecycle Options:
   --acme-email <email>            Email for Let's Encrypt ACME registration
   --skip-build                    Skip Cloud Build image builds
   --teardown                      Delete the GKE cluster (and static IP if created)
-  --dry-run                       Print resolved configuration and rendered manifests without applying
+  --dry-run                       Print resolved configuration and rendered Helm values without applying
   -h, --help                      Show this help text
 EOF
 }
@@ -145,12 +141,8 @@ while [[ $# -gt 0 ]]; do
     --release-channel) RELEASE_CHANNEL="$2"; shift 2 ;;
     --models) ENABLED_MODELS="$2"; shift 2 ;;
     --default-model) DEFAULT_MODEL="$2"; shift 2 ;;
-    --agent-sandbox-version) AGENT_SANDBOX_VERSION="$2"; shift 2 ;;
     --kata-version) KATA_VERSION="$2"; shift 2 ;;
     --litellm-version) LITELLM_VERSION="$2"; shift 2 ;;
-    --keda-version) KEDA_VERSION="$2"; shift 2 ;;
-    --eso-version) ESO_VERSION="$2"; shift 2 ;;
-    --traefik-version) TRAEFIK_VERSION="$2"; shift 2 ;;
     --no-external-secrets) USE_EXTERNAL_SECRETS=false; shift ;;
     --with-traefik) WITH_TRAEFIK=true; shift ;;
     --host) ALEPHAT_HOST="$2"; shift 2 ;;
@@ -168,9 +160,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "${ZONE}" ]]; then
-  ZONE="${REGION}-a"
-fi
+[[ -z "${ZONE}" ]] && ZONE="${REGION}-a"
 
 if [[ "${SANDBOX_RUNTIME}" != "kata" && "${SANDBOX_RUNTIME}" != "gvisor" ]]; then
   echo "Error: --sandbox-runtime must be 'kata' or 'gvisor' (got '${SANDBOX_RUNTIME}')." >&2
@@ -184,9 +174,6 @@ if [[ "${SANDBOX_RUNTIME}" == "kata" ]]; then
       exit 1
       ;;
   esac
-  RUNTIME_CLASS_NAME="kata-qemu"
-else
-  RUNTIME_CLASS_NAME="gvisor"
 fi
 
 IFS=',' read -r -a MODEL_ENTRIES <<< "${ENABLED_MODELS}"
@@ -211,232 +198,190 @@ UI_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}/alephat-ui:lat
 SLACK_RENDERER_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}/alephat-slack-renderer:latest"
 SANDBOX_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}/alephat-sandbox:latest"
 
-render_litellm_model_list() {
+render_litellm_models_yaml() {
   for entry in "${MODEL_ENTRIES[@]}"; do
     entry="$(echo "${entry}" | xargs)"
     [[ -z "${entry}" ]] && continue
-    local alias target api_key_line=""
+    local alias target api_key_env=""
     if [[ "${entry}" == *"="* ]]; then
       alias="${entry%%=*}"
       target="${entry#*=}"
     else
       alias="${entry}"
       case "${alias}" in
-        gemini-5.6-flash)
-          target="vertex_ai/gemini-2.5-flash"
-          ;;
+        gemini-5.6-flash) target="vertex_ai/gemini-2.5-flash" ;;
         google:*|google_genai:*|gemini:*)
           target="gemini/${alias#*:}"
-          api_key_line="        api_key: os.environ/GEMINI_API_KEY"
+          api_key_env="GEMINI_API_KEY"
           ;;
         gemini-*)
           target="gemini/${alias}"
-          api_key_line="        api_key: os.environ/GEMINI_API_KEY"
+          api_key_env="GEMINI_API_KEY"
           ;;
         openai:*)
           target="openai/${alias#openai:}"
-          api_key_line="        api_key: os.environ/OPENAI_API_KEY"
+          api_key_env="OPENAI_API_KEY"
           ;;
-        anthropic:claude-3-5-sonnet)
+        anthropic:claude-3-5-sonnet|anthropic:claude-sonnet-4-5)
           target="anthropic/claude-sonnet-4-5-20250929"
-          api_key_line="        api_key: os.environ/ANTHROPIC_API_KEY"
+          api_key_env="ANTHROPIC_API_KEY"
           ;;
         anthropic:*)
           target="anthropic/${alias#anthropic:}"
-          api_key_line="        api_key: os.environ/ANTHROPIC_API_KEY"
+          api_key_env="ANTHROPIC_API_KEY"
           ;;
         fireworks:*)
           target="fireworks_ai/${alias#fireworks:}"
-          api_key_line="        api_key: os.environ/FIREWORKS_API_KEY"
+          api_key_env="FIREWORKS_API_KEY"
           ;;
-        *)
-          target="${alias}"
-          ;;
+        *) target="${alias}" ;;
       esac
     fi
-    if [[ -z "${api_key_line}" ]]; then
+    if [[ -z "${api_key_env}" ]]; then
       case "${target}" in
-        openai/*) api_key_line="        api_key: os.environ/OPENAI_API_KEY" ;;
-        anthropic/*) api_key_line="        api_key: os.environ/ANTHROPIC_API_KEY" ;;
-        gemini/*) api_key_line="        api_key: os.environ/GEMINI_API_KEY" ;;
-        fireworks_ai/*) api_key_line="        api_key: os.environ/FIREWORKS_API_KEY" ;;
+        openai/*) api_key_env="OPENAI_API_KEY" ;;
+        anthropic/*) api_key_env="ANTHROPIC_API_KEY" ;;
+        gemini/*) api_key_env="GEMINI_API_KEY" ;;
+        fireworks_ai/*) api_key_env="FIREWORKS_API_KEY" ;;
       esac
     fi
-    echo "    - model_name: ${alias}"
-    echo "      litellm_params:"
-    echo "        model: ${target}"
-    if [[ -n "${api_key_line}" ]]; then
-      echo "${api_key_line}"
-    fi
+    echo "    - alias: ${alias}"
+    echo "      target: ${target}"
+    echo "      apiKeyEnv: \"${api_key_env}\""
   done
 }
 
-render_sandbox_template() {
+render_helm_values() {
+  local traefik_ip="${1:-}"
+  local resolved_host="${ALEPHAT_HOST:-alephat.example.com}"
+  local resolved_ui_host="${TEMPORAL_UI_HOST:-temporal.example.com}"
+  local resolved_grpc_host="${TEMPORAL_GRPC_HOST:-temporal-grpc.example.com}"
+  local resolved_acme="${ACME_EMAIL:-admin@example.com}"
+
   cat <<EOF
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ${SANDBOX_NAMESPACE}
----
-apiVersion: extensions.agents.x-k8s.io/v1beta1
-kind: SandboxTemplate
-metadata:
-  name: python-runtime-template
-  namespace: ${SANDBOX_NAMESPACE}
-spec:
-  podTemplate:
-    metadata:
-      labels:
-        app.kubernetes.io/name: alephat-python-sandbox
-    spec:
-      runtimeClassName: ${RUNTIME_CLASS_NAME}
-      restartPolicy: OnFailure
-      automountServiceAccountToken: false
+namespaces:
+  create: true
+  alephat: ${PLATFORM_NAMESPACE}
+  postgresql: ${POSTGRESQL_NAMESPACE}
+  temporal: ${TEMPORAL_NAMESPACE_K8S}
+  litellm: ${LITELLM_NAMESPACE}
+  sandboxes: ${SANDBOX_NAMESPACE}
+  kata: ${KATA_NAMESPACE}
+  keda: ${KEDA_NAMESPACE}
+  externalSecrets: ${ESO_NAMESPACE}
+  traefik: ${TRAEFIK_NAMESPACE}
+
+sandboxRuntime:
+  type: ${SANDBOX_RUNTIME}
+  kata:
+    version: "${KATA_VERSION}"
+
+agentSandbox:
+  enabled: true
+  sandboxImage: ${SANDBOX_IMAGE}
+
+externalSecrets:
+  enabled: ${USE_EXTERNAL_SECRETS}
+  gcp:
+    projectID: ${PROJECT_ID}
+    clusterLocation: ${ZONE}
+    clusterName: ${CLUSTER_NAME}
+    serviceAccountEmail: alephat-eso@${PROJECT_ID}.iam.gserviceaccount.com
+
+litellm:
+  enabled: true
+  image: ghcr.io/berriai/litellm-database:v${LITELLM_VERSION#v}
+  gcpServiceAccountEmail: alephat-litellm@${PROJECT_ID}.iam.gserviceaccount.com
+  vertexProject: ${PROJECT_ID}
+  vertexLocation: ${REGION}
+  defaultModel: ${DEFAULT_MODEL}
+  models:
+$(render_litellm_models_yaml)
+
+alephat:
+  platformImage: ${PLATFORM_IMAGE}
+  uiImage: ${UI_IMAGE}
+  slackRendererImage: ${SLACK_RENDERER_IMAGE}
+
+traefik:
+  enabled: ${WITH_TRAEFIK}
+  loadBalancerIP: "${traefik_ip}"
+  acme:
+    email: ${resolved_acme}
+
+ingress:
+  enabled: ${WITH_TRAEFIK}
+  host: ${resolved_host}
+  temporalUiHost: ${resolved_ui_host}
+  temporalGrpcHost: ${resolved_grpc_host}
 EOF
-  if [[ "${SANDBOX_RUNTIME}" == "kata" ]]; then
-    cat <<'EOF'
-      nodeSelector:
-        cloud.google.com/gke-os-distribution: ubuntu
-        kubernetes.io/arch: amd64
-EOF
-  else
-    cat <<'EOF'
-      nodeSelector:
-        kubernetes.io/arch: amd64
+  if [[ "${USE_EXTERNAL_SECRETS}" != "true" ]]; then
+    cat <<EOF
+
+secrets:
+  providerKeys:
+    openaiApiKey: "${OPENAI_API_KEY:-}"
+    anthropicApiKey: "${ANTHROPIC_API_KEY:-}"
+    geminiApiKey: "${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}"
+    fireworksApiKey: "${FIREWORKS_API_KEY:-}"
+  githubApp:
+    appId: "${GITHUB_APP_ID:-}"
+    clientId: "${GITHUB_APP_CLIENT_ID:-}"
+    clientSecret: "${GITHUB_APP_CLIENT_SECRET:-}"
+    installationId: "${GITHUB_APP_INSTALLATION_ID:-}"
+    privateKey: $(jq -nc --arg v "${GITHUB_APP_PRIVATE_KEY:-}" '$v')
+    allowedUsers: "${ALLOWED_GITHUB_USERS:-}"
+    allowedOrgs: "${ALLOWED_GITHUB_ORGS:-}"
+  slack:
+    signingSecret: "${SLACK_SIGNING_SECRET:-}"
+    botToken: "${SLACK_BOT_TOKEN:-}"
+    appToken: "${SLACK_APP_TOKEN:-}"
+    userMap: $(jq -nc --arg v "${SLACK_USER_MAP:-}" '$v')
+    appId: "${SLACK_APP_ID:-}"
+    botUserId: "${SLACK_BOT_USER_ID:-}"
+    botUsername: "${SLACK_BOT_USERNAME:-}"
 EOF
   fi
-  cat <<EOF
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-      containers:
-        - name: runtime
-          image: ${SANDBOX_IMAGE}
-          ports:
-            - name: toolbox
-              containerPort: 8888
-          readinessProbe:
-            tcpSocket:
-              port: toolbox
-            initialDelaySeconds: 1
-            periodSeconds: 1
-            timeoutSeconds: 2
-            failureThreshold: 30
-          resources:
-            requests:
-              cpu: 250m
-              memory: 512Mi
-            limits:
-              cpu: "2"
-              memory: 2Gi
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-EOF
-}
-
-render_litellm_values() {
-  cat <<EOF
-fullnameOverride: alephat-platform-litellm
-
-replicaCount: 1
-
-image:
-  repository: ghcr.io/berriai/litellm-database
-  tag: v${LITELLM_VERSION#v}
-  pullPolicy: IfNotPresent
-
-masterkeySecretName: litellm-secrets
-masterkeySecretKey: masterkey
-
-environmentSecrets:
-  - litellm-provider-keys
-
-proxy_config:
-  model_list:
-$(render_litellm_model_list)
-  general_settings:
-    master_key: os.environ/PROXY_MASTER_KEY
-  litellm_settings:
-    drop_params: true
-
-db:
-  useExisting: false
-  deployStandalone: true
-
-postgresql:
-  global:
-    security:
-      allowInsecureImages: true
-  image:
-    repository: bitnamilegacy/postgresql
-  auth:
-    username: litellm
-    database: litellm
-    existingSecret: litellm-postgres
-    secretKeys:
-      adminPasswordKey: postgres-password
-      userPasswordKey: password
-  primary:
-    persistence:
-      enabled: true
-      storageClass: standard-rwo
-      size: 20Gi
-
-redis:
-  enabled: false
-
-resources:
-  requests:
-    cpu: 500m
-    memory: 1Gi
-  limits:
-    cpu: "2"
-    memory: 4Gi
-EOF
 }
 
 echo "=================================================================="
-echo "Alephat GKE Deployment Configuration"
+echo "Alephat Unified Helm Deployment Configuration"
 echo "=================================================================="
 echo "Project ID:             ${PROJECT_ID}"
 echo "Region / Zone:          ${REGION} / ${ZONE}"
 echo "Cluster Name:           ${CLUSTER_NAME} (k8s: ${K8S_VERSION}, channel: ${RELEASE_CHANNEL})"
-echo "Sandbox Runtime:        ${SANDBOX_RUNTIME} (RuntimeClass: ${RUNTIME_CLASS_NAME})"
-echo "Node Size / Count:      ${NODE_SIZE} x ${NUM_NODES}"
-echo "Agent Sandbox Version:  ${AGENT_SANDBOX_VERSION}"
-echo "Kata Version:           ${KATA_VERSION}"
-echo "LiteLLM Version:        ${LITELLM_VERSION}"
-echo "KEDA Version:           ${KEDA_VERSION}"
-echo "External Secrets Ver:   ${ESO_VERSION} (enabled: ${USE_EXTERNAL_SECRETS})"
-echo "Traefik Version:        ${TRAEFIK_VERSION} (enabled: ${WITH_TRAEFIK})"
+echo "Helm Chart:             ${CHART_DIR}"
+echo "Sandbox Runtime:        ${SANDBOX_RUNTIME}"
+echo "Node Size / Count:      ${NODE_SIZE} x ${NUM_NODES} (autoscale ${MIN_NODES}-${MAX_NODES})"
+echo "External Secrets:       ${USE_EXTERNAL_SECRETS}"
+echo "Traefik Ingress:        ${WITH_TRAEFIK}"
 echo "Enabled Models:         ${ENABLED_MODELS}"
 echo "Default Model:          ${DEFAULT_MODEL}"
 echo "=================================================================="
 
 if [[ "${DRY_RUN}" == "true" ]]; then
-  echo ""
-  echo "--- Rendered SandboxTemplate (${SANDBOX_RUNTIME}) ---"
-  render_sandbox_template
-  echo ""
-  echo "--- Rendered LiteLLM Values (v${LITELLM_VERSION#v}) ---"
-  render_litellm_values
+  TMP_DRY_VALUES="$(mktemp)"
+  trap 'rm -f "${TMP_DRY_VALUES}"' EXIT
+  render_helm_values "" > "${TMP_DRY_VALUES}"
+  echo "--- Rendered Helm Values ---"
+  cat "${TMP_DRY_VALUES}"
+  helm template "${RELEASE_NAME}" "${CHART_DIR}" \
+    --namespace "${PLATFORM_NAMESPACE}" \
+    --values "${TMP_DRY_VALUES}" >/dev/null
+  echo "--- Helm Template Verification: OK ---"
   exit 0
 fi
 
 if [[ "${TEARDOWN}" == "true" ]]; then
-  echo "Tearing down GKE cluster '${CLUSTER_NAME}' in zone '${ZONE}'..."
-  gcloud container clusters delete "${CLUSTER_NAME}" --project "${PROJECT_ID}" --zone "${ZONE}" --quiet
-  if gcloud compute addresses describe "${TRAEFIK_IP_NAME}" --project "${PROJECT_ID}" --region "${REGION}" >/dev/null 2>&1; then
-    gcloud compute addresses delete "${TRAEFIK_IP_NAME}" --project "${PROJECT_ID}" --region "${REGION}" --quiet
-  fi
-  echo "Teardown complete."
-  exit 0
+  exec "${SCRIPT_DIR}/gke-teardown.sh" \
+    --project "${PROJECT_ID}" \
+    --region "${REGION}" \
+    --zone "${ZONE}" \
+    --cluster-name "${CLUSTER_NAME}"
 fi
 
 # ---------------------------------------------------------------------------
-# 1. Enable required Google Cloud APIs
+# 1. Enable required Google Cloud APIs & Reserve Ingress IP
 # ---------------------------------------------------------------------------
 gcloud config set project "${PROJECT_ID}"
 gcloud services enable \
@@ -469,9 +414,7 @@ if [[ "${WITH_TRAEFIK}" == "true" ]]; then
     TEMPORAL_GRPC_HOST="${TEMPORAL_GRPC_HOST:-temporal-grpc.${BASE_SSLIP}}"
   else
     HOST_SUFFIX="${ALEPHAT_HOST#*.}"
-    if [[ "${HOST_SUFFIX}" == "${ALEPHAT_HOST}" ]]; then
-      HOST_SUFFIX="${ALEPHAT_HOST}"
-    fi
+    [[ "${HOST_SUFFIX}" == "${ALEPHAT_HOST}" ]] && HOST_SUFFIX="${ALEPHAT_HOST}"
     TEMPORAL_UI_HOST="${TEMPORAL_UI_HOST:-temporal.${HOST_SUFFIX}}"
     TEMPORAL_GRPC_HOST="${TEMPORAL_GRPC_HOST:-temporal-grpc.${HOST_SUFFIX}}"
   fi
@@ -482,7 +425,7 @@ if [[ "${WITH_TRAEFIK}" == "true" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Provision GKE Cluster & Sandbox Runtime (Kata or gVisor)
+# 2. Provision GKE Cluster
 # ---------------------------------------------------------------------------
 if gcloud container clusters describe "${CLUSTER_NAME}" --zone "${ZONE}" >/dev/null 2>&1; then
   if [[ "${REUSE_CLUSTER}" != "true" ]]; then
@@ -524,91 +467,35 @@ else
       --enable-ip-alias \
       --workload-pool="${PROJECT_ID}.svc.id.goog" \
       --workload-metadata=GKE_METADATA
+    gcloud container node-pools describe sandbox-pool --cluster "${CLUSTER_NAME}" --zone "${ZONE}" >/dev/null 2>&1 || \
+      gcloud container node-pools create sandbox-pool \
+        --cluster "${CLUSTER_NAME}" \
+        --zone "${ZONE}" \
+        --num-nodes "${NUM_NODES}" \
+        --machine-type "${NODE_SIZE}" \
+        --image-type COS_CONTAINERD \
+        --sandbox type=gvisor \
+        --workload-metadata=GKE_METADATA
   fi
 fi
 
 gcloud container clusters get-credentials "${CLUSTER_NAME}" --zone "${ZONE}"
 
-if [[ "${SANDBOX_RUNTIME}" == "kata" ]]; then
-  echo "Installing Kata Containers ${KATA_VERSION} via OCI Helm chart and registering RuntimeClass/${RUNTIME_CLASS_NAME}..."
-  helm upgrade --install kata-deploy \
-    oci://ghcr.io/kata-containers/kata-deploy-charts/kata-deploy \
-    --namespace kube-system \
-    --version "${KATA_VERSION}" \
-    --set deploymentMode=daemonset \
-    --set k8sDistribution=k8s \
-    --set shims.disableAll=true \
-    --set shims.qemu.enabled=true \
-    --set shims.qemu-runtime-rs.enabled=true \
-    --set runtimeClasses.enabled=true \
-    --wait \
-    --timeout 10m
-  kubectl -n kube-system rollout status daemonset/kata-deploy --timeout=10m
-  kubectl get runtimeclass "${RUNTIME_CLASS_NAME}"
-else
-  if ! gcloud container node-pools describe sandbox-pool --cluster "${CLUSTER_NAME}" --zone "${ZONE}" >/dev/null 2>&1; then
-    echo "Creating gVisor node pool 'sandbox-pool'..."
-    gcloud container node-pools create sandbox-pool \
-      --cluster "${CLUSTER_NAME}" \
-      --zone "${ZONE}" \
-      --num-nodes "${NUM_NODES}" \
-      --machine-type "${NODE_SIZE}" \
-      --image-type COS_CONTAINERD \
-      --sandbox type=gvisor \
-      --workload-metadata=GKE_METADATA
-  fi
-  kubectl get runtimeclass gvisor
-fi
-
 # ---------------------------------------------------------------------------
-# 3. Install Agent Sandbox Controller & CRDs
+# 3. Configure Workload Identity IAM & Google Cloud Secret Manager Secrets
 # ---------------------------------------------------------------------------
-echo "Installing Agent Sandbox ${AGENT_SANDBOX_VERSION}..."
-kubectl apply -f \
-  "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}/sandbox-with-extensions.yaml"
-kubectl wait --for=condition=Established crd/sandboxes.agents.x-k8s.io --timeout=2m
-kubectl wait --for=condition=Established crd/sandboxtemplates.extensions.agents.x-k8s.io --timeout=2m
-
-# ---------------------------------------------------------------------------
-# 4. Install KEDA & External Secrets Operator
-# ---------------------------------------------------------------------------
-echo "Installing KEDA ${KEDA_VERSION}..."
-helm repo add kedacore https://kedacore.github.io/charts --force-update
-helm repo update kedacore
-helm upgrade --install keda kedacore/keda \
-  --namespace keda \
-  --create-namespace \
-  --version "${KEDA_VERSION}"
-kubectl -n keda rollout status deployment/keda-operator --timeout=5m
-
-kubectl create namespace "${PLATFORM_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-
 ensure_gsm_secret() {
   local name="$1"
   local value="$2"
   if ! gcloud secrets describe "${name}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
-    gcloud secrets create "${name}" \
-      --project "${PROJECT_ID}" \
-      --replication-policy="automatic" >/dev/null
-    printf '%s' "${value}" | gcloud secrets versions add "${name}" \
-      --project "${PROJECT_ID}" \
-      --data-file=- >/dev/null
+    gcloud secrets create "${name}" --project "${PROJECT_ID}" --replication-policy="automatic" >/dev/null
+    printf '%s' "${value}" | gcloud secrets versions add "${name}" --project "${PROJECT_ID}" --data-file=- >/dev/null
   else
     local existing=""
     existing="$(gcloud secrets versions access latest --secret="${name}" --project "${PROJECT_ID}" 2>/dev/null || true)"
     if [[ -z "${existing}" && -n "${value}" ]]; then
-      printf '%s' "${value}" | gcloud secrets versions add "${name}" \
-        --project "${PROJECT_ID}" \
-        --data-file=- >/dev/null
+      printf '%s' "${value}" | gcloud secrets versions add "${name}" --project "${PROJECT_ID}" --data-file=- >/dev/null
     fi
-  fi
-}
-
-read_k8s_secret_key() {
-  local secret_name="$1"
-  local key="$2"
-  if kubectl -n "${PLATFORM_NAMESPACE}" get secret "${secret_name}" >/dev/null 2>&1; then
-    kubectl -n "${PLATFORM_NAMESPACE}" get secret "${secret_name}" -o "go-template={{index .data \"${key}\"}}" 2>/dev/null | base64 -d || true
   fi
 }
 
@@ -623,18 +510,16 @@ generate_temporal_tls_json() {
     -out "${cert_dir}/ca.crt" >/dev/null 2>&1
 
   local extra_san=""
-  if [[ -n "${TEMPORAL_GRPC_HOST}" ]]; then
-    extra_san=",DNS:${TEMPORAL_GRPC_HOST}"
-  fi
+  [[ -n "${TEMPORAL_GRPC_HOST}" ]] && extra_san=",DNS:${TEMPORAL_GRPC_HOST}"
   cat > "${cert_dir}/server.ext" <<EXT
 basicConstraints=CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth,clientAuth
-subjectAltName=DNS:temporal,DNS:temporal.${PLATFORM_NAMESPACE},DNS:temporal.${PLATFORM_NAMESPACE}.svc,DNS:temporal.${PLATFORM_NAMESPACE}.svc.cluster.local,DNS:localhost,IP:127.0.0.1${extra_san}
+subjectAltName=DNS:temporal,DNS:temporal.${TEMPORAL_NAMESPACE_K8S},DNS:temporal.${TEMPORAL_NAMESPACE_K8S}.svc,DNS:temporal.${TEMPORAL_NAMESPACE_K8S}.svc.cluster.local,DNS:localhost,IP:127.0.0.1${extra_san}
 EXT
   openssl ecparam -name prime256v1 -genkey -noout -out "${cert_dir}/server.key"
   openssl req -new -key "${cert_dir}/server.key" \
-    -subj "/CN=temporal.${PLATFORM_NAMESPACE}.svc.cluster.local" \
+    -subj "/CN=temporal.${TEMPORAL_NAMESPACE_K8S}.svc.cluster.local" \
     -out "${cert_dir}/server.csr" >/dev/null 2>&1
   openssl x509 -req -in "${cert_dir}/server.csr" \
     -CA "${cert_dir}/ca.crt" -CAkey "${cert_dir}/ca.key" -CAcreateserial \
@@ -665,24 +550,22 @@ EXT
   rm -rf "${cert_dir}"
 }
 
-if [[ "${USE_EXTERNAL_SECRETS}" == "true" ]]; then
-  echo "Installing External Secrets Operator ${ESO_VERSION}..."
-  helm repo add external-secrets https://charts.external-secrets.io --force-update
-  helm repo update external-secrets
-  helm upgrade --install external-secrets external-secrets/external-secrets \
-    --namespace external-secrets \
-    --create-namespace \
-    --version "${ESO_VERSION}" \
-    --set installCRDs=true
-  kubectl -n external-secrets rollout status deployment/external-secrets --timeout=5m
-  kubectl -n external-secrets rollout status deployment/external-secrets-webhook --timeout=5m
-  kubectl -n external-secrets rollout status deployment/external-secrets-cert-controller --timeout=5m
+LITELLM_GSA="alephat-litellm@${PROJECT_ID}.iam.gserviceaccount.com"
+gcloud iam service-accounts describe "${LITELLM_GSA}" --project "${PROJECT_ID}" >/dev/null 2>&1 || \
+  gcloud iam service-accounts create alephat-litellm --project "${PROJECT_ID}" --display-name="Alephat LiteLLM Vertex AI"
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  --member="serviceAccount:${LITELLM_GSA}" \
+  --role=roles/aiplatform.user \
+  --condition=None >/dev/null
+gcloud iam service-accounts add-iam-policy-binding "${LITELLM_GSA}" \
+  --project "${PROJECT_ID}" \
+  --role=roles/iam.workloadIdentityUser \
+  --member="serviceAccount:${PROJECT_ID}.svc.id.goog[${LITELLM_NAMESPACE}/litellm]" >/dev/null
 
+if [[ "${USE_EXTERNAL_SECRETS}" == "true" ]]; then
   ESO_GSA="alephat-eso@${PROJECT_ID}.iam.gserviceaccount.com"
   gcloud iam service-accounts describe "${ESO_GSA}" --project "${PROJECT_ID}" >/dev/null 2>&1 || \
-    gcloud iam service-accounts create alephat-eso \
-      --project "${PROJECT_ID}" \
-      --display-name="Alephat External Secrets Operator"
+    gcloud iam service-accounts create alephat-eso --project "${PROJECT_ID}" --display-name="Alephat External Secrets Operator"
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${ESO_GSA}" \
     --role=roles/secretmanager.secretAccessor \
@@ -690,49 +573,30 @@ if [[ "${USE_EXTERNAL_SECRETS}" == "true" ]]; then
   gcloud iam service-accounts add-iam-policy-binding "${ESO_GSA}" \
     --project "${PROJECT_ID}" \
     --role=roles/iam.workloadIdentityUser \
-    --member="serviceAccount:${PROJECT_ID}.svc.id.goog[${PLATFORM_NAMESPACE}/alephat-eso]" >/dev/null
+    --member="serviceAccount:${PROJECT_ID}.svc.id.goog[${ESO_NAMESPACE}/alephat-eso]" >/dev/null
 
   echo "Ensuring JSON secrets exist in Google Cloud Secret Manager..."
-  EXISTING_LITELLM_MASTER="$(read_k8s_secret_key litellm-secrets masterkey)"
-  EXISTING_LITELLM_DB="$(read_k8s_secret_key litellm-postgres password)"
-  EXISTING_ALEPHAT_DB="$(read_k8s_secret_key alephat-postgres password)"
-  EXISTING_API_TOKEN="$(read_k8s_secret_key alephat-secrets PLATFORM_API_TOKEN)"
-  EXISTING_JWT_SECRET="$(read_k8s_secret_key alephat-secrets PLATFORM_JWT_SECRET)"
-  EXISTING_WEBHOOK_SECRET="$(read_k8s_secret_key alephat-secrets GITHUB_WEBHOOK_SECRET)"
-  EXISTING_DASHBOARD_JWT="$(read_k8s_secret_key alephat-oauth DASHBOARD_JWT_SECRET)"
-  EXISTING_TOKEN_ENC="$(read_k8s_secret_key alephat-oauth TOKEN_ENCRYPTION_KEY)"
-
-  ensure_gsm_secret "litellm-secrets" "$(jq -nc \
-    --arg masterkey "${LITELLM_MASTER_KEY:-${EXISTING_LITELLM_MASTER:-sk-$(openssl rand -hex 24)}}" \
-    '{masterkey: $masterkey}')"
-
-  RESOLVED_LITELLM_DB="${LITELLM_DB_PASSWORD:-${EXISTING_LITELLM_DB:-$(openssl rand -hex 24)}}"
-  ensure_gsm_secret "litellm-postgres" "$(jq -nc \
-    --arg pw "${RESOLVED_LITELLM_DB}" \
-    '{password: $pw, "postgres-password": $pw}')"
-
+  ensure_gsm_secret "litellm-secrets" "$(jq -nc --arg masterkey "${LITELLM_MASTER_KEY:-sk-$(openssl rand -hex 24)}" '{masterkey: $masterkey}')"
+  RESOLVED_LITELLM_DB="${LITELLM_DB_PASSWORD:-$(openssl rand -hex 24)}"
+  ensure_gsm_secret "litellm-postgres" "$(jq -nc --arg pw "${RESOLVED_LITELLM_DB}" '{password: $pw, "postgres-password": $pw}')"
   ensure_gsm_secret "litellm-provider-keys" "$(jq -nc \
-    --arg openai "${OPENAI_API_KEY:-$(read_k8s_secret_key litellm-provider-keys OPENAI_API_KEY)}" \
-    --arg anthropic "${ANTHROPIC_API_KEY:-$(read_k8s_secret_key litellm-provider-keys ANTHROPIC_API_KEY)}" \
-    --arg gemini "${GEMINI_API_KEY:-${GOOGLE_API_KEY:-$(read_k8s_secret_key litellm-provider-keys GEMINI_API_KEY)}}" \
-    --arg fireworks "${FIREWORKS_API_KEY:-$(read_k8s_secret_key litellm-provider-keys FIREWORKS_API_KEY)}" \
+    --arg openai "${OPENAI_API_KEY:-}" \
+    --arg anthropic "${ANTHROPIC_API_KEY:-}" \
+    --arg gemini "${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}" \
+    --arg fireworks "${FIREWORKS_API_KEY:-}" \
     '{OPENAI_API_KEY: $openai, ANTHROPIC_API_KEY: $anthropic, GEMINI_API_KEY: $gemini, FIREWORKS_API_KEY: $fireworks}')"
-
-  ensure_gsm_secret "alephat-postgres" "$(jq -nc \
-    --arg pw "${ALEPHAT_DB_PASSWORD:-${EXISTING_ALEPHAT_DB:-$(openssl rand -hex 24)}}" \
-    '{password: $pw}')"
-
+  ensure_gsm_secret "alephat-postgres" "$(jq -nc --arg pw "${ALEPHAT_DB_PASSWORD:-$(openssl rand -hex 24)}" '{password: $pw}')"
   ensure_gsm_secret "alephat-secrets" "$(jq -nc \
-    --arg token "${PLATFORM_API_TOKEN:-${EXISTING_API_TOKEN:-$(openssl rand -hex 32)}}" \
-    --arg jwt "${PLATFORM_JWT_SECRET:-${EXISTING_JWT_SECRET:-$(openssl rand -hex 32)}}" \
-    --arg webhook "${GITHUB_WEBHOOK_SECRET:-${EXISTING_WEBHOOK_SECRET:-$(openssl rand -hex 32)}}" \
-    --arg slack_secret "${SLACK_SIGNING_SECRET:-$(read_k8s_secret_key alephat-secrets SLACK_SIGNING_SECRET)}" \
-    --arg slack_token "${SLACK_BOT_TOKEN:-$(read_k8s_secret_key alephat-secrets SLACK_BOT_TOKEN)}" \
-    --arg slack_app_token "${SLACK_APP_TOKEN:-$(read_k8s_secret_key alephat-secrets SLACK_APP_TOKEN)}" \
-    --arg slack_user_map "${SLACK_USER_MAP:-$(read_k8s_secret_key alephat-secrets SLACK_USER_MAP)}" \
-    --arg slack_app_id "${SLACK_APP_ID:-$(read_k8s_secret_key alephat-secrets SLACK_APP_ID)}" \
-    --arg slack_bot_user_id "${SLACK_BOT_USER_ID:-$(read_k8s_secret_key alephat-secrets SLACK_BOT_USER_ID)}" \
-    --arg slack_bot_username "${SLACK_BOT_USERNAME:-$(read_k8s_secret_key alephat-secrets SLACK_BOT_USERNAME)}" \
+    --arg token "${PLATFORM_API_TOKEN:-$(openssl rand -hex 32)}" \
+    --arg jwt "${PLATFORM_JWT_SECRET:-$(openssl rand -hex 32)}" \
+    --arg webhook "${GITHUB_WEBHOOK_SECRET:-$(openssl rand -hex 32)}" \
+    --arg slack_secret "${SLACK_SIGNING_SECRET:-}" \
+    --arg slack_token "${SLACK_BOT_TOKEN:-}" \
+    --arg slack_app_token "${SLACK_APP_TOKEN:-}" \
+    --arg slack_user_map "${SLACK_USER_MAP:-}" \
+    --arg slack_app_id "${SLACK_APP_ID:-}" \
+    --arg slack_bot_user_id "${SLACK_BOT_USER_ID:-}" \
+    --arg slack_bot_username "${SLACK_BOT_USERNAME:-}" \
     '{
       PLATFORM_API_TOKEN: $token,
       PLATFORM_JWT_SECRET: $jwt,
@@ -745,17 +609,16 @@ if [[ "${USE_EXTERNAL_SECRETS}" == "true" ]]; then
       SLACK_BOT_USER_ID: $slack_bot_user_id,
       SLACK_BOT_USERNAME: $slack_bot_username
     }')"
-
   ensure_gsm_secret "alephat-oauth" "$(jq -nc \
-    --arg app_id "${GITHUB_APP_ID:-$(read_k8s_secret_key alephat-oauth GITHUB_APP_ID)}" \
-    --arg client_id "${GITHUB_APP_CLIENT_ID:-$(read_k8s_secret_key alephat-oauth GITHUB_APP_CLIENT_ID)}" \
-    --arg client_secret "${GITHUB_APP_CLIENT_SECRET:-$(read_k8s_secret_key alephat-oauth GITHUB_APP_CLIENT_SECRET)}" \
-    --arg installation_id "${GITHUB_APP_INSTALLATION_ID:-$(read_k8s_secret_key alephat-oauth GITHUB_APP_INSTALLATION_ID)}" \
-    --arg private_key "${GITHUB_APP_PRIVATE_KEY:-$(read_k8s_secret_key alephat-oauth GITHUB_APP_PRIVATE_KEY)}" \
-    --arg allowed_users "${ALLOWED_GITHUB_USERS:-$(read_k8s_secret_key alephat-oauth ALLOWED_GITHUB_USERS)}" \
-    --arg allowed_orgs "${ALLOWED_GITHUB_ORGS:-$(read_k8s_secret_key alephat-oauth ALLOWED_GITHUB_ORGS)}" \
-    --arg dashboard_jwt "${DASHBOARD_JWT_SECRET:-${EXISTING_DASHBOARD_JWT:-$(openssl rand -hex 32)}}" \
-    --arg token_enc "${TOKEN_ENCRYPTION_KEY:-${EXISTING_TOKEN_ENC:-$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '\n')}}" \
+    --arg app_id "${GITHUB_APP_ID:-}" \
+    --arg client_id "${GITHUB_APP_CLIENT_ID:-}" \
+    --arg client_secret "${GITHUB_APP_CLIENT_SECRET:-}" \
+    --arg installation_id "${GITHUB_APP_INSTALLATION_ID:-}" \
+    --arg private_key "${GITHUB_APP_PRIVATE_KEY:-}" \
+    --arg allowed_users "${ALLOWED_GITHUB_USERS:-}" \
+    --arg allowed_orgs "${ALLOWED_GITHUB_ORGS:-}" \
+    --arg dashboard_jwt "${DASHBOARD_JWT_SECRET:-$(openssl rand -hex 32)}" \
+    --arg token_enc "${TOKEN_ENCRYPTION_KEY:-$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '\n')}" \
     '{
       GITHUB_APP_ID: $app_id,
       GITHUB_APP_CLIENT_ID: $client_id,
@@ -768,154 +631,31 @@ if [[ "${USE_EXTERNAL_SECRETS}" == "true" ]]; then
       TOKEN_ENCRYPTION_KEY: $token_enc
     }')"
 
-  LITELLM_MASTER_KEY="$(gcloud secrets versions access latest --secret=litellm-secrets --project "${PROJECT_ID}" | jq -r '.masterkey')"
-  LITELLM_DB_PASSWORD="$(gcloud secrets versions access latest --secret=litellm-postgres --project "${PROJECT_ID}" | jq -r '.password')"
-
+  # Regenerate temporal-tls if missing or if it lacks temporal.<ns>.svc.cluster.local SAN
+  REGEN_TLS=false
   if ! gcloud secrets describe temporal-tls --project "${PROJECT_ID}" >/dev/null 2>&1; then
-    echo "Generating Temporal mTLS CA, Server, and Client certificates in Google Cloud Secret Manager..."
-    ensure_gsm_secret "temporal-tls" "$(generate_temporal_tls_json)"
-  fi
-
-  EXISTING_UI_USERS="$(read_k8s_secret_key temporal-ui-auth users)"
-  if [[ -z "${EXISTING_UI_USERS}" ]]; then
-    RESOLVED_UI_PW="${TEMPORAL_UI_PASSWORD:-$(openssl rand -hex 16)}"
-    EXISTING_UI_USERS="${TEMPORAL_UI_USER}:$(openssl passwd -apr1 "${RESOLVED_UI_PW}")"
-  fi
-  ensure_gsm_secret "temporal-ui-auth" "$(jq -nc --arg u "${EXISTING_UI_USERS}" '{users: $u}')"
-
-  for s in litellm-secrets litellm-provider-keys litellm-postgres alephat-postgres alephat-secrets alephat-oauth temporal-tls temporal-ui-auth; do
-    if kubectl -n "${PLATFORM_NAMESPACE}" get secret "${s}" >/dev/null 2>&1; then
-      owner_kind="$(kubectl -n "${PLATFORM_NAMESPACE}" get secret "${s}" -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || true)"
-      if [[ "${owner_kind}" != "ExternalSecret" ]]; then
-        kubectl -n "${PLATFORM_NAMESPACE}" delete secret "${s}" --ignore-not-found
-      fi
+    REGEN_TLS=true
+  else
+    EXISTING_SAN="$(gcloud secrets versions access latest --secret=temporal-tls --project "${PROJECT_ID}" | jq -r '."server.crt"' | openssl x509 -noout -ext subjectAltName 2>/dev/null || true)"
+    if [[ "${EXISTING_SAN}" != *"DNS:temporal.${TEMPORAL_NAMESPACE_K8S}.svc.cluster.local"* ]]; then
+      REGEN_TLS=true
     fi
-  done
+  fi
+  if [[ "${REGEN_TLS}" == "true" ]]; then
+    echo "Generating Temporal mTLS certificates for namespace '${TEMPORAL_NAMESPACE_K8S}' in Google Cloud Secret Manager..."
+    if ! gcloud secrets describe temporal-tls --project "${PROJECT_ID}" >/dev/null 2>&1; then
+      ensure_gsm_secret "temporal-tls" "$(generate_temporal_tls_json)"
+    else
+      generate_temporal_tls_json | gcloud secrets versions add temporal-tls --project "${PROJECT_ID}" --data-file=- >/dev/null
+    fi
+  fi
 
-  sed \
-    -e "s/your-gcp-project-id/${PROJECT_ID}/g" \
-    -e "s/us-central1-a/${ZONE}/g" \
-    -e "s/clusterName: alephat/clusterName: ${CLUSTER_NAME}/g" \
-    "${REPO_ROOT}/deploy/k8s/external-secrets.yaml" | kubectl apply -f -
-
-  echo "Waiting for ExternalSecrets to sync from Google Cloud Secret Manager..."
-  kubectl -n "${PLATFORM_NAMESPACE}" wait --for=condition=Ready \
-    externalsecret/litellm-secrets \
-    externalsecret/litellm-provider-keys \
-    externalsecret/litellm-postgres \
-    externalsecret/alephat-postgres \
-    externalsecret/alephat-secrets \
-    externalsecret/alephat-oauth \
-    externalsecret/temporal-tls \
-    externalsecret/temporal-ui-auth \
-    --timeout=3m
-else
-  if kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-secrets >/dev/null 2>&1; then
-    LITELLM_MASTER_KEY="$(kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-secrets -o jsonpath='{.data.masterkey}' | base64 -d)"
-  else
-    LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-sk-$(openssl rand -hex 24)}"
-    kubectl -n "${PLATFORM_NAMESPACE}" create secret generic litellm-secrets \
-      --from-literal=masterkey="${LITELLM_MASTER_KEY}"
-  fi
-  if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-provider-keys >/dev/null 2>&1; then
-    kubectl -n "${PLATFORM_NAMESPACE}" create secret generic litellm-provider-keys \
-      --from-literal=OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
-      --from-literal=ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
-      --from-literal=GEMINI_API_KEY="${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}" \
-      --from-literal=FIREWORKS_API_KEY="${FIREWORKS_API_KEY:-}"
-  fi
-  if kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-postgres >/dev/null 2>&1; then
-    LITELLM_DB_PASSWORD="$(kubectl -n "${PLATFORM_NAMESPACE}" get secret litellm-postgres -o jsonpath='{.data.password}' | base64 -d)"
-  else
-    LITELLM_DB_PASSWORD="${LITELLM_DB_PASSWORD:-$(openssl rand -hex 24)}"
-    kubectl -n "${PLATFORM_NAMESPACE}" create secret generic litellm-postgres \
-      --from-literal=postgres-password="${LITELLM_DB_PASSWORD}" \
-      --from-literal=password="${LITELLM_DB_PASSWORD}"
-  fi
+  RESOLVED_UI_PW="${TEMPORAL_UI_PASSWORD:-$(openssl rand -hex 16)}"
+  ensure_gsm_secret "temporal-ui-auth" "$(jq -nc --arg u "${TEMPORAL_UI_USER}:$(openssl passwd -apr1 "${RESOLVED_UI_PW}")" '{users: $u}')"
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Deploy LiteLLM Gateway
-# ---------------------------------------------------------------------------
-
-LITELLM_GSA="alephat-litellm@${PROJECT_ID}.iam.gserviceaccount.com"
-gcloud iam service-accounts describe "${LITELLM_GSA}" >/dev/null 2>&1 || \
-  gcloud iam service-accounts create alephat-litellm --display-name="Alephat LiteLLM Vertex AI"
-gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-  --member="serviceAccount:${LITELLM_GSA}" \
-  --role=roles/aiplatform.user \
-  --condition=None >/dev/null
-gcloud iam service-accounts add-iam-policy-binding "${LITELLM_GSA}" \
-  --role=roles/iam.workloadIdentityUser \
-  --member="serviceAccount:${PROJECT_ID}.svc.id.goog[${PLATFORM_NAMESPACE}/alephat-litellm]" >/dev/null
-
-kubectl -n "${PLATFORM_NAMESPACE}" create serviceaccount alephat-litellm \
-  --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n "${PLATFORM_NAMESPACE}" annotate serviceaccount alephat-litellm \
-  "iam.gke.io/gcp-service-account=${LITELLM_GSA}" --overwrite
-
-TMP_LITELLM_VALUES="$(mktemp)"
-trap 'rm -f "${TMP_LITELLM_VALUES}"' EXIT
-render_litellm_values > "${TMP_LITELLM_VALUES}"
-
-echo "Deploying LiteLLM ${LITELLM_VERSION}..."
-kubectl -n "${PLATFORM_NAMESPACE}" delete job alephat-platform-litellm-migrations --ignore-not-found
-helm upgrade --install alephat-platform \
-  oci://ghcr.io/berriai/litellm-helm \
-  --namespace "${PLATFORM_NAMESPACE}" \
-  --version "${LITELLM_VERSION#v}" \
-  --values "${TMP_LITELLM_VALUES}" \
-  --set-string postgresql.auth.password="${LITELLM_DB_PASSWORD}" \
-  --set-string postgresql.auth.postgresPassword="${LITELLM_DB_PASSWORD}" \
-  --set serviceAccount.name=alephat-litellm \
-  --set-string envVars.VERTEXAI_PROJECT="${PROJECT_ID}" \
-  --set-string envVars.VERTEXAI_LOCATION="${REGION}"
-kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/alephat-platform-litellm --timeout=10m
-
-# ---------------------------------------------------------------------------
-# 6. Ensure Platform Secrets Exist (when --no-external-secrets is used)
-# ---------------------------------------------------------------------------
-if [[ "${USE_EXTERNAL_SECRETS}" != "true" ]]; then
-  if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret alephat-postgres >/dev/null 2>&1; then
-    kubectl -n "${PLATFORM_NAMESPACE}" create secret generic alephat-postgres \
-      --from-literal=password="${ALEPHAT_DB_PASSWORD:-$(openssl rand -hex 24)}"
-  fi
-  if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret alephat-secrets >/dev/null 2>&1; then
-    kubectl -n "${PLATFORM_NAMESPACE}" create secret generic alephat-secrets \
-      --from-literal=PLATFORM_API_TOKEN="${PLATFORM_API_TOKEN:-$(openssl rand -hex 32)}" \
-      --from-literal=PLATFORM_JWT_SECRET="${PLATFORM_JWT_SECRET:-$(openssl rand -hex 32)}" \
-      --from-literal=GITHUB_WEBHOOK_SECRET="${GITHUB_WEBHOOK_SECRET:-$(openssl rand -hex 32)}"
-  fi
-  if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret alephat-oauth >/dev/null 2>&1; then
-    kubectl -n "${PLATFORM_NAMESPACE}" create secret generic alephat-oauth \
-      --from-literal=ALLOWED_GITHUB_USERS="${ALLOWED_GITHUB_USERS:-}" \
-      --from-literal=GITHUB_APP_ID="${GITHUB_APP_ID:-}" \
-      --from-literal=GITHUB_APP_CLIENT_ID="${GITHUB_APP_CLIENT_ID:-}" \
-      --from-literal=GITHUB_APP_CLIENT_SECRET="${GITHUB_APP_CLIENT_SECRET:-}" \
-      --from-literal=GITHUB_APP_INSTALLATION_ID="${GITHUB_APP_INSTALLATION_ID:-}" \
-      --from-literal=GITHUB_APP_PRIVATE_KEY="${GITHUB_APP_PRIVATE_KEY:-}" \
-      --from-literal=DASHBOARD_JWT_SECRET="${DASHBOARD_JWT_SECRET:-$(openssl rand -hex 32)}" \
-      --from-literal=TOKEN_ENCRYPTION_KEY="${TOKEN_ENCRYPTION_KEY:-$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '\n')}"
-  fi
-  if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret temporal-tls >/dev/null 2>&1; then
-    echo "Generating Kubernetes Secret 'temporal-tls' for Temporal mTLS..."
-    TLS_JSON="$(generate_temporal_tls_json)"
-    kubectl -n "${PLATFORM_NAMESPACE}" create secret generic temporal-tls \
-      --from-literal=ca.crt="$(printf '%s' "${TLS_JSON}" | jq -r '."ca.crt"')" \
-      --from-literal=server.crt="$(printf '%s' "${TLS_JSON}" | jq -r '."server.crt"')" \
-      --from-literal=server.key="$(printf '%s' "${TLS_JSON}" | jq -r '."server.key"')" \
-      --from-literal=tls.crt="$(printf '%s' "${TLS_JSON}" | jq -r '."tls.crt"')" \
-      --from-literal=tls.key="$(printf '%s' "${TLS_JSON}" | jq -r '."tls.key"')"
-  fi
-  if ! kubectl -n "${PLATFORM_NAMESPACE}" get secret temporal-ui-auth >/dev/null 2>&1; then
-    RESOLVED_UI_PW="${TEMPORAL_UI_PASSWORD:-$(openssl rand -hex 16)}"
-    kubectl -n "${PLATFORM_NAMESPACE}" create secret generic temporal-ui-auth \
-      --from-literal=users="${TEMPORAL_UI_USER}:$(openssl passwd -apr1 "${RESOLVED_UI_PW}")"
-  fi
-fi
-
-# ---------------------------------------------------------------------------
-# 7. Build & Push Container Images (in parallel)
+# 4. Build & Push Container Images in Parallel
 # ---------------------------------------------------------------------------
 if [[ "${SKIP_BUILD}" != "true" ]]; then
   gcloud artifacts repositories describe "${AR_REPOSITORY}" --location "${REGION}" >/dev/null 2>&1 || \
@@ -923,21 +663,13 @@ if [[ "${SKIP_BUILD}" != "true" ]]; then
 
   echo "Submitting Cloud Builds for platform, ui, slack-renderer, and sandbox images in parallel..."
   BUILD_PIDS=()
-  gcloud builds submit "${REPO_ROOT}" \
-    --config "${REPO_ROOT}/cloudbuild.platform.yaml" \
-    --substitutions="_PLATFORM_IMAGE=${PLATFORM_IMAGE}" &
+  gcloud builds submit "${REPO_ROOT}" --config "${REPO_ROOT}/cloudbuild.platform.yaml" --substitutions="_PLATFORM_IMAGE=${PLATFORM_IMAGE}" &
   BUILD_PIDS+=($!)
-  gcloud builds submit "${REPO_ROOT}" \
-    --config "${REPO_ROOT}/cloudbuild.ui.yaml" \
-    --substitutions="_UI_IMAGE=${UI_IMAGE}" &
+  gcloud builds submit "${REPO_ROOT}" --config "${REPO_ROOT}/cloudbuild.ui.yaml" --substitutions="_UI_IMAGE=${UI_IMAGE}" &
   BUILD_PIDS+=($!)
-  gcloud builds submit "${REPO_ROOT}" \
-    --config "${REPO_ROOT}/cloudbuild.slack-renderer.yaml" \
-    --substitutions="_SLACK_RENDERER_IMAGE=${SLACK_RENDERER_IMAGE}" &
+  gcloud builds submit "${REPO_ROOT}" --config "${REPO_ROOT}/cloudbuild.slack-renderer.yaml" --substitutions="_SLACK_RENDERER_IMAGE=${SLACK_RENDERER_IMAGE}" &
   BUILD_PIDS+=($!)
-  gcloud builds submit "${REPO_ROOT}" \
-    --config "${REPO_ROOT}/cloudbuild.sandbox.yaml" \
-    --substitutions="_SANDBOX_IMAGE=${SANDBOX_IMAGE}" &
+  gcloud builds submit "${REPO_ROOT}" --config "${REPO_ROOT}/cloudbuild.sandbox.yaml" --substitutions="_SANDBOX_IMAGE=${SANDBOX_IMAGE}" &
   BUILD_PIDS+=($!)
 
   for bpid in "${BUILD_PIDS[@]}"; do
@@ -946,107 +678,37 @@ if [[ "${SKIP_BUILD}" != "true" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 8. Deploy SandboxTemplate, Platform Workloads, Harness, and KEDA Autoscaler
+# 5. Optional Cloud DNS Records (before ACME challenge)
 # ---------------------------------------------------------------------------
-kubectl create namespace "${SANDBOX_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-render_sandbox_template | kubectl apply -f -
-kubectl apply -f "${REPO_ROOT}/deploy/k8s/agent-sandbox-rbac.yaml"
-kubectl apply -f "${REPO_ROOT}/deploy/k8s/agent-sandbox-networkpolicy.yaml"
-
-TMP_KUSTOMIZE="$(mktemp -d)"
-trap 'rm -rf "${TMP_LITELLM_VALUES}" "${TMP_KUSTOMIZE}"' EXIT
-cp "${REPO_ROOT}"/deploy/k8s/*.yaml "${TMP_KUSTOMIZE}/"
-ENABLED_MODELS_CSV="$(IFS=','; echo "${MODEL_ENTRIES[*]%%=*}")"
-cat <<EOF >> "${TMP_KUSTOMIZE}/kustomization.yaml"
-images:
-  - name: us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-platform
-    newName: ${PLATFORM_IMAGE%:*}
-    newTag: ${PLATFORM_IMAGE##*:}
-  - name: us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-ui
-    newName: ${UI_IMAGE%:*}
-    newTag: ${UI_IMAGE##*:}
-  - name: us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-slack-renderer
-    newName: ${SLACK_RENDERER_IMAGE%:*}
-    newTag: ${SLACK_RENDERER_IMAGE##*:}
-EOF
-kubectl -n "${PLATFORM_NAMESPACE}" delete job alephat-migrate temporal-namespace --ignore-not-found
-kubectl apply -f "${TMP_KUSTOMIZE}/configmap.yaml"
-if [[ "${WITH_TRAEFIK}" == "true" ]]; then
-  ALEPHAT_ORIGIN="https://${ALEPHAT_HOST}"
-  kubectl -n "${PLATFORM_NAMESPACE}" patch configmap alephat-config \
-    --type merge \
-    --patch "{\"data\":{\"DEFAULT_MODEL\":\"${DEFAULT_MODEL}\",\"ENABLED_MODELS\":\"${ENABLED_MODELS_CSV}\",\"LITELLM_API_KEY\":\"${LITELLM_MASTER_KEY}\",\"DASHBOARD_BASE_URL\":\"${ALEPHAT_ORIGIN}\",\"DASHBOARD_API_BASE_URL\":\"${ALEPHAT_ORIGIN}\",\"DASHBOARD_ALLOWED_ORIGINS\":\"${ALEPHAT_ORIGIN}\",\"CORS_ORIGINS\":\"${ALEPHAT_ORIGIN}\"}}"
-else
-  kubectl -n "${PLATFORM_NAMESPACE}" patch configmap alephat-config \
-    --type merge \
-    --patch "{\"data\":{\"DEFAULT_MODEL\":\"${DEFAULT_MODEL}\",\"ENABLED_MODELS\":\"${ENABLED_MODELS_CSV}\",\"LITELLM_API_KEY\":\"${LITELLM_MASTER_KEY}\"}}"
-fi
-rm -f "${TMP_KUSTOMIZE}/configmap.yaml"
-sed -i.bak '/- configmap\.yaml/d' "${TMP_KUSTOMIZE}/kustomization.yaml" && rm -f "${TMP_KUSTOMIZE}/kustomization.yaml.bak"
-kubectl apply -k "${TMP_KUSTOMIZE}"
-kubectl -n "${PLATFORM_NAMESPACE}" rollout restart deployment/alephat-api deployment/alephat-webhook deployment/alephat-harness deployment/alephat-ui
-
-kubectl -n "${PLATFORM_NAMESPACE}" rollout status statefulset/alephat-postgresql --timeout=5m
-kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/temporal --timeout=10m
-kubectl -n "${PLATFORM_NAMESPACE}" wait --for=condition=complete job/temporal-namespace --timeout=5m
-kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/temporal-ui --timeout=5m
-kubectl -n "${PLATFORM_NAMESPACE}" wait --for=condition=complete job/alephat-migrate --timeout=5m
-kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/alephat-api --timeout=10m
-kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/alephat-webhook --timeout=10m
-kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/alephat-ui --timeout=10m
-kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/alephat-harness --timeout=10m
-
-kubectl apply -f "${REPO_ROOT}/deploy/k8s/harness-keda.yaml"
-
-# ---------------------------------------------------------------------------
-# 9. Optional Traefik Public Ingress & TLS
-# ---------------------------------------------------------------------------
-if [[ "${WITH_TRAEFIK}" == "true" ]]; then
-  helm repo add traefik https://traefik.github.io/charts --force-update
-  helm repo update traefik
-  helm upgrade --install traefik traefik/traefik \
-    --namespace traefik \
-    --create-namespace \
-    --version "${TRAEFIK_VERSION}" \
-    --values "${REPO_ROOT}/deploy/k8s/traefik-values.yaml" \
-    --set-string "service.spec.loadBalancerIP=${TRAEFIK_IP}" \
-    --set-string "certificatesResolvers.letsencrypt.acme.email=${ACME_EMAIL}" \
-    --wait
-
-  if [[ -n "${DNS_ZONE}" && -n "${DNS_DOMAIN}" ]]; then
-    gcloud dns managed-zones describe "${DNS_ZONE}" >/dev/null 2>&1 || \
-      gcloud dns managed-zones create "${DNS_ZONE}" \
-        --dns-name="${DNS_DOMAIN%.}." \
-        --description="Alephat public DNS zone"
-    for fqdn in "${ALEPHAT_HOST}" "${TEMPORAL_UI_HOST}" "${TEMPORAL_GRPC_HOST}"; do
-      gcloud dns record-sets describe "${fqdn%.}." --zone "${DNS_ZONE}" --type A >/dev/null 2>&1 || \
-        gcloud dns record-sets create "${fqdn%.}." \
-          --zone "${DNS_ZONE}" \
-          --type A \
-          --ttl 300 \
-          --rrdatas "${TRAEFIK_IP}"
-    done
-  fi
-
-  echo "Waiting for Traefik LoadBalancer (${TRAEFIK_IP}:443) to accept connections..."
-  for _ in {1..30}; do
-    if curl -sk --connect-timeout 3 "https://${TRAEFIK_IP}/" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 3
+if [[ "${WITH_TRAEFIK}" == "true" && -n "${DNS_ZONE}" && -n "${DNS_DOMAIN}" ]]; then
+  gcloud dns managed-zones describe "${DNS_ZONE}" >/dev/null 2>&1 || \
+    gcloud dns managed-zones create "${DNS_ZONE}" \
+      --dns-name="${DNS_DOMAIN%.}." \
+      --description="Alephat public DNS zone"
+  for fqdn in "${ALEPHAT_HOST}" "${TEMPORAL_UI_HOST}" "${TEMPORAL_GRPC_HOST}"; do
+    gcloud dns record-sets describe "${fqdn%.}." --zone "${DNS_ZONE}" --type A >/dev/null 2>&1 || \
+      gcloud dns record-sets create "${fqdn%.}." \
+        --zone "${DNS_ZONE}" \
+        --type A \
+        --ttl 300 \
+        --rrdatas "${TRAEFIK_IP}"
   done
-
-  sed \
-    -e "s/alephat\.example\.com/${ALEPHAT_HOST}/g" \
-    -e "s/temporal\.example\.com/${TEMPORAL_UI_HOST}/g" \
-    -e "s/temporal-grpc\.example\.com/${TEMPORAL_GRPC_HOST}/g" \
-    "${REPO_ROOT}/deploy/k8s/traefik-ingressroute.yaml" | kubectl apply -f -
-
-  echo "Public HTTPS URL:        https://${ALEPHAT_HOST}"
-  echo "Temporal Web UI URL:     https://${TEMPORAL_UI_HOST}"
-  echo "Temporal gRPC Endpoint:  ${TEMPORAL_GRPC_HOST}:7233 (mTLS client cert in secret/temporal-tls)"
 fi
+
+# ---------------------------------------------------------------------------
+# 6. Deploy Alephat & All Dependencies via Unified Multi-Namespace Helm Chart
+# ---------------------------------------------------------------------------
+TMP_HELM_VALUES="$(mktemp)"
+trap 'rm -f "${TMP_HELM_VALUES}"' EXIT
+render_helm_values "${TRAEFIK_IP}" > "${TMP_HELM_VALUES}"
+
+echo "Deploying unified Helm chart '${CHART_DIR}' across isolated namespaces..."
+helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" \
+  --namespace "${PLATFORM_NAMESPACE}" \
+  --create-namespace \
+  --values "${TMP_HELM_VALUES}" \
+  --wait \
+  --timeout 15m
 
 echo "Deployment complete!"
 kubectl -n "${PLATFORM_NAMESPACE}" get pods,svc,scaledobject
-kubectl -n "${SANDBOX_NAMESPACE}" get sandboxtemplate

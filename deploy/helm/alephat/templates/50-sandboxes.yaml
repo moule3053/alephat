@@ -1,0 +1,104 @@
+{{- $sbNs := .Values.namespaces.sandboxes -}}
+{{- $appNs := .Values.namespaces.alephat -}}
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: {{ .Values.agentSandbox.templateName }}
+  namespace: {{ $sbNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alephat-python-sandbox
+    spec:
+      runtimeClassName: {{ include "alephat.runtimeClassName" . }}
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      nodeSelector:
+        {{- if eq .Values.sandboxRuntime.type "kata" }}
+        cloud.google.com/gke-os-distribution: ubuntu
+        {{- end }}
+        kubernetes.io/arch: amd64
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: runtime
+          image: {{ .Values.agentSandbox.sandboxImage }}
+          ports:
+            - name: toolbox
+              containerPort: 8888
+          readinessProbe:
+            tcpSocket:
+              port: toolbox
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            timeoutSeconds: 2
+            failureThreshold: 30
+          resources:
+            {{- toYaml .Values.agentSandbox.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: alephat-agent-sandbox
+  namespace: {{ $sbNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims", "sandboxtemplates"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alephat-harness-agent-sandbox
+  namespace: {{ $sbNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: alephat-harness
+    namespace: {{ $appNs }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: alephat-agent-sandbox
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: alephat-harness-to-agent-sandbox
+  namespace: {{ $sbNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alephat-python-sandbox
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $appNs }}
+          podSelector:
+            matchLabels:
+              app: alephat-harness
+      ports:
+        - protocol: TCP
+          port: 8888

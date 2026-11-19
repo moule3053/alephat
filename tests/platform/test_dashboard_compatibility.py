@@ -364,7 +364,7 @@ def test_message_id_survives_transcript_projection():
 async def test_get_me():
     auth = AuthContext(org_id=uuid.uuid4(), user_id=uuid.uuid4(), role="admin")
     res = await get_me(auth)
-    assert res["login"] == "moule3053"
+    assert res["login"] == "developer"
     assert res["is_admin"] is True
 
 
@@ -375,6 +375,10 @@ async def test_get_options():
     assert res["default_agent_model"] == get_settings().default_model
     gemini = next(model for model in res["models"] if model["id"] == "google:gemini-3.5-flash")
     assert gemini["context_window"] == 1_048_576
+    claude = next(model for model in res["models"] if model["id"] == "anthropic:claude-opus-5-5")
+    assert claude["context_window"] == 1_000_000
+    gpt = next(model for model in res["models"] if model["id"] == "openai:gpt-6.1-terra")
+    assert gpt["context_window"] == 272_000
 
 
 @pytest.mark.asyncio
@@ -385,7 +389,7 @@ async def test_get_profile():
 
     res = await get_profile(db, auth)
 
-    assert res["login"] == "moule3053"
+    assert res["login"] == "developer"
     assert res["default_model"] == get_settings().default_model
     assert res["create_prs"] is False
 

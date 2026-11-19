@@ -1,0 +1,361 @@
+{{- if .Values.traefik.enabled }}
+{{- $tfkNs := .Values.namespaces.traefik -}}
+{{- $appNs := .Values.namespaces.alephat -}}
+{{- $tNs := .Values.namespaces.temporal -}}
+{{- $tHost := include "alephat.temporalHost" . -}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: traefik
+  namespace: {{ $tfkNs }}
+  labels:
+    app.kubernetes.io/name: traefik
+    {{- include "alephat.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: traefik
+  namespace: {{ $tfkNs }}
+  labels:
+    app.kubernetes.io/name: traefik
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.traefik.persistence.storageClassName | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.traefik.persistence.size | quote }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: traefik-ingress-controller
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "nodes", "services", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["extensions", "networking.k8s.io"]
+    resources: ["ingressclasses", "ingresses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["extensions", "networking.k8s.io"]
+    resources: ["ingresses/status"]
+    verbs: ["update"]
+  - apiGroups: ["traefik.io"]
+    resources:
+      - ingressroutes
+      - ingressroutetcps
+      - ingressrouteudps
+      - middlewares
+      - middlewaretcps
+      - serverstransports
+      - serverstransporttcps
+      - tlsoptions
+      - tlsstores
+      - traefikservices
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: traefik-ingress-controller
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: traefik-ingress-controller
+subjects:
+  - kind: ServiceAccount
+    name: traefik
+    namespace: {{ $tfkNs }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: traefik
+  namespace: {{ $tfkNs }}
+  {{- with .Values.traefik.serviceAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  labels:
+    app.kubernetes.io/name: traefik
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  type: LoadBalancer
+  {{- if .Values.traefik.loadBalancerIP }}
+  loadBalancerIP: {{ .Values.traefik.loadBalancerIP | quote }}
+  {{- end }}
+  selector:
+    app.kubernetes.io/name: traefik
+  ports:
+    - name: web
+      port: 80
+      targetPort: web
+      protocol: TCP
+    - name: websecure
+      port: 443
+      targetPort: websecure
+      protocol: TCP
+    - name: temporal
+      port: 7233
+      targetPort: temporal
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traefik
+  namespace: {{ $tfkNs }}
+  labels:
+    app.kubernetes.io/name: traefik
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: traefik
+    spec:
+      serviceAccountName: traefik
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: volume-permissions
+          image: {{ .Values.traefik.initImage }}
+          command: ["sh", "-c", "touch /data/acme.json && chmod 600 /data/acme.json"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: traefik
+          image: {{ .Values.traefik.image }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --entryPoints.metrics.address=:9100/tcp
+            - --entryPoints.temporal.address=:7233/tcp
+            - --entryPoints.traefik.address=:8080/tcp
+            - --entryPoints.web.address=:8000/tcp
+            - --entryPoints.websecure.address=:8443/tcp
+            - --api.dashboard=true
+            - --ping=true
+            - --metrics.prometheus=true
+            - --metrics.prometheus.entrypoint=metrics
+            - --providers.kubernetescrd
+            - --providers.kubernetescrd.allowEmptyServices=true
+            - --providers.kubernetesingress
+            - --providers.kubernetesingress.allowEmptyServices=true
+            - --providers.kubernetesingress.ingressendpoint.publishedservice={{ $tfkNs }}/traefik
+            - --entryPoints.temporal.http.tls=true
+            - --entryPoints.web.http.redirections.entryPoint.to=:443
+            - --entryPoints.web.http.redirections.entryPoint.scheme=https
+            - --entryPoints.web.http.redirections.entryPoint.permanent=true
+            - --entryPoints.websecure.http.tls=true
+            - --log.level=INFO
+            - --accesslog=true
+            - --certificatesresolvers.letsencrypt.acme.email={{ .Values.traefik.acme.email }}
+            - --certificatesresolvers.letsencrypt.acme.storage=/data/acme.json
+            - --certificatesresolvers.letsencrypt.acme.tlsChallenge=true
+            {{- if .Values.traefik.acme.caServer }}
+            - --certificatesresolvers.letsencrypt.acme.caServer={{ .Values.traefik.acme.caServer }}
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: 9100
+              protocol: TCP
+            - name: temporal
+              containerPort: 7233
+              protocol: TCP
+            - name: traefik
+              containerPort: 8080
+              protocol: TCP
+            - name: web
+              containerPort: 8000
+              protocol: TCP
+            - name: websecure
+              containerPort: 8443
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: traefik
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: traefik
+  annotations:
+    ingressclass.kubernetes.io/is-default-class: "true"
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  controller: traefik.io/ingress-controller
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: alephat
+  namespace: {{ $appNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - kind: Rule
+      match: Host(`{{ .Values.ingress.host }}`) && PathPrefix(`/hooks/`)
+      priority: 100
+      services:
+        - name: alephat-webhook
+          port: 80
+    - kind: Rule
+      match: Host(`{{ .Values.ingress.host }}`)
+      priority: 10
+      services:
+        - name: alephat-ui
+          port: 80
+  tls:
+    certResolver: letsencrypt
+{{- if .Values.temporal.enabled }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: TLSOption
+metadata:
+  name: temporal-grpc-mtls
+  namespace: {{ $tNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  minVersion: VersionTLS12
+  clientAuth:
+    secretNames:
+      - temporal-tls
+    clientAuthType: RequireAndVerifyClientCert
+---
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: temporal-grpc-backend
+  namespace: {{ $tNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  serverName: {{ $tHost }}
+  rootCAs:
+    - secret: temporal-tls
+  certificatesSecrets:
+    - temporal-tls
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: temporal-grpc
+  namespace: {{ $tNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  entryPoints:
+    - websecure
+    - temporal
+  routes:
+    - kind: Rule
+      match: Host(`{{ .Values.ingress.temporalGrpcHost }}`)
+      services:
+        - name: temporal
+          port: 7233
+          scheme: https
+          serversTransport: temporal-grpc-backend
+  tls:
+    certResolver: letsencrypt
+    options:
+      name: temporal-grpc-mtls
+      namespace: {{ $tNs }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: temporal-ui-basicauth
+  namespace: {{ $tNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  basicAuth:
+    secret: temporal-ui-auth
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: temporal-ui
+  namespace: {{ $tNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - kind: Rule
+      match: Host(`{{ .Values.ingress.temporalUiHost }}`)
+      middlewares:
+        - name: temporal-ui-basicauth
+          namespace: {{ $tNs }}
+      services:
+        - name: temporal-ui
+          port: 8080
+  tls:
+    certResolver: letsencrypt
+{{- end }}
+{{- end }}
+{{- end }}

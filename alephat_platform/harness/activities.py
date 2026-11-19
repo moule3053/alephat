@@ -162,7 +162,7 @@ class RepositoryProvisioner:
             [
                 'branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"',
                 'if [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then',
-                '  gh pr view "$branch" --json number,title,url,state,isDraft,headRefName,baseRefName,createdAt,additions,deletions,changedFiles 2>/dev/null || true',
+                '  gh pr view "$branch" --json number,title,url,state,isDraft,headRefName,baseRefName,createdAt,additions,deletions,changedFiles,author 2>/dev/null || true',
                 "fi",
             ]
         )
@@ -195,6 +195,12 @@ class RepositoryProvisioner:
         changed_files = int(pr.get("changedFiles") or 0)
         head_ref = str(pr.get("headRefName") or "main")
         base_ref = str(pr.get("baseRefName") or "main")
+        author_raw = pr.get("author")
+        author_login = (
+            str(author_raw.get("login")).strip()
+            if isinstance(author_raw, dict) and author_raw.get("login")
+            else "alephat"
+        )
         pr_record: dict[str, object] = {
             "number": pr["number"],
             "title": str(pr.get("title") or f"PR #{pr['number']}"),
@@ -203,8 +209,8 @@ class RepositoryProvisioner:
             "baseRef": base_ref,
             "url": str(pr["url"]),
             "repoFullName": repo,
-            "author": "moule3053",
-            "authorAvatarUrl": "https://github.com/moule3053.png",
+            "author": author_login,
+            "authorAvatarUrl": f"https://github.com/{author_login}.png",
             "createdAt": pr.get("createdAt"),
             "diffStats": {
                 "files": changed_files,

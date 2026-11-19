@@ -291,14 +291,17 @@ async def _get_or_create_org_settings(db: AsyncSession, org_id: uuid.UUID) -> Or
 def _profile_response(
     row: UserSettings | None,
     *,
+    auth: AuthContext,
     default_model: str,
 ) -> dict[str, Any]:
     values = dict(row.settings or {}) if row else {}
     model = row.preferred_model if row and row.preferred_model else default_model
+    login = auth.github_login or "developer"
+    email = auth.email or f"{login}@users.noreply.github.com"
     return {
         "agent_workspace_tasks_supported": True,
-        "login": "moule3053",
-        "email": "14330171+moule3053@users.noreply.github.com",
+        "login": login,
+        "email": email,
         "default_model": model,
         "reasoning_effort": values.get("reasoning_effort", "medium"),
         "default_subagent_model": values.get("default_subagent_model") or model,
@@ -316,14 +319,17 @@ def _profile_response(
 
 @router.get("/me")
 async def get_me(auth: AuthContext = Depends(get_auth)) -> dict[str, Any]:
-    login = auth.github_login or "moule3053"
+    login = auth.github_login or "developer"
+    avatar_url = auth.avatar_url or (
+        f"https://github.com/{auth.github_login}.png" if auth.github_login else ""
+    )
     return {
         "login": login,
         "auth_provider": "github",
         "github_login": login,
         "display_name": login,
-        "email": auth.email or "14330171+moule3053@users.noreply.github.com",
-        "avatar_url": auth.avatar_url or "https://github.com/moule3053.png",
+        "email": auth.email or f"{login}@users.noreply.github.com",
+        "avatar_url": avatar_url,
         "is_admin": auth.role == "admin",
         "slack_oauth_enabled": False,
     }
@@ -331,7 +337,7 @@ async def get_me(auth: AuthContext = Depends(get_auth)) -> dict[str, Any]:
 
 @router.get("/my-mapping")
 async def get_my_mapping(auth: AuthContext = Depends(get_auth)) -> dict[str, Any]:
-    login = auth.github_login or "moule3053"
+    login = auth.github_login or "developer"
     return {"login": login, "github_login": login}
 
 
@@ -453,6 +459,110 @@ class DashboardModelCatalog:
             "context_window": 1048576,
         },
         {
+            "id": "anthropic:claude-opus-5-5",
+            "label": "Claude Opus 5.5",
+            "efforts": ["low", "medium", "high", "xhigh", "max"],
+            "default_effort": "high",
+            "supports_images": True,
+            "context_window": 1000000,
+        },
+        {
+            "id": "anthropic:claude-sonnet-5-5",
+            "label": "Claude Sonnet 5.5",
+            "efforts": ["low", "medium", "high", "xhigh", "max"],
+            "default_effort": "high",
+            "supports_images": True,
+            "context_window": 1000000,
+        },
+        {
+            "id": "anthropic:claude-haiku-5-5",
+            "label": "Claude Haiku 5.5",
+            "efforts": ["low", "medium", "high", "xhigh", "max"],
+            "default_effort": "medium",
+            "supports_images": True,
+            "context_window": 1000000,
+        },
+        {
+            "id": "anthropic:claude-opus-4-6",
+            "label": "Claude Opus 4.6",
+            "efforts": ["low", "medium", "high", "max"],
+            "default_effort": "high",
+            "supports_images": True,
+            "context_window": 200000,
+        },
+        {
+            "id": "anthropic:claude-sonnet-4-6",
+            "label": "Claude Sonnet 4.6",
+            "efforts": ["low", "medium", "high", "max"],
+            "default_effort": "high",
+            "supports_images": True,
+            "context_window": 200000,
+        },
+        {
+            "id": "anthropic:claude-sonnet-4-5",
+            "label": "Claude Sonnet 4.5",
+            "efforts": ["low", "medium", "high"],
+            "default_effort": "medium",
+            "supports_images": True,
+            "context_window": 200000,
+        },
+        {
+            "id": "openai:gpt-6.1-terra",
+            "label": "GPT-6.1 Terra",
+            "efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+            "default_effort": "medium",
+            "supports_images": True,
+            "context_window": 272000,
+        },
+        {
+            "id": "openai:gpt-6.1-sol",
+            "label": "GPT-6.1 Sol",
+            "efforts": ["none", "low", "medium", "high", "xhigh"],
+            "default_effort": "xhigh",
+            "supports_images": True,
+            "context_window": 272000,
+        },
+        {
+            "id": "openai:gpt-6-luna",
+            "label": "GPT-6 Luna",
+            "efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+            "default_effort": "xhigh",
+            "supports_images": True,
+            "context_window": 272000,
+        },
+        {
+            "id": "openai:gpt-6-astra",
+            "label": "GPT-6 Astra",
+            "efforts": ["low", "medium", "high", "xhigh", "max"],
+            "default_effort": "low",
+            "supports_images": True,
+            "context_window": 272000,
+        },
+        {
+            "id": "openai:gpt-5.5",
+            "label": "GPT-5.5",
+            "efforts": ["none", "low", "medium", "high", "xhigh"],
+            "default_effort": "medium",
+            "supports_images": True,
+            "context_window": 272000,
+        },
+        {
+            "id": "openai:gpt-4.1",
+            "label": "GPT-4.1",
+            "efforts": [],
+            "default_effort": "",
+            "supports_images": True,
+            "context_window": 1047576,
+        },
+        {
+            "id": "openai:o4-mini",
+            "label": "o4-mini",
+            "efforts": ["low", "medium", "high"],
+            "default_effort": "medium",
+            "supports_images": True,
+            "context_window": 200000,
+        },
+        {
             "id": "openai:gpt-4o",
             "label": "GPT-4o",
             "efforts": [],
@@ -472,20 +582,6 @@ class DashboardModelCatalog:
             "efforts": [],
             "default_effort": "",
             "supports_images": True,
-        },
-        {
-            "id": "anthropic:claude-sonnet-5",
-            "label": "Claude Sonnet 5",
-            "efforts": ["low", "medium", "high", "xhigh", "max"],
-            "default_effort": "high",
-            "supports_images": True,
-        },
-        {
-            "id": "openai:o1",
-            "label": "o1",
-            "efforts": ["low", "medium", "high"],
-            "default_effort": "medium",
-            "supports_images": False,
         },
     )
 
@@ -559,7 +655,7 @@ async def get_profile(
     row = await db.get(UserSettings, auth.user_id)
     org = await db.get(OrgSettings, auth.org_id)
     default_model = org.default_model if org and org.default_model else get_settings().default_model
-    return _profile_response(row, default_model=default_model)
+    return _profile_response(row, auth=auth, default_model=default_model)
 
 
 @router.put("/profile")
@@ -579,7 +675,7 @@ async def put_profile(
     row.settings = values
     row.updated_at = datetime.now(UTC)
     await db.flush()
-    return _profile_response(row, default_model=body.default_model)
+    return _profile_response(row, auth=auth, default_model=body.default_model)
 
 
 @router.get("/team-settings")
@@ -794,13 +890,14 @@ async def get_agent_usage_leaderboard(
     favorite_model = max(model_counts, key=model_counts.__getitem__) if model_counts else ""
     rows = []
     if tasks and limit > 0:
+        login = auth.github_login or "developer"
         rows.append(
             {
                 "rank": 1,
                 "user": {
-                    "name": "moule3053",
-                    "github_login": "moule3053",
-                    "email": "14330171+moule3053@users.noreply.github.com",
+                    "name": login,
+                    "github_login": login,
+                    "email": auth.email or f"{login}@users.noreply.github.com",
                 },
                 "favorite_model": favorite_model,
                 "agent_runs": len(tasks),
@@ -2713,8 +2810,8 @@ async def create_schedule(
         "lastTriggeredAt": None,
         "lastError": None,
         "lastErrorAt": None,
-        "createdBy": auth.github_login or "moule3053",
-        "updatedBy": auth.github_login or "moule3053",
+        "createdBy": auth.github_login or "system",
+        "updatedBy": auth.github_login or "system",
         "createdAt": now,
         "updatedAt": now,
     }
@@ -2766,7 +2863,7 @@ async def update_schedule(
         cron_expression=record.get("schedule") if isinstance(record.get("schedule"), str) else None,
         enabled=bool(record.get("enabled", True)),
     )
-    record["updatedBy"] = auth.github_login or "moule3053"
+    record["updatedBy"] = auth.github_login or "system"
     record["updatedAt"] = datetime.now(UTC).isoformat()
     schedules[schedule_id] = record
     settings_dict["schedules"] = schedules
@@ -2906,7 +3003,7 @@ async def list_open_pull_requests_route(
     auth: AuthContext = Depends(get_auth),
 ) -> dict[str, Any]:
     del lightweight, page
-    login = (auth.github_login or "moule3053").casefold()
+    login = (auth.github_login or "").casefold()
     requested_repos = [r.strip() for r in repo.split(",") if r.strip()]
     if not requested_repos:
         try:

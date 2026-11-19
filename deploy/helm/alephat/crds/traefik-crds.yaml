@@ -1,0 +1,2513 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: ingressroutes.traefik.io
+spec:
+  group: traefik.io
+  names:
+    kind: IngressRoute
+    listKind: IngressRouteList
+    plural: ingressroutes
+    singular: ingressroute
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              entryPoints:
+                items:
+                  type: string
+                type: array
+              ingressClassName:
+                type: string
+              parentRefs:
+                items:
+                  properties:
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              routes:
+                items:
+                  properties:
+                    kind:
+                      enum:
+                      - Rule
+                      type: string
+                    match:
+                      type: string
+                    middlewares:
+                      items:
+                        properties:
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      type: array
+                    observability:
+                      properties:
+                        accessLogs:
+                          type: boolean
+                        metrics:
+                          type: boolean
+                        traceVerbosity:
+                          default: minimal
+                          enum:
+                          - minimal
+                          - detailed
+                          type: string
+                        tracing:
+                          type: boolean
+                      type: object
+                    priority:
+                      maximum: 9223372036854775000
+                      type: integer
+                    services:
+                      items:
+                        properties:
+                          healthCheck:
+                            properties:
+                              followRedirects:
+                                type: boolean
+                              headers:
+                                additionalProperties:
+                                  type: string
+                                type: object
+                              hostname:
+                                type: string
+                              interval:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                x-kubernetes-int-or-string: true
+                              method:
+                                type: string
+                              mode:
+                                type: string
+                              path:
+                                type: string
+                              port:
+                                type: integer
+                              scheme:
+                                type: string
+                              status:
+                                type: integer
+                              timeout:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                x-kubernetes-int-or-string: true
+                              unhealthyInterval:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                x-kubernetes-int-or-string: true
+                            type: object
+                          kind:
+                            enum:
+                            - Service
+                            - TraefikService
+                            type: string
+                          middlewares:
+                            items:
+                              properties:
+                                name:
+                                  type: string
+                                namespace:
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                          nativeLB:
+                            type: boolean
+                          nodePortLB:
+                            type: boolean
+                          passHostHeader:
+                            type: boolean
+                          passiveHealthCheck:
+                            properties:
+                              failureWindow:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                x-kubernetes-int-or-string: true
+                              maxFailedAttempts:
+                                type: integer
+                            type: object
+                          port:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                          responseForwarding:
+                            properties:
+                              flushInterval:
+                                type: string
+                            type: object
+                          scheme:
+                            type: string
+                          serversTransport:
+                            type: string
+                          sticky:
+                            properties:
+                              cookie:
+                                properties:
+                                  domain:
+                                    type: string
+                                  httpOnly:
+                                    type: boolean
+                                  maxAge:
+                                    type: integer
+                                  name:
+                                    type: string
+                                  path:
+                                    type: string
+                                  sameSite:
+                                    enum:
+                                    - none
+                                    - lax
+                                    - strict
+                                    - None
+                                    - Lax
+                                    - Strict
+                                    type: string
+                                  secure:
+                                    type: boolean
+                                type: object
+                            type: object
+                          strategy:
+                            enum:
+                            - wrr
+                            - p2c
+                            - hrw
+                            - leasttime
+                            - RoundRobin
+                            type: string
+                          weight:
+                            minimum: 0
+                            type: integer
+                        required:
+                        - name
+                        type: object
+                      type: array
+                    syntax:
+                      type: string
+                  required:
+                  - match
+                  type: object
+                type: array
+              tls:
+                properties:
+                  certResolver:
+                    type: string
+                  domains:
+                    items:
+                      properties:
+                        main:
+                          type: string
+                        sans:
+                          items:
+                            type: string
+                          type: array
+                      type: object
+                    type: array
+                  options:
+                    properties:
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  secretName:
+                    type: string
+                  store:
+                    properties:
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+            required:
+            - routes
+            type: object
+        required:
+        - metadata
+        - spec
+        type: object
+    served: true
+    storage: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: ingressroutetcps.traefik.io
+spec:
+  group: traefik.io
+  names:
+    kind: IngressRouteTCP
+    listKind: IngressRouteTCPList
+    plural: ingressroutetcps
+    singular: ingressroutetcp
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              entryPoints:
+                items:
+                  type: string
+                type: array
+              ingressClassName:
+                type: string
+              routes:
+                items:
+                  properties:
+                    match:
+                      type: string
+                    middlewares:
+                      items:
+                        properties:
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      type: array
+                    priority:
+                      maximum: 9223372036854775000
+                      type: integer
+                    services:
+                      items:
+                        properties:
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                          nativeLB:
+                            type: boolean
+                          nodePortLB:
+                            type: boolean
+                          port:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                          proxyProtocol:
+                            properties:
+                              version:
+                                maximum: 2
+                                minimum: 1
+                                type: integer
+                            type: object
+                          serversTransport:
+                            type: string
+                          terminationDelay:
+                            type: integer
+                          tls:
+                            type: boolean
+                          weight:
+                            minimum: 0
+                            type: integer
+                        required:
+                        - name
+                        - port
+                        type: object
+                      type: array
+                    syntax:
+                      enum:
+                      - v3
+                      - v2
+                      type: string
+                  required:
+                  - match
+                  type: object
+                type: array
+              tls:
+                properties:
+                  certResolver:
+                    type: string
+                  domains:
+                    items:
+                      properties:
+                        main:
+                          type: string
+                        sans:
+                          items:
+                            type: string
+                          type: array
+                      type: object
+                    type: array
+                  options:
+                    properties:
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  passthrough:
+                    type: boolean
+                  secretName:
+                    type: string
+                  store:
+                    properties:
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+            required:
+            - routes
+            type: object
+        required:
+        - metadata
+        - spec
+        type: object
+    served: true
+    storage: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: ingressrouteudps.traefik.io
+spec:
+  group: traefik.io
+  names:
+    kind: IngressRouteUDP
+    listKind: IngressRouteUDPList
+    plural: ingressrouteudps
+    singular: ingressrouteudp
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              entryPoints:
+                items:
+                  type: string
+                type: array
+              ingressClassName:
+                type: string
+              routes:
+                items:
+                  properties:
+                    services:
+                      items:
+                        properties:
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                          nativeLB:
+                            type: boolean
+                          nodePortLB:
+                            type: boolean
+                          port:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                          weight:
+                            minimum: 0
+                            type: integer
+                        required:
+                        - name
+                        - port
+                        type: object
+                      type: array
+                  type: object
+                type: array
+            required:
+            - routes
+            type: object
+        required:
+        - metadata
+        - spec
+        type: object
+    served: true
+    storage: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: middlewares.traefik.io
+spec:
+  group: traefik.io
+  names:
+    kind: Middleware
+    listKind: MiddlewareList
+    plural: middlewares
+    singular: middleware
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              addPrefix:
+                properties:
+                  prefix:
+                    type: string
+                    x-kubernetes-validations:
+                    - message: must start with a '/'
+                      rule: self.startsWith('/')
+                type: object
+              basicAuth:
+                properties:
+                  headerField:
+                    type: string
+                  realm:
+                    type: string
+                  removeHeader:
+                    type: boolean
+                  secret:
+                    type: string
+                type: object
+              buffering:
+                properties:
+                  maxRequestBodyBytes:
+                    format: int64
+                    type: integer
+                  maxResponseBodyBytes:
+                    format: int64
+                    type: integer
+                  memRequestBodyBytes:
+                    format: int64
+                    type: integer
+                  memResponseBodyBytes:
+                    format: int64
+                    type: integer
+                  retryExpression:
+                    type: string
+                type: object
+              chain:
+                properties:
+                  middlewares:
+                    items:
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                type: object
+              circuitBreaker:
+                properties:
+                  checkPeriod:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                    x-kubernetes-int-or-string: true
+                  expression:
+                    type: string
+                  fallbackDuration:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    x-kubernetes-int-or-string: true
+                  recoveryDuration:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                    x-kubernetes-int-or-string: true
+                  responseCode:
+                    maximum: 599
+                    minimum: 100
+                    type: integer
+                type: object
+              compress:
+                properties:
+                  defaultEncoding:
+                    type: string
+                  encodings:
+                    items:
+                      type: string
+                    type: array
+                  excludedContentTypes:
+                    items:
+                      type: string
+                    type: array
+                  includedContentTypes:
+                    items:
+                      type: string
+                    type: array
+                  minResponseBodyBytes:
+                    minimum: 0
+                    type: integer
+                type: object
+              contentType:
+                properties:
+                  autoDetect:
+                    type: boolean
+                type: object
+              digestAuth:
+                properties:
+                  headerField:
+                    type: string
+                  realm:
+                    type: string
+                  removeHeader:
+                    type: boolean
+                  secret:
+                    type: string
+                type: object
+              encodedCharacters:
+                properties:
+                  allowEncodedBackSlash:
+                    type: boolean
+                  allowEncodedHash:
+                    type: boolean
+                  allowEncodedNullCharacter:
+                    type: boolean
+                  allowEncodedPercent:
+                    type: boolean
+                  allowEncodedQuestionMark:
+                    type: boolean
+                  allowEncodedSemicolon:
+                    type: boolean
+                  allowEncodedSlash:
+                    type: boolean
+                type: object
+              errors:
+                properties:
+                  errorRequestHeaders:
+                    items:
+                      type: string
+                    type: array
+                  query:
+                    type: string
+                  service:
+                    properties:
+                      healthCheck:
+                        properties:
+                          followRedirects:
+                            type: boolean
+                          headers:
+                            additionalProperties:
+                              type: string
+                            type: object
+                          hostname:
+                            type: string
+                          interval:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                          method:
+                            type: string
+                          mode:
+                            type: string
+                          path:
+                            type: string
+                          port:
+                            type: integer
+                          scheme:
+                            type: string
+                          status:
+                            type: integer
+                          timeout:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                          unhealthyInterval:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                        type: object
+                      kind:
+                        enum:
+                        - Service
+                        - TraefikService
+                        type: string
+                      middlewares:
+                        items:
+                          properties:
+                            name:
+                              type: string
+                            namespace:
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                      nativeLB:
+                        type: boolean
+                      nodePortLB:
+                        type: boolean
+                      passHostHeader:
+                        type: boolean
+                      passiveHealthCheck:
+                        properties:
+                          failureWindow:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                          maxFailedAttempts:
+                            type: integer
+                        type: object
+                      port:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        x-kubernetes-int-or-string: true
+                      responseForwarding:
+                        properties:
+                          flushInterval:
+                            type: string
+                        type: object
+                      scheme:
+                        type: string
+                      serversTransport:
+                        type: string
+                      sticky:
+                        properties:
+                          cookie:
+                            properties:
+                              domain:
+                                type: string
+                              httpOnly:
+                                type: boolean
+                              maxAge:
+                                type: integer
+                              name:
+                                type: string
+                              path:
+                                type: string
+                              sameSite:
+                                enum:
+                                - none
+                                - lax
+                                - strict
+                                - None
+                                - Lax
+                                - Strict
+                                type: string
+                              secure:
+                                type: boolean
+                            type: object
+                        type: object
+                      strategy:
+                        enum:
+                        - wrr
+                        - p2c
+                        - hrw
+                        - leasttime
+                        - RoundRobin
+                        type: string
+                      weight:
+                        minimum: 0
+                        type: integer
+                    required:
+                    - name
+                    type: object
+                  status:
+                    items:
+                      pattern: ^([1-5][0-9]{2}[,-]?)+$
+                      type: string
+                    type: array
+                  statusRewrites:
+                    additionalProperties:
+                      type: integer
+                    type: object
+                type: object
+              forwardAuth:
+                properties:
+                  addAuthCookiesToResponse:
+                    items:
+                      type: string
+                    type: array
+                  address:
+                    type: string
+                  authRequestHeaders:
+                    items:
+                      type: string
+                    type: array
+                  authResponseHeaders:
+                    items:
+                      type: string
+                    type: array
+                  authResponseHeadersRegex:
+                    type: string
+                  authSigninURL:
+                    type: string
+                  forwardBody:
+                    type: boolean
+                  headerField:
+                    type: string
+                  maxBodySize:
+                    format: int64
+                    type: integer
+                  maxResponseBodySize:
+                    format: int64
+                    type: integer
+                  preserveLocationHeader:
+                    type: boolean
+                  preserveRequestMethod:
+                    type: boolean
+                  tls:
+                    properties:
+                      caOptional:
+                        type: boolean
+                      caSecret:
+                        type: string
+                      certSecret:
+                        type: string
+                      insecureSkipVerify:
+                        type: boolean
+                    type: object
+                  trustForwardHeader:
+                    type: boolean
+                type: object
+              grpcWeb:
+                properties:
+                  allowOrigins:
+                    items:
+                      type: string
+                    type: array
+                type: object
+              headers:
+                properties:
+                  accessControlAllowCredentials:
+                    type: boolean
+                  accessControlAllowHeaders:
+                    items:
+                      type: string
+                    type: array
+                  accessControlAllowMethods:
+                    items:
+                      type: string
+                    type: array
+                  accessControlAllowOriginList:
+                    items:
+                      type: string
+                    type: array
+                  accessControlAllowOriginListRegex:
+                    items:
+                      type: string
+                    type: array
+                  accessControlExposeHeaders:
+                    items:
+                      type: string
+                    type: array
+                  accessControlMaxAge:
+                    format: int64
+                    type: integer
+                  addVaryHeader:
+                    type: boolean
+                  allowedHosts:
+                    items:
+                      type: string
+                    type: array
+                  browserXssFilter:
+                    type: boolean
+                  contentSecurityPolicy:
+                    type: string
+                  contentSecurityPolicyReportOnly:
+                    type: string
+                  contentTypeNosniff:
+                    type: boolean
+                  customBrowserXSSValue:
+                    type: string
+                  customFrameOptionsValue:
+                    type: string
+                  customRequestHeaders:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  customResponseHeaders:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  featurePolicy:
+                    type: string
+                  forceSTSHeader:
+                    type: boolean
+                  frameDeny:
+                    type: boolean
+                  hostsProxyHeaders:
+                    items:
+                      type: string
+                    type: array
+                  isDevelopment:
+                    type: boolean
+                  permissionsPolicy:
+                    type: string
+                  publicKey:
+                    type: string
+                  referrerPolicy:
+                    type: string
+                  sslForceHost:
+                    type: boolean
+                  sslHost:
+                    type: string
+                  sslProxyHeaders:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  sslRedirect:
+                    type: boolean
+                  sslTemporaryRedirect:
+                    type: boolean
+                  stsIncludeSubdomains:
+                    type: boolean
+                  stsPreload:
+                    type: boolean
+                  stsSeconds:
+                    format: int64
+                    minimum: 0
+                    type: integer
+                type: object
+              inFlightReq:
+                properties:
+                  amount:
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  sourceCriterion:
+                    properties:
+                      ipStrategy:
+                        properties:
+                          depth:
+                            minimum: 0
+                            type: integer
+                          excludedIPs:
+                            items:
+                              type: string
+                            type: array
+                          ipv6Subnet:
+                            type: integer
+                        type: object
+                      requestHeaderName:
+                        type: string
+                      requestHost:
+                        type: boolean
+                    type: object
+                type: object
+              ipAllowList:
+                properties:
+                  ipStrategy:
+                    properties:
+                      depth:
+                        minimum: 0
+                        type: integer
+                      excludedIPs:
+                        items:
+                          type: string
+                        type: array
+                      ipv6Subnet:
+                        type: integer
+                    type: object
+                  rejectStatusCode:
+                    type: integer
+                  sourceRange:
+                    items:
+                      type: string
+                    type: array
+                type: object
+              ipWhiteList:
+                properties:
+                  ipStrategy:
+                    properties:
+                      depth:
+                        minimum: 0
+                        type: integer
+                      excludedIPs:
+                        items:
+                          type: string
+                        type: array
+                      ipv6Subnet:
+                        type: integer
+                    type: object
+                  sourceRange:
+                    items:
+                      type: string
+                    type: array
+                type: object
+              passTLSClientCert:
+                properties:
+                  info:
+                    properties:
+                      issuer:
+                        properties:
+                          commonName:
+                            type: boolean
+                          country:
+                            type: boolean
+                          domainComponent:
+                            type: boolean
+                          locality:
+                            type: boolean
+                          organization:
+                            type: boolean
+                          province:
+                            type: boolean
+                          serialNumber:
+                            type: boolean
+                        type: object
+                      notAfter:
+                        type: boolean
+                      notBefore:
+                        type: boolean
+                      sans:
+                        type: boolean
+                      serialNumber:
+                        type: boolean
+                      subject:
+                        properties:
+                          commonName:
+                            type: boolean
+                          country:
+                            type: boolean
+                          domainComponent:
+                            type: boolean
+                          locality:
+                            type: boolean
+                          organization:
+                            type: boolean
+                          organizationalUnit:
+                            type: boolean
+                          province:
+                            type: boolean
+                          serialNumber:
+                            type: boolean
+                        type: object
+                    type: object
+                  pem:
+                    type: boolean
+                type: object
+              plugin:
+                additionalProperties:
+                  x-kubernetes-preserve-unknown-fields: true
+                type: object
+              rateLimit:
+                properties:
+                  average:
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  burst:
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  period:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    x-kubernetes-int-or-string: true
+                  redis:
+                    properties:
+                      db:
+                        type: integer
+                      dialTimeout:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                        x-kubernetes-int-or-string: true
+                      endpoints:
+                        items:
+                          type: string
+                        type: array
+                      maxActiveConns:
+                        type: integer
+                      minIdleConns:
+                        type: integer
+                      poolSize:
+                        type: integer
+                      readTimeout:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                        x-kubernetes-int-or-string: true
+                      secret:
+                        type: string
+                      tls:
+                        properties:
+                          caSecret:
+                            type: string
+                          certSecret:
+                            type: string
+                          insecureSkipVerify:
+                            type: boolean
+                        type: object
+                      writeTimeout:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                        x-kubernetes-int-or-string: true
+                    type: object
+                  sourceCriterion:
+                    properties:
+                      ipStrategy:
+                        properties:
+                          depth:
+                            minimum: 0
+                            type: integer
+                          excludedIPs:
+                            items:
+                              type: string
+                            type: array
+                          ipv6Subnet:
+                            type: integer
+                        type: object
+                      requestHeaderName:
+                        type: string
+                      requestHost:
+                        type: boolean
+                    type: object
+                type: object
+              redirectRegex:
+                properties:
+                  permanent:
+                    type: boolean
+                  regex:
+                    type: string
+                  replacement:
+                    type: string
+                type: object
+              redirectScheme:
+                properties:
+                  permanent:
+                    type: boolean
+                  port:
+                    type: string
+                  scheme:
+                    type: string
+                type: object
+              replacePath:
+                properties:
+                  path:
+                    type: string
+                type: object
+              replacePathRegex:
+                properties:
+                  regex:
+                    type: string
+                  replacement:
+                    type: string
+                type: object
+              retry:
+                properties:
+                  attempts:
+                    minimum: 0
+                    type: integer
+                  disableRetryOnNetworkError:
+                    type: boolean
+                  initialInterval:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                    x-kubernetes-int-or-string: true
+                  maxRequestBodyBytes:
+                    format: int64
+                    minimum: -1
+                    type: integer
+                  retryNonIdempotentMethod:
+                    type: boolean
+                  status:
+                    items:
+                      pattern: ^([1-5][0-9]{2}[,-]?)+$
+                      type: string
+                    type: array
+                  timeout:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                    x-kubernetes-int-or-string: true
+                type: object
+              stripPrefix:
+                properties:
+                  forceSlash:
+                    type: boolean
+                  prefixes:
+                    items:
+                      type: string
+                    type: array
+                type: object
+              stripPrefixRegex:
+                properties:
+                  regex:
+                    items:
+                      type: string
+                    type: array
+                type: object
+            type: object
+        required:
+        - metadata
+        - spec
+        type: object
+    served: true
+    storage: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: middlewaretcps.traefik.io
+spec:
+  group: traefik.io
+  names:
+    kind: MiddlewareTCP
+    listKind: MiddlewareTCPList
+    plural: middlewaretcps
+    singular: middlewaretcp
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              inFlightConn:
+                properties:
+                  amount:
+                    format: int64
+                    minimum: 0
+                    type: integer
+                type: object
+              ipAllowList:
+                properties:
+                  sourceRange:
+                    items:
+                      type: string
+                    type: array
+                type: object
+              ipWhiteList:
+                properties:
+                  sourceRange:
+                    items:
+                      type: string
+                    type: array
+                type: object
+            type: object
+        required:
+        - metadata
+        - spec
+        type: object
+    served: true
+    storage: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: serverstransports.traefik.io
+spec:
+  group: traefik.io
+  names:
+    kind: ServersTransport
+    listKind: ServersTransportList
+    plural: serverstransports
+    singular: serverstransport
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              certificatesSecrets:
+                items:
+                  type: string
+                type: array
+              cipherSuites:
+                items:
+                  type: string
+                type: array
+              disableHTTP2:
+                type: boolean
+              forwardingTimeouts:
+                properties:
+                  dialTimeout:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                    x-kubernetes-int-or-string: true
+                  idleConnTimeout:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                    x-kubernetes-int-or-string: true
+                  pingTimeout:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                    x-kubernetes-int-or-string: true
+                  readIdleTimeout:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                    x-kubernetes-int-or-string: true
+                  responseHeaderTimeout:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                    x-kubernetes-int-or-string: true
+                type: object
+              insecureSkipVerify:
+                type: boolean
+              maxIdleConnsPerHost:
+                minimum: -1
+                type: integer
+              maxVersion:
+                type: string
+              minVersion:
+                type: string
+              peerCertURI:
+                type: string
+              rootCAs:
+                items:
+                  properties:
+                    configMap:
+                      type: string
+                    secret:
+                      type: string
+                  type: object
+                  x-kubernetes-validations:
+                  - message: RootCA cannot have both Secret and ConfigMap defined.
+                    rule: '!has(self.secret) || !has(self.configMap)'
+                type: array
+              rootCAsSecrets:
+                items:
+                  type: string
+                type: array
+              serverName:
+                type: string
+              spiffe:
+                properties:
+                  ids:
+                    items:
+                      type: string
+                    type: array
+                  trustDomain:
+                    type: string
+                type: object
+            type: object
+        required:
+        - metadata
+        - spec
+        type: object
+    served: true
+    storage: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: serverstransporttcps.traefik.io
+spec:
+  group: traefik.io
+  names:
+    kind: ServersTransportTCP
+    listKind: ServersTransportTCPList
+    plural: serverstransporttcps
+    singular: serverstransporttcp
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              dialKeepAlive:
+                anyOf:
+                - type: integer
+                - type: string
+                pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                x-kubernetes-int-or-string: true
+              dialTimeout:
+                anyOf:
+                - type: integer
+                - type: string
+                pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                x-kubernetes-int-or-string: true
+              proxyProtocol:
+                properties:
+                  version:
+                    maximum: 2
+                    minimum: 1
+                    type: integer
+                type: object
+              terminationDelay:
+                anyOf:
+                - type: integer
+                - type: string
+                pattern: "^([0-9]+(ns|us|\xB5s|ms|s|m|h)?)+$"
+                x-kubernetes-int-or-string: true
+              tls:
+                properties:
+                  certificatesSecrets:
+                    items:
+                      type: string
+                    type: array
+                  insecureSkipVerify:
+                    type: boolean
+                  peerCertURI:
+                    type: string
+                  rootCAs:
+                    items:
+                      properties:
+                        configMap:
+                          type: string
+                        secret:
+                          type: string
+                      type: object
+                      x-kubernetes-validations:
+                      - message: RootCA cannot have both Secret and ConfigMap defined.
+                        rule: '!has(self.secret) || !has(self.configMap)'
+                    type: array
+                  rootCAsSecrets:
+                    items:
+                      type: string
+                    type: array
+                  serverName:
+                    type: string
+                  spiffe:
+                    properties:
+                      ids:
+                        items:
+                          type: string
+                        type: array
+                      trustDomain:
+                        type: string
+                    type: object
+                type: object
+            type: object
+        required:
+        - metadata
+        - spec
+        type: object
+    served: true
+    storage: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: tlsoptions.traefik.io
+spec:
+  group: traefik.io
+  names:
+    kind: TLSOption
+    listKind: TLSOptionList
+    plural: tlsoptions
+    singular: tlsoption
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              alpnProtocols:
+                items:
+                  type: string
+                type: array
+              cipherSuites:
+                items:
+                  type: string
+                type: array
+              clientAuth:
+                properties:
+                  clientAuthType:
+                    enum:
+                    - NoClientCert
+                    - RequestClientCert
+                    - RequireAnyClientCert
+                    - VerifyClientCertIfGiven
+                    - RequireAndVerifyClientCert
+                    type: string
+                  secretNames:
+                    items:
+                      type: string
+                    type: array
+                type: object
+              curvePreferences:
+                items:
+                  type: string
+                type: array
+              disableSessionTickets:
+                type: boolean
+              maxVersion:
+                type: string
+              minVersion:
+                type: string
+              preferServerCipherSuites:
+                type: boolean
+              sniStrict:
+                type: boolean
+            type: object
+        required:
+        - metadata
+        - spec
+        type: object
+    served: true
+    storage: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: tlsstores.traefik.io
+spec:
+  group: traefik.io
+  names:
+    kind: TLSStore
+    listKind: TLSStoreList
+    plural: tlsstores
+    singular: tlsstore
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              certificates:
+                items:
+                  properties:
+                    secretName:
+                      type: string
+                  required:
+                  - secretName
+                  type: object
+                type: array
+              defaultCertificate:
+                properties:
+                  secretName:
+                    type: string
+                required:
+                - secretName
+                type: object
+              defaultGeneratedCert:
+                properties:
+                  domain:
+                    properties:
+                      main:
+                        type: string
+                      sans:
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  resolver:
+                    type: string
+                type: object
+            type: object
+        required:
+        - metadata
+        - spec
+        type: object
+    served: true
+    storage: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: traefikservices.traefik.io
+spec:
+  group: traefik.io
+  names:
+    kind: TraefikService
+    listKind: TraefikServiceList
+    plural: traefikservices
+    singular: traefikservice
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              failover:
+                properties:
+                  errors:
+                    properties:
+                      maxRequestBodyBytes:
+                        format: int64
+                        type: integer
+                      status:
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  fallback:
+                    properties:
+                      healthCheck:
+                        properties:
+                          followRedirects:
+                            type: boolean
+                          headers:
+                            additionalProperties:
+                              type: string
+                            type: object
+                          hostname:
+                            type: string
+                          interval:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                          method:
+                            type: string
+                          mode:
+                            type: string
+                          path:
+                            type: string
+                          port:
+                            type: integer
+                          scheme:
+                            type: string
+                          status:
+                            type: integer
+                          timeout:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                          unhealthyInterval:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                        type: object
+                      kind:
+                        enum:
+                        - Service
+                        - TraefikService
+                        type: string
+                      middlewares:
+                        items:
+                          properties:
+                            name:
+                              type: string
+                            namespace:
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                      nativeLB:
+                        type: boolean
+                      nodePortLB:
+                        type: boolean
+                      passHostHeader:
+                        type: boolean
+                      passiveHealthCheck:
+                        properties:
+                          failureWindow:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                          maxFailedAttempts:
+                            type: integer
+                        type: object
+                      port:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        x-kubernetes-int-or-string: true
+                      responseForwarding:
+                        properties:
+                          flushInterval:
+                            type: string
+                        type: object
+                      scheme:
+                        type: string
+                      serversTransport:
+                        type: string
+                      sticky:
+                        properties:
+                          cookie:
+                            properties:
+                              domain:
+                                type: string
+                              httpOnly:
+                                type: boolean
+                              maxAge:
+                                type: integer
+                              name:
+                                type: string
+                              path:
+                                type: string
+                              sameSite:
+                                enum:
+                                - none
+                                - lax
+                                - strict
+                                - None
+                                - Lax
+                                - Strict
+                                type: string
+                              secure:
+                                type: boolean
+                            type: object
+                        type: object
+                      strategy:
+                        enum:
+                        - wrr
+                        - p2c
+                        - hrw
+                        - leasttime
+                        - RoundRobin
+                        type: string
+                      weight:
+                        minimum: 0
+                        type: integer
+                    required:
+                    - name
+                    type: object
+                  service:
+                    properties:
+                      healthCheck:
+                        properties:
+                          followRedirects:
+                            type: boolean
+                          headers:
+                            additionalProperties:
+                              type: string
+                            type: object
+                          hostname:
+                            type: string
+                          interval:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                          method:
+                            type: string
+                          mode:
+                            type: string
+                          path:
+                            type: string
+                          port:
+                            type: integer
+                          scheme:
+                            type: string
+                          status:
+                            type: integer
+                          timeout:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                          unhealthyInterval:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                        type: object
+                      kind:
+                        enum:
+                        - Service
+                        - TraefikService
+                        type: string
+                      middlewares:
+                        items:
+                          properties:
+                            name:
+                              type: string
+                            namespace:
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                      nativeLB:
+                        type: boolean
+                      nodePortLB:
+                        type: boolean
+                      passHostHeader:
+                        type: boolean
+                      passiveHealthCheck:
+                        properties:
+                          failureWindow:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            x-kubernetes-int-or-string: true
+                          maxFailedAttempts:
+                            type: integer
+                        type: object
+                      port:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        x-kubernetes-int-or-string: true
+                      responseForwarding:
+                        properties:
+                          flushInterval:
+                            type: string
+                        type: object
+                      scheme:
+                        type: string
+                      serversTransport:
+                        type: string
+                      sticky:
+                        properties:
+                          cookie:
+                            properties:
+                              domain:
+                                type: string
+                              httpOnly:
+                                type: boolean
+                              maxAge:
+                                type: integer
+                              name:
+                                type: string
+                              path:
+                                type: string
+                              sameSite:
+                                enum:
+                                - none
+                                - lax
+                                - strict
+                                - None
+                                - Lax
+                                - Strict
+                                type: string
+                              secure:
+                                type: boolean
+                            type: object
+                        type: object
+                      strategy:
+                        enum:
+                        - wrr
+                        - p2c
+                        - hrw
+                        - leasttime
+                        - RoundRobin
+                        type: string
+                      weight:
+                        minimum: 0
+                        type: integer
+                    required:
+                    - name
+                    type: object
+                required:
+                - errors
+                - fallback
+                - service
+                type: object
+              highestRandomWeight:
+                properties:
+                  services:
+                    items:
+                      properties:
+                        healthCheck:
+                          properties:
+                            followRedirects:
+                              type: boolean
+                            headers:
+                              additionalProperties:
+                                type: string
+                              type: object
+                            hostname:
+                              type: string
+                            interval:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              x-kubernetes-int-or-string: true
+                            method:
+                              type: string
+                            mode:
+                              type: string
+                            path:
+                              type: string
+                            port:
+                              type: integer
+                            scheme:
+                              type: string
+                            status:
+                              type: integer
+                            timeout:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              x-kubernetes-int-or-string: true
+                            unhealthyInterval:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              x-kubernetes-int-or-string: true
+                          type: object
+                        kind:
+                          enum:
+                          - Service
+                          - TraefikService
+                          type: string
+                        middlewares:
+                          items:
+                            properties:
+                              name:
+                                type: string
+                              namespace:
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          type: array
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        nativeLB:
+                          type: boolean
+                        nodePortLB:
+                          type: boolean
+                        passHostHeader:
+                          type: boolean
+                        passiveHealthCheck:
+                          properties:
+                            failureWindow:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              x-kubernetes-int-or-string: true
+                            maxFailedAttempts:
+                              type: integer
+                          type: object
+                        port:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          x-kubernetes-int-or-string: true
+                        responseForwarding:
+                          properties:
+                            flushInterval:
+                              type: string
+                          type: object
+                        scheme:
+                          type: string
+                        serversTransport:
+                          type: string
+                        sticky:
+                          properties:
+                            cookie:
+                              properties:
+                                domain:
+                                  type: string
+                                httpOnly:
+                                  type: boolean
+                                maxAge:
+                                  type: integer
+                                name:
+                                  type: string
+                                path:
+                                  type: string
+                                sameSite:
+                                  enum:
+                                  - none
+                                  - lax
+                                  - strict
+                                  - None
+                                  - Lax
+                                  - Strict
+                                  type: string
+                                secure:
+                                  type: boolean
+                              type: object
+                          type: object
+                        strategy:
+                          enum:
+                          - wrr
+                          - p2c
+                          - hrw
+                          - leasttime
+                          - RoundRobin
+                          type: string
+                        weight:
+                          minimum: 0
+                          type: integer
+                      required:
+                      - name
+                      type: object
+                    type: array
+                type: object
+              mirroring:
+                properties:
+                  healthCheck:
+                    properties:
+                      followRedirects:
+                        type: boolean
+                      headers:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      hostname:
+                        type: string
+                      interval:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        x-kubernetes-int-or-string: true
+                      method:
+                        type: string
+                      mode:
+                        type: string
+                      path:
+                        type: string
+                      port:
+                        type: integer
+                      scheme:
+                        type: string
+                      status:
+                        type: integer
+                      timeout:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        x-kubernetes-int-or-string: true
+                      unhealthyInterval:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        x-kubernetes-int-or-string: true
+                    type: object
+                  kind:
+                    enum:
+                    - Service
+                    - TraefikService
+                    type: string
+                  maxBodySize:
+                    format: int64
+                    type: integer
+                  middlewares:
+                    items:
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  mirrorBody:
+                    type: boolean
+                  mirrors:
+                    items:
+                      properties:
+                        healthCheck:
+                          properties:
+                            followRedirects:
+                              type: boolean
+                            headers:
+                              additionalProperties:
+                                type: string
+                              type: object
+                            hostname:
+                              type: string
+                            interval:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              x-kubernetes-int-or-string: true
+                            method:
+                              type: string
+                            mode:
+                              type: string
+                            path:
+                              type: string
+                            port:
+                              type: integer
+                            scheme:
+                              type: string
+                            status:
+                              type: integer
+                            timeout:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              x-kubernetes-int-or-string: true
+                            unhealthyInterval:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              x-kubernetes-int-or-string: true
+                          type: object
+                        kind:
+                          enum:
+                          - Service
+                          - TraefikService
+                          type: string
+                        middlewares:
+                          items:
+                            properties:
+                              name:
+                                type: string
+                              namespace:
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          type: array
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        nativeLB:
+                          type: boolean
+                        nodePortLB:
+                          type: boolean
+                        passHostHeader:
+                          type: boolean
+                        passiveHealthCheck:
+                          properties:
+                            failureWindow:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              x-kubernetes-int-or-string: true
+                            maxFailedAttempts:
+                              type: integer
+                          type: object
+                        percent:
+                          type: integer
+                        port:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          x-kubernetes-int-or-string: true
+                        responseForwarding:
+                          properties:
+                            flushInterval:
+                              type: string
+                          type: object
+                        scheme:
+                          type: string
+                        serversTransport:
+                          type: string
+                        sticky:
+                          properties:
+                            cookie:
+                              properties:
+                                domain:
+                                  type: string
+                                httpOnly:
+                                  type: boolean
+                                maxAge:
+                                  type: integer
+                                name:
+                                  type: string
+                                path:
+                                  type: string
+                                sameSite:
+                                  enum:
+                                  - none
+                                  - lax
+                                  - strict
+                                  - None
+                                  - Lax
+                                  - Strict
+                                  type: string
+                                secure:
+                                  type: boolean
+                              type: object
+                          type: object
+                        strategy:
+                          enum:
+                          - wrr
+                          - p2c
+                          - hrw
+                          - leasttime
+                          - RoundRobin
+                          type: string
+                        weight:
+                          minimum: 0
+                          type: integer
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                  nativeLB:
+                    type: boolean
+                  nodePortLB:
+                    type: boolean
+                  passHostHeader:
+                    type: boolean
+                  passiveHealthCheck:
+                    properties:
+                      failureWindow:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        x-kubernetes-int-or-string: true
+                      maxFailedAttempts:
+                        type: integer
+                    type: object
+                  port:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    x-kubernetes-int-or-string: true
+                  responseForwarding:
+                    properties:
+                      flushInterval:
+                        type: string
+                    type: object
+                  scheme:
+                    type: string
+                  serversTransport:
+                    type: string
+                  sticky:
+                    properties:
+                      cookie:
+                        properties:
+                          domain:
+                            type: string
+                          httpOnly:
+                            type: boolean
+                          maxAge:
+                            type: integer
+                          name:
+                            type: string
+                          path:
+                            type: string
+                          sameSite:
+                            enum:
+                            - none
+                            - lax
+                            - strict
+                            - None
+                            - Lax
+                            - Strict
+                            type: string
+                          secure:
+                            type: boolean
+                        type: object
+                    type: object
+                  strategy:
+                    enum:
+                    - wrr
+                    - p2c
+                    - hrw
+                    - leasttime
+                    - RoundRobin
+                    type: string
+                  weight:
+                    minimum: 0
+                    type: integer
+                required:
+                - name
+                type: object
+              weighted:
+                properties:
+                  services:
+                    items:
+                      properties:
+                        healthCheck:
+                          properties:
+                            followRedirects:
+                              type: boolean
+                            headers:
+                              additionalProperties:
+                                type: string
+                              type: object
+                            hostname:
+                              type: string
+                            interval:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              x-kubernetes-int-or-string: true
+                            method:
+                              type: string
+                            mode:
+                              type: string
+                            path:
+                              type: string
+                            port:
+                              type: integer
+                            scheme:
+                              type: string
+                            status:
+                              type: integer
+                            timeout:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              x-kubernetes-int-or-string: true
+                            unhealthyInterval:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              x-kubernetes-int-or-string: true
+                          type: object
+                        kind:
+                          enum:
+                          - Service
+                          - TraefikService
+                          type: string
+                        middlewares:
+                          items:
+                            properties:
+                              name:
+                                type: string
+                              namespace:
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          type: array
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        nativeLB:
+                          type: boolean
+                        nodePortLB:
+                          type: boolean
+                        passHostHeader:
+                          type: boolean
+                        passiveHealthCheck:
+                          properties:
+                            failureWindow:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              x-kubernetes-int-or-string: true
+                            maxFailedAttempts:
+                              type: integer
+                          type: object
+                        port:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          x-kubernetes-int-or-string: true
+                        responseForwarding:
+                          properties:
+                            flushInterval:
+                              type: string
+                          type: object
+                        scheme:
+                          type: string
+                        serversTransport:
+                          type: string
+                        sticky:
+                          properties:
+                            cookie:
+                              properties:
+                                domain:
+                                  type: string
+                                httpOnly:
+                                  type: boolean
+                                maxAge:
+                                  type: integer
+                                name:
+                                  type: string
+                                path:
+                                  type: string
+                                sameSite:
+                                  enum:
+                                  - none
+                                  - lax
+                                  - strict
+                                  - None
+                                  - Lax
+                                  - Strict
+                                  type: string
+                                secure:
+                                  type: boolean
+                              type: object
+                          type: object
+                        strategy:
+                          enum:
+                          - wrr
+                          - p2c
+                          - hrw
+                          - leasttime
+                          - RoundRobin
+                          type: string
+                        weight:
+                          minimum: 0
+                          type: integer
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  sticky:
+                    properties:
+                      cookie:
+                        properties:
+                          domain:
+                            type: string
+                          httpOnly:
+                            type: boolean
+                          maxAge:
+                            type: integer
+                          name:
+                            type: string
+                          path:
+                            type: string
+                          sameSite:
+                            enum:
+                            - none
+                            - lax
+                            - strict
+                            - None
+                            - Lax
+                            - Strict
+                            type: string
+                          secure:
+                            type: boolean
+                        type: object
+                    type: object
+                type: object
+            type: object
+        required:
+        - metadata
+        - spec
+        type: object
+    served: true
+    storage: true

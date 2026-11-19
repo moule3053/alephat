@@ -198,14 +198,24 @@ deploy/
   temporal-config.yaml
   .env.example
   litellm_config.yaml
-  gke-deploy.sh     # End-to-end GKE cluster, Kata/gVisor, ESO, LiteLLM, KEDA & Traefik deploy
+  gke-deploy.sh     # End-to-end GKE cluster, IAM/GSM, image builds & single-chart Helm deploy
   gke-teardown.sh   # GKE cluster, static IP, DNS, Artifact Registry, IAM & GSM teardown
-  k8s/              # Cluster manifests, ExternalSecrets, SandboxTemplate, KEDA & Traefik
+  helm/alephat/     # Unified multi-namespace Helm chart (Alephat + all cluster dependencies)
 ```
 
-## Kubernetes (GKE)
+## Kubernetes (Unified Multi-Namespace Helm Chart & GKE)
 
-Automated end-to-end GKE provisioning (choosing `kata` or `gvisor` for Agent Sandbox, self-hosted Temporal `1.32.2` with mTLS (`secret/temporal-tls`), installing External Secrets Operator `2.14.0` backed by Google Cloud Secret Manager, KEDA `2.21.0` with the Temporal scaler (`deploy/k8s/harness-keda.yaml`), LiteLLM `1.106.6`, and optional Traefik `42.3.0` HTTPS/gRPC ingress for Dashboard, Temporal UI, and Temporal Frontend) is provided by `deploy/gke-deploy.sh` and `deploy/gke-teardown.sh`:
+Once a Kubernetes cluster is ready, the unified Helm chart in `deploy/helm/alephat/` deploys Alephat's own services into `alephat` and isolates every dependency into its own dedicated namespace (`postgresql`, `temporal`, `litellm`, `alephat-sandboxes`, `agent-sandbox-system`, `kata-system`, `keda`, `external-secrets`, and `traefik`):
+
+```bash
+helm upgrade --install alephat ./deploy/helm/alephat \
+  --namespace alephat \
+  --create-namespace \
+  --set externalSecrets.enabled=false \
+  --wait
+```
+
+Automated end-to-end GKE provisioning (choosing `kata` or `gvisor` for Agent Sandbox, Workload Identity + Google Cloud Secret Manager with `ClusterSecretStore`, Cloud Build image builds, and deploying `deploy/helm/alephat/` with optional Traefik HTTPS/gRPC ingress) is provided by `deploy/gke-deploy.sh` and `deploy/gke-teardown.sh`:
 
 ```bash
 # Deploy with Kata or gVisor, External Secrets Operator + Google Cloud Secret Manager, and Traefik HTTPS

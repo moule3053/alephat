@@ -1,0 +1,16 @@
+apiVersion: v2
+name: alephat
+description: Unified multi-namespace Helm chart deploying Alephat and all cluster dependencies (Kata/gVisor Agent Sandbox, KEDA, External Secrets, PostgreSQL, Temporal mTLS, LiteLLM Gemini Gateway, and Traefik Ingress).
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+kubeVersion: ">=1.28.0-0"
+keywords:
+  - alephat
+  - temporal
+  - deepagents
+  - kata-containers
+  - agent-sandbox
+  - keda
+  - litellm
+  - traefik
