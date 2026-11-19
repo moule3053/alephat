@@ -1,0 +1,87 @@
+# Local k3s / k3d values overlay for deploy/helm/alephat
+# Usage:
+#   helm upgrade --install alephat ./deploy/helm/alephat \
+#     --namespace alephat --create-namespace \
+#     -f ./deploy/helm/alephat/values-k3s.yaml
+
+externalSecrets:
+  enabled: false
+
+sandboxRuntime:
+  # Default containerd runc works on macOS (arm64/amd64 via k3d) and Linux k3s
+  # without nested KVM. Override with `--set sandboxRuntime.type=kata` and
+  # `--set sandboxRuntime.kata.k8sDistribution=k3s` on Linux KVM hosts.
+  type: none
+  kata:
+    k8sDistribution: k3s
+
+agentSandbox:
+  enabled: true
+  sandboxImage: alephat-sandbox:local
+  imagePullPolicy: IfNotPresent
+
+postgresql:
+  storageClassName: local-path
+  storageSize: 5Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+temporal:
+  resources:
+    requests:
+      cpu: 150m
+      memory: 384Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+litellm:
+  storageClassName: local-path
+  storageSize: 5Gi
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+alephat:
+  platformImage: alephat-platform:local
+  uiImage: alephat-ui:local
+  slackRendererImage: alephat-slack-renderer:local
+  imagePullPolicy: IfNotPresent
+  apiReplicas: 1
+  webhookReplicas: 1
+  uiReplicas: 1
+  harnessReplicas: 1
+  config:
+    defaultSandboxProvider: agent_sandbox
+    apiAuthDisabled: "false"
+    webhookSignaturesRequired: "false"
+    dashboardBaseUrl: "http://alephat.localhost:8080"
+
+traefik:
+  enabled: true
+  redirectToHttps: false
+  serviceAnnotations: {}
+  persistence:
+    storageClassName: local-path
+    size: 256Mi
+  acme:
+    enabled: false
+
+ingress:
+  enabled: true
+  host: alephat.localhost
+  temporalUiHost: temporal.localhost
+  temporalGrpcHost: temporal-grpc.localhost
+  tls:
+    enabled: false
+  temporalUiBasicAuth:
+    enabled: false

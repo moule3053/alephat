@@ -259,3 +259,40 @@ def test_substrate_sandbox_selectable_in_helm_chart_and_docker_compose():
     assert "SUBSTRATE_ROUTER_URL" in harness_env
     assert "SUBSTRATE_SANDBOX_PROTOCOL" in harness_env
     assert "substrate-sandbox" in compose_doc["services"]
+
+
+def test_k3s_local_values_overlay_renders_clean_multi_namespace_stack():
+    k3s_values = CHART_DIR / "values-k3s.yaml"
+    docs = _render_chart("-f", str(k3s_values))
+
+    pg_claim = _document(
+        docs, "PersistentVolumeClaim", "alephat-postgresql-data", namespace="postgresql"
+    )
+    assert pg_claim["spec"]["storageClassName"] == "local-path"
+
+    llm_claim = _document(
+        docs, "PersistentVolumeClaim", "litellm-postgresql-data", namespace="litellm"
+    )
+    assert llm_claim["spec"]["storageClassName"] == "local-path"
+
+    template = _document(
+        docs, "SandboxTemplate", "python-runtime-template", namespace="alephat-sandboxes"
+    )
+    pod_spec = template["spec"]["podTemplate"]["spec"]
+    assert "runtimeClassName" not in pod_spec
+    assert "nodeSelector" not in pod_spec
+    assert pod_spec["containers"][0]["imagePullPolicy"] == "IfNotPresent"
+
+    alephat_route = _document(docs, "IngressRoute", "alephat", namespace="alephat")
+    assert alephat_route["spec"]["entryPoints"] == ["web"]
+    assert "tls" not in alephat_route["spec"]
+
+    temporal_ui_route = _document(docs, "IngressRoute", "temporal-ui", namespace="temporal")
+    assert temporal_ui_route["spec"]["entryPoints"] == ["web"]
+    assert "middlewares" not in temporal_ui_route["spec"]["routes"][0]
+
+    grpc_route = _document(docs, "IngressRoute", "temporal-grpc", namespace="temporal")
+    assert grpc_route["spec"]["tls"]["secretName"] == "temporal-grpc-tls"
+    assert _document(docs, "Secret", "temporal-grpc-tls", namespace="temporal")["type"] == (
+        "kubernetes.io/tls"
+    )

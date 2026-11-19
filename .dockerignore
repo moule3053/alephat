@@ -44,3 +44,8 @@ ui/.pnpm-store
 .vite
 **/.vite
 deploy/helm
+outputs
+generated_images
+logs
+.agents
+.gstack

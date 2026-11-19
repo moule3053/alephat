@@ -141,8 +141,35 @@ helm upgrade --install alephat ./deploy/helm/alephat \
   --set ingress.host="alephat.example.com" \
   --set ingress.temporalUiHost="temporal.example.com" \
   --set ingress.temporalGrpcHost="temporal-grpc.example.com" \
-  --wait --timeout 15m
+  --timeout 15m
 ```
+
+### Local k3s deployment (`./deploy/k3s-deploy.sh` / `make k3s-up`)
+
+Provision a complete local **k3s** Kubernetes cluster (using `k3d` on macOS/Docker or native `k3s` on Linux), build and import all four local images directly into k3s containerd (no external container registry required), and deploy the entire multi-namespace stack via `deploy/helm/alephat` + `deploy/helm/alephat/values-k3s.yaml`:
+
+```bash
+# Auto-detect host OS (k3d on macOS, native k3s or k3d on Linux), build images, and deploy
+./deploy/k3s-deploy.sh --install-k3d
+
+# Or via Make:
+make k3s-up
+
+# Select Agent Substrate or Kata on Linux KVM hosts:
+./deploy/k3s-deploy.sh --sandbox-provider substrate
+./deploy/k3s-deploy.sh --mode native --sandbox-runtime kata
+
+# Preview rendered k3s Helm values without provisioning
+./deploy/k3s-deploy.sh --dry-run
+
+# Tear down local k3s cluster (or pass --helm-only to keep k3s running)
+./deploy/k3s-teardown.sh
+```
+
+Local ingress URLs after deployment:
+- **Alephat Dashboard & API**: `http://alephat.localhost:8080`
+- **Temporal Web UI**: `http://temporal.localhost:8080`
+- **Temporal Frontend gRPC (mTLS)**: `temporal-grpc.localhost:7233`
 
 ### Automated one-command GKE deployment (`./deploy/gke-deploy.sh`)
 
@@ -262,7 +289,7 @@ helm upgrade --install alephat ./deploy/helm/alephat \
      --set ingress.host="alephat.${BASE_SSLIP}" \
      --set ingress.temporalUiHost="temporal.${BASE_SSLIP}" \
      --set ingress.temporalGrpcHost="temporal-grpc.${BASE_SSLIP}" \
-     --wait --timeout 15m
+     --timeout 15m
    ```
 
 5. **Verify multi-namespace isolation, Kata sandboxes, and KEDA scaling**:

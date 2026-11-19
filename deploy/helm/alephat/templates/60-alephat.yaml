@@ -209,7 +209,22 @@ spec:
         - name: migrate
           image: {{ .Values.alephat.platformImage }}
           imagePullPolicy: {{ .Values.alephat.imagePullPolicy }}
-          command: ["python", "-m", "alephat_platform.migrate"]
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              python -c '
+              import os, socket, time
+              host = os.environ["DATABASE_HOST"]
+              port = int(os.environ.get("DATABASE_PORT", "5432"))
+              for _ in range(90):
+                  try:
+                      with socket.create_connection((host, port), timeout=2):
+                          break
+                  except OSError:
+                      time.sleep(2)
+              '
+              exec python -m alephat_platform.migrate
           envFrom:
             - configMapRef:
                 name: alephat-config

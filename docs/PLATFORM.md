@@ -200,19 +200,27 @@ deploy/
   litellm_config.yaml
   gke-deploy.sh     # End-to-end GKE cluster, IAM/GSM, image builds & single-chart Helm deploy
   gke-teardown.sh   # GKE cluster, static IP, DNS, Artifact Registry, IAM & GSM teardown
-  helm/alephat/     # Unified multi-namespace Helm chart (Alephat + all cluster dependencies)
+  k3s-deploy.sh     # Local k3s (k3d on macOS/Docker or native Linux k3s) full-stack deploy
+  k3s-teardown.sh   # Local k3s / k3d teardown
+  helm/alephat/     # Unified multi-namespace Helm chart + values-k3s.yaml local overlay
 ```
 
-## Kubernetes (Unified Multi-Namespace Helm Chart & GKE)
+## Kubernetes (Unified Multi-Namespace Helm Chart, Local k3s & GKE)
 
 Once a Kubernetes cluster is ready, the unified Helm chart in `deploy/helm/alephat/` deploys Alephat's own services into `alephat` and isolates every dependency into its own dedicated namespace (`postgresql`, `temporal`, `litellm`, `alephat-sandboxes`, `agent-sandbox-system`, `kata-system`, `keda`, `external-secrets`, and `traefik`):
 
 ```bash
+# Local k3s (provisions k3s/k3d, builds & imports local images, deploys deploy/helm/alephat)
+./deploy/k3s-deploy.sh --install-k3d
+# Teardown:
+./deploy/k3s-teardown.sh
+
+# Or install the chart directly on any existing cluster:
 helm upgrade --install alephat ./deploy/helm/alephat \
   --namespace alephat \
   --create-namespace \
-  --set externalSecrets.enabled=false \
-  --wait
+  -f ./deploy/helm/alephat/values-k3s.yaml \
+  --timeout 15m
 ```
 
 Automated end-to-end GKE provisioning (choosing `kata` or `gvisor` for Agent Sandbox, Workload Identity + Google Cloud Secret Manager with `ClusterSecretStore`, Cloud Build image builds, and deploying `deploy/helm/alephat/` with optional Traefik HTTPS/gRPC ingress) is provided by `deploy/gke-deploy.sh` and `deploy/gke-teardown.sh`:

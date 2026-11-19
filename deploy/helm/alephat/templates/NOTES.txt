@@ -1,7 +1,7 @@
 Alephat and its cluster dependencies have been deployed across isolated namespaces:
 
   - Alephat Platform (API, Webhook, Harness, UI): {{ .Values.namespaces.alephat }} (DEFAULT_SANDBOX_PROVIDER={{ .Values.alephat.config.defaultSandboxProvider }})
-  - Agent Sandbox Workloads ({{ include "alephat.runtimeClassName" . }}): {{ .Values.namespaces.sandboxes }}
+  - Agent Sandbox Workloads ({{ default "default-containerd" (include "alephat.runtimeClassName" .) }}): {{ .Values.namespaces.sandboxes }}
 {{- if eq (include "alephat.substrateEnabled" .) "true" }}
   - Agent Substrate Pool & ActorTemplate:         {{ .Values.namespaces.substratePool }} (atespace={{ .Values.substrate.atespace }}, template={{ .Values.substrate.actorTemplate }})
 {{- end }}
@@ -32,11 +32,20 @@ Alephat and its cluster dependencies have been deployed across isolated namespac
 
 {{- if and .Values.traefik.enabled .Values.ingress.enabled }}
 
+{{- if .Values.ingress.tls.enabled }}
 Public Endpoints:
   - Alephat Dashboard & Webhooks: https://{{ .Values.ingress.host }}
 {{- if .Values.temporal.enabled }}
   - Temporal Web UI:              https://{{ .Values.ingress.temporalUiHost }}
   - Temporal Frontend gRPC (mTLS): {{ .Values.ingress.temporalGrpcHost }}:7233
+{{- end }}
+{{- else }}
+Local Ingress Endpoints (via Traefik):
+  - Alephat Dashboard & Webhooks: {{ .Values.alephat.config.dashboardBaseUrl }}
+{{- if .Values.temporal.enabled }}
+  - Temporal Web UI:              http://{{ .Values.ingress.temporalUiHost }} (same HTTP port as Traefik)
+  - Temporal Frontend gRPC (mTLS): {{ .Values.ingress.temporalGrpcHost }}:7233
+{{- end }}
 {{- end }}
 {{- else }}
 

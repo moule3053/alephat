@@ -1,4 +1,4 @@
-.PHONY: all format format-check lint typecheck mda-typecheck mda-test test tests integration_tests help run dev dev-mda mda-cli dev-ui postgres migration tunnel web build-dashboard desktop install-desktop install-checkout swagger cli hooks platform-api platform-webhook platform-harness platform-deps platform-migrate platform-up platform-down platform-build platform-logs platform-ps
+.PHONY: all format format-check lint typecheck mda-typecheck mda-test test tests integration_tests help run dev dev-mda mda-cli dev-ui postgres migration tunnel web build-dashboard desktop install-desktop install-checkout swagger cli hooks platform-api platform-webhook platform-harness platform-deps platform-migrate platform-up platform-down platform-build platform-logs platform-ps k3s-up k3s-down k3s-status
 
 # Default target executed when no arguments are given to make.
 .PHONY: platform-slack-renderer
@@ -123,7 +123,18 @@ platform-logs:
 platform-ps:
 	$(COMPOSE_CMD) ps
 
-# Host processes (use platform-deps for postgres/nats first)
+# Local k3s Kubernetes cluster (k3d on macOS/Docker, native k3s on Linux)
+k3s-up:
+	./deploy/k3s-deploy.sh --install-k3d
+
+k3s-down:
+	./deploy/k3s-teardown.sh
+
+k3s-status:
+	kubectl get pods -A -l app.kubernetes.io/managed-by=Helm
+	kubectl -n alephat get scaledobject,hpa
+
+# Host processes (use platform-deps for postgres/temporal first)
 platform-api:
 	uv run uvicorn alephat_platform.api.app:app --reload --port 8080
 

@@ -14,20 +14,32 @@ spec:
       labels:
         app.kubernetes.io/name: alephat-python-sandbox
     spec:
-      runtimeClassName: {{ include "alephat.runtimeClassName" . }}
+      {{- $rc := include "alephat.runtimeClassName" . }}
+      {{- if $rc }}
+      runtimeClassName: {{ $rc }}
+      {{- end }}
       restartPolicy: OnFailure
       automountServiceAccountToken: false
+      {{- if .Values.agentSandbox.nodeSelector }}
       nodeSelector:
-        {{- if eq .Values.sandboxRuntime.type "kata" }}
+        {{- toYaml .Values.agentSandbox.nodeSelector | nindent 8 }}
+      {{- else if eq .Values.sandboxRuntime.type "kata" }}
+      nodeSelector:
+        {{- if eq .Values.sandboxRuntime.kata.k8sDistribution "k8s" }}
         cloud.google.com/gke-os-distribution: ubuntu
         {{- end }}
         kubernetes.io/arch: amd64
+      {{- else if eq .Values.sandboxRuntime.type "gvisor" }}
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
       containers:
         - name: runtime
           image: {{ .Values.agentSandbox.sandboxImage }}
+          imagePullPolicy: {{ .Values.agentSandbox.imagePullPolicy }}
           ports:
             - name: toolbox
               containerPort: 8888

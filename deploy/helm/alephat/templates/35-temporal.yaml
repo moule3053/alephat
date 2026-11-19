@@ -93,6 +93,18 @@ stringData:
 apiVersion: v1
 kind: Secret
 metadata:
+  name: temporal-grpc-tls
+  namespace: {{ $tNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+stringData:
+  tls.crt: {{ index ._generatedSecrets "serverCrt" | quote }}
+  tls.key: {{ index ._generatedSecrets "serverKey" | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
   name: temporal-ui-auth
   namespace: {{ $tNs }}
   labels:

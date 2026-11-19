@@ -22,7 +22,7 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 {{- define "alephat.runtimeClassName" -}}
 {{- if eq .Values.sandboxRuntime.type "kata" -}}
 {{- .Values.sandboxRuntime.kata.runtimeClassName -}}
-{{- else -}}
+{{- else if eq .Values.sandboxRuntime.type "gvisor" -}}
 {{- .Values.sandboxRuntime.gvisor.runtimeClassName -}}
 {{- end -}}
 {{- end -}}
@@ -42,7 +42,7 @@ true
 {{- end -}}
 
 {{- define "alephat.publicOrigin" -}}
-{{- if and .Values.traefik.enabled .Values.ingress.enabled .Values.ingress.host -}}
+{{- if and .Values.traefik.enabled .Values.ingress.enabled .Values.ingress.host .Values.ingress.tls.enabled -}}
 {{- printf "https://%s" .Values.ingress.host -}}
 {{- else -}}
 {{- .Values.alephat.config.dashboardBaseUrl -}}

@@ -735,16 +735,32 @@ trap 'rm -f "${TMP_HELM_VALUES}"' EXIT
 render_helm_values "${TRAEFIK_IP}" > "${TMP_HELM_VALUES}"
 
 echo "Deploying unified Helm chart '${CHART_DIR}' across isolated namespaces..."
+# Omit Helm --wait because Helm v3's ReadyChecker looks up cross-namespace PVCs
+# in the release namespace; verify every namespace rollout explicitly below.
 helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" \
   --namespace "${PLATFORM_NAMESPACE}" \
   --create-namespace \
   --values "${TMP_HELM_VALUES}" \
-  --wait \
   --timeout 15m
 
 if [[ "${DEFAULT_SANDBOX_PROVIDER}" == "substrate" ]]; then
   kubectl label namespace "${PLATFORM_NAMESPACE}" ate.dev/api-access=true --overwrite
 fi
+
+kubectl -n "${POSTGRESQL_NAMESPACE}" rollout status statefulset/alephat-postgresql --timeout=5m
+kubectl -n "${TEMPORAL_NAMESPACE_K8S}" rollout status deployment/temporal --timeout=10m
+kubectl -n "${TEMPORAL_NAMESPACE_K8S}" rollout status deployment/temporal-ui --timeout=5m
+kubectl -n "${LITELLM_NAMESPACE}" rollout status statefulset/litellm-postgresql --timeout=5m
+kubectl -n "${LITELLM_NAMESPACE}" rollout status deployment/litellm --timeout=10m
+kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=5m
+kubectl -n "${KEDA_NAMESPACE}" rollout status deployment/keda-operator --timeout=5m
+if [[ "${WITH_TRAEFIK}" == "true" ]]; then
+  kubectl -n "${TRAEFIK_NAMESPACE}" rollout status deployment/traefik --timeout=5m
+fi
+kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/alephat-api --timeout=10m
+kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/alephat-webhook --timeout=10m
+kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/alephat-ui --timeout=5m
+kubectl -n "${PLATFORM_NAMESPACE}" rollout status deployment/alephat-harness --timeout=10m
 
 echo "Deployment complete!"
 kubectl -n "${PLATFORM_NAMESPACE}" get pods,svc,scaledobject

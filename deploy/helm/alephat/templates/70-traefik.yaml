@@ -175,17 +175,21 @@ spec:
             - --providers.kubernetesingress.allowEmptyServices=true
             - --providers.kubernetesingress.ingressendpoint.publishedservice={{ $tfkNs }}/traefik
             - --entryPoints.temporal.http.tls=true
+            {{- if .Values.traefik.redirectToHttps }}
             - --entryPoints.web.http.redirections.entryPoint.to=:443
             - --entryPoints.web.http.redirections.entryPoint.scheme=https
             - --entryPoints.web.http.redirections.entryPoint.permanent=true
+            {{- end }}
             - --entryPoints.websecure.http.tls=true
             - --log.level=INFO
             - --accesslog=true
+            {{- if .Values.traefik.acme.enabled }}
             - --certificatesresolvers.letsencrypt.acme.email={{ .Values.traefik.acme.email }}
             - --certificatesresolvers.letsencrypt.acme.storage=/data/acme.json
             - --certificatesresolvers.letsencrypt.acme.tlsChallenge=true
             {{- if .Values.traefik.acme.caServer }}
             - --certificatesresolvers.letsencrypt.acme.caServer={{ .Values.traefik.acme.caServer }}
+            {{- end }}
             {{- end }}
           ports:
             - name: metrics
@@ -253,7 +257,11 @@ metadata:
     {{- include "alephat.labels" . | nindent 4 }}
 spec:
   entryPoints:
+    {{- if .Values.ingress.tls.enabled }}
     - websecure
+    {{- else }}
+    - web
+    {{- end }}
   routes:
     - kind: Rule
       match: Host(`{{ .Values.ingress.host }}`) && PathPrefix(`/hooks/`)
@@ -267,8 +275,12 @@ spec:
       services:
         - name: alephat-ui
           port: 80
+  {{- if .Values.ingress.tls.enabled }}
   tls:
+    {{- if .Values.traefik.acme.enabled }}
     certResolver: letsencrypt
+    {{- end }}
+  {{- end }}
 {{- if .Values.temporal.enabled }}
 ---
 apiVersion: traefik.io/v1alpha1
@@ -319,10 +331,15 @@ spec:
           scheme: https
           serversTransport: temporal-grpc-backend
   tls:
+    {{- if .Values.traefik.acme.enabled }}
     certResolver: letsencrypt
+    {{- else if not .Values.externalSecrets.enabled }}
+    secretName: temporal-grpc-tls
+    {{- end }}
     options:
       name: temporal-grpc-mtls
       namespace: {{ $tNs }}
+{{- if .Values.ingress.temporalUiBasicAuth.enabled }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -334,6 +351,7 @@ metadata:
 spec:
   basicAuth:
     secret: temporal-ui-auth
+{{- end }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
@@ -344,18 +362,28 @@ metadata:
     {{- include "alephat.labels" . | nindent 4 }}
 spec:
   entryPoints:
+    {{- if .Values.ingress.tls.enabled }}
     - websecure
+    {{- else }}
+    - web
+    {{- end }}
   routes:
     - kind: Rule
       match: Host(`{{ .Values.ingress.temporalUiHost }}`)
+      {{- if .Values.ingress.temporalUiBasicAuth.enabled }}
       middlewares:
         - name: temporal-ui-basicauth
           namespace: {{ $tNs }}
+      {{- end }}
       services:
         - name: temporal-ui
           port: 8080
+  {{- if .Values.ingress.tls.enabled }}
   tls:
+    {{- if .Values.traefik.acme.enabled }}
     certResolver: letsencrypt
+    {{- end }}
+  {{- end }}
 {{- end }}
 {{- end }}
 {{- end }}

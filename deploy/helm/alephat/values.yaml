@@ -20,7 +20,7 @@ namespaces:
 # Sandbox Runtime & Agent Sandbox Controller
 # -----------------------------------------------------------------------------
 sandboxRuntime:
-  # "kata" (installs Kata Containers 4.3.1 + kata-qemu RuntimeClass) or "gvisor"
+  # "kata" (Kata Containers 4.3.1 + kata-qemu), "gvisor", or "none" (default containerd runc for local k3s)
   type: kata
   kata:
     version: "4.3.1"
@@ -36,6 +36,9 @@ agentSandbox:
   controllerImage: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.9
   templateName: python-runtime-template
   sandboxImage: us-central1-docker.pkg.dev/your-gcp-project-id/alephat/alephat-sandbox:latest
+  imagePullPolicy: IfNotPresent
+  # Optional nodeSelector override for sandbox pods; when empty, GKE Kata/gVisor defaults apply.
+  nodeSelector: {}
   resources:
     requests:
       cpu: 250m
@@ -312,12 +315,14 @@ traefik:
   image: docker.io/traefik:v3.7.17
   initImage: busybox:1.36.1
   loadBalancerIP: ""
+  redirectToHttps: true
   serviceAnnotations:
     cloud.google.com/network-tier: Premium
   persistence:
     storageClassName: standard-rwo
     size: 1Gi
   acme:
+    enabled: true
     email: admin@example.com
     caServer: ""
 
@@ -326,3 +331,7 @@ ingress:
   host: alephat.example.com
   temporalUiHost: temporal.example.com
   temporalGrpcHost: temporal-grpc.example.com
+  tls:
+    enabled: true
+  temporalUiBasicAuth:
+    enabled: true
