@@ -36,7 +36,10 @@ if [[ -f "${SCRIPT_DIR}/.env" ]]; then
       GITHUB_APP_ID|GITHUB_APP_CLIENT_ID|GITHUB_APP_CLIENT_SECRET|GITHUB_APP_INSTALLATION_ID|\
       GITHUB_APP_PRIVATE_KEY|ALLOWED_GITHUB_USERS|ALLOWED_GITHUB_ORGS|GITHUB_WEBHOOK_SECRET|\
       SLACK_SIGNING_SECRET|SLACK_BOT_TOKEN|SLACK_APP_TOKEN|SLACK_APP_ID|SLACK_BOT_USER_ID|SLACK_BOT_USERNAME|SLACK_USER_MAP|\
-      TOKEN_ENCRYPTION_KEY|DASHBOARD_JWT_SECRET|PLATFORM_API_TOKEN|PLATFORM_JWT_SECRET)
+      TOKEN_ENCRYPTION_KEY|DASHBOARD_JWT_SECRET|PLATFORM_API_TOKEN|PLATFORM_JWT_SECRET|\
+      DEFAULT_SANDBOX_PROVIDER|SUBSTRATE_API_ENDPOINT|SUBSTRATE_API_TLS|SUBSTRATE_API_SERVER_NAME|\
+      SUBSTRATE_ROUTER_URL|SUBSTRATE_ROUTER_SERVER_NAME|SUBSTRATE_ATESPACE|SUBSTRATE_ACTOR_TEMPLATE|\
+      SUBSTRATE_SANDBOX_PROTOCOL|SUBSTRATE_EGRESS_ALLOWED_HOSTS|SUBSTRATE_SUSPEND_ON_STOP)
         if [[ -z "${!k:-}" && -n "${v}" ]]; then
           export "${k}=${v}"
         fi
@@ -50,6 +53,17 @@ REGION="${REGION:-us-central1}"
 ZONE="${ZONE:-}"
 CLUSTER_NAME="${CLUSTER_NAME:-alephat}"
 SANDBOX_RUNTIME="${SANDBOX_RUNTIME:-kata}"
+DEFAULT_SANDBOX_PROVIDER="${DEFAULT_SANDBOX_PROVIDER:-agent_sandbox}"
+SUBSTRATE_API_ENDPOINT="${SUBSTRATE_API_ENDPOINT:-api.ate-system.svc:443}"
+SUBSTRATE_API_TLS="${SUBSTRATE_API_TLS:-true}"
+SUBSTRATE_API_SERVER_NAME="${SUBSTRATE_API_SERVER_NAME:-api.ate-system.svc}"
+SUBSTRATE_ROUTER_URL="${SUBSTRATE_ROUTER_URL:-https://atenet-router.ate-system.svc:443}"
+SUBSTRATE_ROUTER_SERVER_NAME="${SUBSTRATE_ROUTER_SERVER_NAME:-atenet-router.ate-system.svc}"
+SUBSTRATE_ATESPACE="${SUBSTRATE_ATESPACE:-alephat-sandboxes}"
+SUBSTRATE_ACTOR_TEMPLATE="${SUBSTRATE_ACTOR_TEMPLATE:-alephat-sandbox}"
+SUBSTRATE_SANDBOX_PROTOCOL="${SUBSTRATE_SANDBOX_PROTOCOL:-toolbox}"
+SUBSTRATE_EGRESS_ALLOWED_HOSTS="${SUBSTRATE_EGRESS_ALLOWED_HOSTS:-github.com,api.github.com,objects.githubusercontent.com,pypi.org,files.pythonhosted.org,registry.npmjs.org}"
+SUBSTRATE_SUSPEND_ON_STOP="${SUBSTRATE_SUSPEND_ON_STOP:-true}"
 NODE_SIZE="${NODE_SIZE:-n2-standard-4}"
 NUM_NODES="${NUM_NODES:-3}"
 MIN_NODES="${MIN_NODES:-2}"
@@ -102,6 +116,7 @@ Cluster & Sandbox Runtime Options:
   --zone <zone>                   GCP zone (default: <region>-a)
   --cluster-name <name>           GKE cluster name (default: alephat)
   --sandbox-runtime <kata|gvisor> Sandbox isolation runtime (default: kata)
+  --sandbox-provider <provider>   Default sandbox provider env var: agent_sandbox | substrate | local | daytona | opensandbox (default: agent_sandbox)
   --node-size <machine-type>      GKE machine type (default: n2-standard-4)
   --num-nodes <count>             Initial nodes in the primary pool (default: 3)
   --k8s-version <version>         GKE Kubernetes version (default: latest)
@@ -135,6 +150,7 @@ while [[ $# -gt 0 ]]; do
     --zone) ZONE="$2"; shift 2 ;;
     --cluster-name) CLUSTER_NAME="$2"; shift 2 ;;
     --sandbox-runtime) SANDBOX_RUNTIME="$2"; shift 2 ;;
+    --sandbox-provider) DEFAULT_SANDBOX_PROVIDER="$2"; shift 2 ;;
     --node-size|--machine-type) NODE_SIZE="$2"; shift 2 ;;
     --num-nodes) NUM_NODES="$2"; shift 2 ;;
     --k8s-version) K8S_VERSION="$2"; shift 2 ;;
@@ -280,6 +296,19 @@ agentSandbox:
   enabled: true
   sandboxImage: ${SANDBOX_IMAGE}
 
+substrate:
+  enabled: $([[ "${DEFAULT_SANDBOX_PROVIDER}" == "substrate" ]] && echo "true" || echo "false")
+  apiEndpoint: "${SUBSTRATE_API_ENDPOINT}"
+  apiTls: "${SUBSTRATE_API_TLS}"
+  apiServerName: "${SUBSTRATE_API_SERVER_NAME}"
+  routerUrl: "${SUBSTRATE_ROUTER_URL}"
+  routerServerName: "${SUBSTRATE_ROUTER_SERVER_NAME}"
+  atespace: "${SUBSTRATE_ATESPACE}"
+  actorTemplate: "${SUBSTRATE_ACTOR_TEMPLATE}"
+  protocol: "${SUBSTRATE_SANDBOX_PROTOCOL}"
+  egressAllowedHosts: "${SUBSTRATE_EGRESS_ALLOWED_HOSTS}"
+  suspendOnStop: "${SUBSTRATE_SUSPEND_ON_STOP}"
+
 externalSecrets:
   enabled: ${USE_EXTERNAL_SECRETS}
   gcp:
@@ -302,6 +331,8 @@ alephat:
   platformImage: ${PLATFORM_IMAGE}
   uiImage: ${UI_IMAGE}
   slackRendererImage: ${SLACK_RENDERER_IMAGE}
+  config:
+    defaultSandboxProvider: "${DEFAULT_SANDBOX_PROVIDER}"
 
 traefik:
   enabled: ${WITH_TRAEFIK}
@@ -351,6 +382,7 @@ echo "Project ID:             ${PROJECT_ID}"
 echo "Region / Zone:          ${REGION} / ${ZONE}"
 echo "Cluster Name:           ${CLUSTER_NAME} (k8s: ${K8S_VERSION}, channel: ${RELEASE_CHANNEL})"
 echo "Helm Chart:             ${CHART_DIR}"
+echo "Sandbox Provider:       ${DEFAULT_SANDBOX_PROVIDER}"
 echo "Sandbox Runtime:        ${SANDBOX_RUNTIME}"
 echo "Node Size / Count:      ${NODE_SIZE} x ${NUM_NODES} (autoscale ${MIN_NODES}-${MAX_NODES})"
 echo "External Secrets:       ${USE_EXTERNAL_SECRETS}"
@@ -709,6 +741,10 @@ helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" \
   --values "${TMP_HELM_VALUES}" \
   --wait \
   --timeout 15m
+
+if [[ "${DEFAULT_SANDBOX_PROVIDER}" == "substrate" ]]; then
+  kubectl label namespace "${PLATFORM_NAMESPACE}" ate.dev/api-access=true --overwrite
+fi
 
 echo "Deployment complete!"
 kubectl -n "${PLATFORM_NAMESPACE}" get pods,svc,scaledobject

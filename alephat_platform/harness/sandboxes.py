@@ -21,6 +21,15 @@ from deepagents.backends.sandbox import BaseSandbox
 from alephat_platform.common.config import get_settings
 from alephat_platform.common.enums import SandboxProvider
 from alephat_platform.harness.agent_sandbox_backend import AgentSandboxBackend
+from alephat_platform.harness.substrate_backend import (
+    ACTOR_STATE_CRASHED,
+    ACTOR_STATE_RUNNING,
+    SubstrateActorRef,
+    SubstrateControlClient,
+    SubstrateControlProtocol,
+    SubstrateRouterTlsBuilder,
+    SubstrateSandboxBackend,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +425,161 @@ class AgentSandboxProvider(SandboxProviderBase):
                 raise
 
 
+class SubstrateProvider(SandboxProviderBase):
+    """Agent Substrate (ate.dev) actor-based sandbox provider."""
+
+    name = SandboxProvider.SUBSTRATE.value
+
+    def __init__(self, *, control_client: SubstrateControlProtocol | None = None) -> None:
+        self._control_client = control_client
+
+    def _control(self) -> SubstrateControlProtocol | None:
+        if self._control_client is not None:
+            return self._control_client
+        settings = get_settings()
+        if not settings.substrate_api_endpoint:
+            return None
+        return SubstrateControlClient(settings)
+
+    def _router_url(self) -> str:
+        settings = get_settings()
+        router_url = (settings.substrate_router_url or "").strip()
+        if router_url:
+            return router_url.rstrip("/")
+        if settings.substrate_api_endpoint:
+            return "https://atenet-router.ate-system.svc:443"
+        raise RuntimeError(
+            "SUBSTRATE_ROUTER_URL or SUBSTRATE_API_ENDPOINT is required for the substrate provider"
+        )
+
+    def _build_backend(self, actor: SubstrateActorRef) -> SubstrateSandboxBackend:
+        settings = get_settings()
+        router_url = self._router_url()
+        ssl_context = SubstrateRouterTlsBuilder(settings).build(router_url)
+        return SubstrateSandboxBackend(
+            actor,
+            router_url,
+            protocol=settings.substrate_sandbox_protocol,
+            ssl_context=ssl_context,
+        )
+
+    async def create(
+        self, *, task_id: str, metadata: dict[str, object] | None = None
+    ) -> SandboxRef:
+        settings = get_settings()
+        atespace = settings.substrate_atespace
+        actor_name = f"alephat-{task_id[:8]}-{uuid.uuid4().hex[:8]}"
+        actor = SubstrateActorRef(atespace=atespace, name=actor_name)
+        control = self._control()
+
+        if control is None and not settings.substrate_router_url:
+            if not settings.allow_stub_sandboxes:
+                raise RuntimeError(
+                    "SUBSTRATE_API_ENDPOINT or SUBSTRATE_ROUTER_URL is required for the substrate provider"
+                )
+            sid = actor.header_value()
+            logger.warning("Explicit local stub sandbox enabled", extra={"sandbox_id": sid})
+            return SandboxRef(
+                provider=self.name,
+                sandbox_id=sid,
+                metadata={"stub": True, "atespace": atespace, **(metadata or {})},
+            )
+
+        if control is not None:
+            template = SubstrateActorRef.parse(
+                settings.substrate_actor_template,
+                default_atespace=atespace,
+            )
+            await control.create_actor(actor, template)
+            if settings.substrate_egress_allowed_hosts:
+                await control.create_egress_policy(actor, settings.substrate_egress_allowed_hosts)
+            info = await control.resume_actor(actor)
+            deadline = asyncio.get_running_loop().time() + 180
+            while (
+                info.state != ACTOR_STATE_RUNNING and asyncio.get_running_loop().time() < deadline
+            ):
+                if info.state == ACTOR_STATE_CRASHED:
+                    raise RuntimeError(f"Substrate actor {actor.header_value()} crashed on start")
+                await asyncio.sleep(1.0)
+                info = await control.get_actor(actor)
+            if info.state != ACTOR_STATE_RUNNING:
+                raise TimeoutError(f"Timed out waiting for Substrate actor {actor.header_value()}")
+
+        backend = self._build_backend(actor)
+        return SandboxRef(
+            provider=self.name,
+            sandbox_id=actor.header_value(),
+            metadata={
+                "atespace": actor.atespace,
+                "actor": actor.name,
+                "router_url": backend.base_url,
+                "protocol": backend.protocol,
+                **(metadata or {}),
+            },
+            handle=backend,
+        )
+
+    async def connect(self, sandbox_id: str) -> SandboxRef:
+        settings = get_settings()
+        actor = SubstrateActorRef.parse(sandbox_id, default_atespace=settings.substrate_atespace)
+        control = self._control()
+        if control is None and not settings.substrate_router_url:
+            if settings.allow_stub_sandboxes:
+                return SandboxRef(
+                    provider=self.name,
+                    sandbox_id=actor.header_value(),
+                    metadata={"stub": True, "atespace": actor.atespace},
+                )
+            raise RuntimeError(
+                "SUBSTRATE_API_ENDPOINT or SUBSTRATE_ROUTER_URL is required for the substrate provider"
+            )
+        if control is not None:
+            await control.resume_actor(actor)
+        backend = self._build_backend(actor)
+        return SandboxRef(
+            provider=self.name,
+            sandbox_id=actor.header_value(),
+            metadata={
+                "atespace": actor.atespace,
+                "actor": actor.name,
+                "router_url": backend.base_url,
+                "protocol": backend.protocol,
+            },
+            handle=backend,
+        )
+
+    async def exec(self, ref: SandboxRef, command: str, timeout: int = 120) -> ExecResult:
+        if ref.metadata.get("stub"):
+            return ExecResult(exit_code=0, stdout=f"[stub:{ref.sandbox_id}] ran: {command}\n")
+        if not isinstance(ref.handle, SubstrateSandboxBackend):
+            ref = await self.connect(ref.sandbox_id)
+        assert isinstance(ref.handle, SubstrateSandboxBackend)
+        exit_code, stdout, stderr = await ref.handle.exec_result(command, timeout=timeout)
+        return ExecResult(exit_code, stdout, stderr)
+
+    async def stop(self, ref: SandboxRef) -> None:
+        settings = get_settings()
+        control = self._control()
+        if control is not None and settings.substrate_suspend_on_stop:
+            actor = SubstrateActorRef.parse(
+                ref.sandbox_id, default_atespace=settings.substrate_atespace
+            )
+            await control.suspend_actor(actor)
+            logger.info("Suspended Substrate actor", extra={"sandbox_id": ref.sandbox_id})
+            return
+        logger.info("Stopping Substrate sandbox", extra={"sandbox_id": ref.sandbox_id})
+
+    async def delete(self, ref: SandboxRef) -> None:
+        settings = get_settings()
+        control = self._control()
+        if control is not None:
+            actor = SubstrateActorRef.parse(
+                ref.sandbox_id, default_atespace=settings.substrate_atespace
+            )
+            await control.delete_actor(actor)
+        logger.info("Deleted Substrate sandbox", extra={"sandbox_id": ref.sandbox_id})
+
+
 class OpenSandboxProvider(SandboxProviderBase):
     """OpenSandbox control-plane integration (stub-capable)."""
 
@@ -548,6 +712,7 @@ class SandboxRegistry:
         self._providers: dict[str, SandboxProviderBase] = {
             SandboxProvider.DAYTONA.value: DaytonaProvider(),
             SandboxProvider.AGENT_SANDBOX.value: AgentSandboxProvider(),
+            SandboxProvider.SUBSTRATE.value: SubstrateProvider(),
             SandboxProvider.OPENSANDBOX.value: OpenSandboxProvider(),
             SandboxProvider.LOCAL.value: LocalProvider(),
         }
@@ -576,6 +741,12 @@ class SandboxRegistry:
             return self.stub_backend(sandbox_id)
         return ref.handle
 
+    async def substrate_backend(self, sandbox_id: str) -> object:
+        ref = await self._providers[SandboxProvider.SUBSTRATE.value].connect(sandbox_id)
+        if ref.handle is None:
+            return self.stub_backend(sandbox_id)
+        return ref.handle
+
     def stub_backend(self, sandbox_id: str) -> StubSandboxBackend:
         sid = str(sandbox_id or "stub")
         existing = self._stub_cache.get(sid)
@@ -588,6 +759,7 @@ class SandboxRegistry:
         return {
             SandboxProvider.LOCAL.value: self.local_backend,
             SandboxProvider.AGENT_SANDBOX.value: self.agent_sandbox_backend,
+            SandboxProvider.SUBSTRATE.value: self.substrate_backend,
             SandboxProvider.DAYTONA.value: self.daytona_backend,
             "stub": self.stub_backend,
         }

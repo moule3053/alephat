@@ -206,6 +206,74 @@ class Settings:
     agent_sandbox_api_timeout_seconds: int = field(
         default_factory=lambda: _ENV.get_int("AGENT_SANDBOX_API_TIMEOUT_SECONDS", 30)
     )
+    substrate_api_endpoint: str | None = field(
+        default_factory=lambda: _ENV.get("SUBSTRATE_API_ENDPOINT")
+    )
+    substrate_api_tls: bool = field(
+        default_factory=lambda: _ENV.get_bool("SUBSTRATE_API_TLS", True)
+    )
+    substrate_api_server_name: str = field(
+        default_factory=lambda: (
+            _ENV.get("SUBSTRATE_API_SERVER_NAME", "api.ate-system.svc") or "api.ate-system.svc"
+        )
+    )
+    substrate_api_ca_cert_path: str | None = field(
+        default_factory=lambda: _ENV.get("SUBSTRATE_API_CA_CERT_PATH")
+    )
+    substrate_api_token: str | None = field(default_factory=lambda: _ENV.get("SUBSTRATE_API_TOKEN"))
+    substrate_api_token_path: str | None = field(
+        default_factory=lambda: _ENV.get("SUBSTRATE_API_TOKEN_PATH")
+    )
+    substrate_api_credential_bundle_path: str | None = field(
+        default_factory=lambda: _ENV.get("SUBSTRATE_API_CREDENTIAL_BUNDLE_PATH")
+    )
+    substrate_router_url: str | None = field(
+        default_factory=lambda: _ENV.get("SUBSTRATE_ROUTER_URL")
+    )
+    substrate_router_server_name: str = field(
+        default_factory=lambda: (
+            _ENV.get("SUBSTRATE_ROUTER_SERVER_NAME", "atenet-router.ate-system.svc")
+            or "atenet-router.ate-system.svc"
+        )
+    )
+    substrate_router_ca_cert_path: str | None = field(
+        default_factory=lambda: _ENV.get("SUBSTRATE_ROUTER_CA_CERT_PATH")
+    )
+    substrate_router_client_cert_path: str | None = field(
+        default_factory=lambda: _ENV.get("SUBSTRATE_ROUTER_CLIENT_CERT_PATH")
+    )
+    substrate_router_client_key_path: str | None = field(
+        default_factory=lambda: _ENV.get("SUBSTRATE_ROUTER_CLIENT_KEY_PATH")
+    )
+    substrate_router_credential_bundle_path: str | None = field(
+        default_factory=lambda: _ENV.get("SUBSTRATE_ROUTER_CREDENTIAL_BUNDLE_PATH")
+    )
+    substrate_atespace: str = field(
+        default_factory=lambda: (
+            _ENV.get("SUBSTRATE_ATESPACE", "alephat-sandboxes") or "alephat-sandboxes"
+        )
+    )
+    substrate_actor_template: str = field(
+        default_factory=lambda: (
+            _ENV.get("SUBSTRATE_ACTOR_TEMPLATE", "alephat-sandbox") or "alephat-sandbox"
+        )
+    )
+    substrate_sandbox_protocol: str = field(
+        default_factory=lambda: _ENV.get("SUBSTRATE_SANDBOX_PROTOCOL", "toolbox") or "toolbox"
+    )
+    substrate_egress_allowed_hosts: tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            host.strip()
+            for host in (_ENV.get("SUBSTRATE_EGRESS_ALLOWED_HOSTS", "") or "").split(",")
+            if host.strip()
+        )
+    )
+    substrate_suspend_on_stop: bool = field(
+        default_factory=lambda: _ENV.get_bool("SUBSTRATE_SUSPEND_ON_STOP", True)
+    )
+    substrate_api_timeout_seconds: int = field(
+        default_factory=lambda: _ENV.get_int("SUBSTRATE_API_TIMEOUT_SECONDS", 60)
+    )
     opensandbox_base_url: str | None = field(
         default_factory=lambda: _ENV.get("OPENSANDBOX_BASE_URL")
     )

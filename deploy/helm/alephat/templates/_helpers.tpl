@@ -27,6 +27,12 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 {{- end -}}
 {{- end -}}
 
+{{- define "alephat.substrateEnabled" -}}
+{{- if or .Values.substrate.enabled (eq .Values.alephat.config.defaultSandboxProvider "substrate") -}}
+true
+{{- end -}}
+{{- end -}}
+
 {{- define "alephat.enabledModelsCsv" -}}
 {{- $aliases := list -}}
 {{- range .Values.litellm.models -}}

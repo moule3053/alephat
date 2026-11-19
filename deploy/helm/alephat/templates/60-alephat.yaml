@@ -156,10 +156,25 @@ data:
   LITELLM_BASE_URL: {{ $llmUrl | quote }}
   DEFAULT_MODEL: {{ .Values.litellm.defaultModel | quote }}
   ENABLED_MODELS: {{ include "alephat.enabledModelsCsv" . | quote }}
-  DEFAULT_SANDBOX_PROVIDER: "agent_sandbox"
+  DEFAULT_SANDBOX_PROVIDER: {{ .Values.alephat.config.defaultSandboxProvider | quote }}
   BOOTSTRAP_DEV_DEFAULTS: {{ .Values.alephat.config.bootstrapDevDefaults | quote }}
   AGENT_SANDBOX_NAMESPACE: {{ $sbNs | quote }}
   AGENT_SANDBOX_TEMPLATE: {{ .Values.agentSandbox.templateName | quote }}
+  SUBSTRATE_API_ENDPOINT: {{ ternary .Values.substrate.apiEndpoint "" (eq (include "alephat.substrateEnabled" .) "true") | quote }}
+  SUBSTRATE_API_TLS: {{ .Values.substrate.apiTls | quote }}
+  SUBSTRATE_API_SERVER_NAME: {{ .Values.substrate.apiServerName | quote }}
+  SUBSTRATE_API_CA_CERT_PATH: {{ .Values.substrate.apiCaCertPath | quote }}
+  SUBSTRATE_API_TOKEN_PATH: {{ .Values.substrate.apiTokenPath | quote }}
+  SUBSTRATE_API_CREDENTIAL_BUNDLE_PATH: {{ .Values.substrate.apiCredentialBundlePath | quote }}
+  SUBSTRATE_ROUTER_URL: {{ ternary .Values.substrate.routerUrl "" (eq (include "alephat.substrateEnabled" .) "true") | quote }}
+  SUBSTRATE_ROUTER_SERVER_NAME: {{ .Values.substrate.routerServerName | quote }}
+  SUBSTRATE_ROUTER_CA_CERT_PATH: {{ .Values.substrate.routerCaCertPath | quote }}
+  SUBSTRATE_ROUTER_CREDENTIAL_BUNDLE_PATH: {{ .Values.substrate.routerCredentialBundlePath | quote }}
+  SUBSTRATE_ATESPACE: {{ .Values.substrate.atespace | quote }}
+  SUBSTRATE_ACTOR_TEMPLATE: {{ .Values.substrate.actorTemplate | quote }}
+  SUBSTRATE_SANDBOX_PROTOCOL: {{ .Values.substrate.protocol | quote }}
+  SUBSTRATE_EGRESS_ALLOWED_HOSTS: {{ .Values.substrate.egressAllowedHosts | quote }}
+  SUBSTRATE_SUSPEND_ON_STOP: {{ .Values.substrate.suspendOnStop | quote }}
   API_AUTH_DISABLED: {{ .Values.alephat.config.apiAuthDisabled | quote }}
   WEBHOOK_SIGNATURES_REQUIRED: {{ .Values.alephat.config.webhookSignaturesRequired | quote }}
   DASHBOARD_BASE_URL: {{ $pubOrigin | quote }}
@@ -674,6 +689,11 @@ spec:
             - name: temporal-tls
               mountPath: /etc/temporal/tls
               readOnly: true
+            {{- if and (eq (include "alephat.substrateEnabled" .) "true") .Values.substrate.mountProjectedCredentials }}
+            - name: substrate-credentials
+              mountPath: /var/run/ate
+              readOnly: true
+            {{- end }}
           resources:
             requests:
               cpu: 250m
@@ -685,6 +705,26 @@ spec:
         - name: temporal-tls
           secret:
             secretName: temporal-tls
+        {{- if and (eq (include "alephat.substrateEnabled" .) "true") .Values.substrate.mountProjectedCredentials }}
+        - name: substrate-credentials
+          projected:
+            sources:
+              - clusterTrustBundle:
+                  signerName: servicedns.podcert.ate.dev/identity
+                  labelSelector:
+                    matchLabels:
+                      podcert.ate.dev/canarying: live
+                  path: ca.crt
+              - serviceAccountToken:
+                  audience: {{ .Values.substrate.apiServerName | quote }}
+                  path: token
+              {{- if .Values.substrate.mountPodCertificate }}
+              - podCertificate:
+                  signerName: podidentity.podcert.ate.dev/identity
+                  keyType: ECDSAP256
+                  credentialBundlePath: credential-bundle.pem
+              {{- end }}
+        {{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment

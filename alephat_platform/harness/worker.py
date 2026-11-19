@@ -33,6 +33,7 @@ WORKFLOW_PASSTHROUGH_MODULES: tuple[str, ...] = (
     "alephat_platform.common.temporal",
     "alephat_platform.harness.agents",
     "alephat_platform.harness.agent_sandbox_backend",
+    "alephat_platform.harness.substrate_backend",
     "alephat_platform.harness.contracts",
     "alephat_platform.harness.sandboxes",
     "openswe.sandboxes.providers.local",

@@ -297,3 +297,140 @@ async def test_agent_sandbox_executes_through_temporal_deep_agents_workflow():
         "/bin/sh -lc 'mkdir -p -- /app/repo && cd -- /app/repo && printf deep-agent-ok'"
     ]
     assert "tool_started" in events
+
+
+@pytest.mark.asyncio
+async def test_substrate_backend_sends_target_actor_header_in_toolbox_and_process_modes():
+    from alephat_platform.harness.substrate_backend import (
+        TARGET_ACTOR_HEADER,
+        SubstrateActorRef,
+        SubstrateSandboxBackend,
+    )
+
+    actor = SubstrateActorRef(atespace="alephat-sandboxes", name="alephat-12345678-deadbeef")
+    seen: list[tuple[str, str, str]] = []
+
+    async def toolbox_handler(request: httpx.Request) -> httpx.Response:
+        seen.append(
+            (request.method, request.url.path, request.headers.get(TARGET_ACTOR_HEADER, ""))
+        )
+        return httpx.Response(200, json={"exit_code": 0, "stdout": "toolbox-ok\n", "stderr": ""})
+
+    tb_backend = SubstrateSandboxBackend(
+        actor,
+        "http://atenet-router.test:8000",
+        protocol="toolbox",
+        transport=httpx.MockTransport(toolbox_handler),
+    )
+    tb_res = await tb_backend.aexecute("echo hi")
+    assert tb_res.exit_code == 0
+    assert tb_res.output == "toolbox-ok\n"
+    assert seen == [("POST", "/execute", "alephat-sandboxes/alephat-12345678-deadbeef")]
+
+    process_calls: list[dict[str, object]] = []
+
+    async def process_handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/process"
+        assert request.headers.get(TARGET_ACTOR_HEADER) == actor.header_value()
+        body = json.loads(request.content)
+        process_calls.append(body)
+        cmd = body["command"][-1]
+        if "base64 <" in cmd:
+            return httpx.Response(200, json={"stdout": "aGVsbG8=", "stderr": "", "exitCode": 0})
+        return httpx.Response(200, json={"stdout": "proc-ok\n", "stderr": "", "exitCode": 0})
+
+    proc_backend = SubstrateSandboxBackend(
+        actor,
+        "http://atenet-router.test:8000",
+        protocol="process",
+        transport=httpx.MockTransport(process_handler),
+    )
+    proc_res = await proc_backend.aexecute("pwd")
+    assert proc_res.exit_code == 0
+    assert proc_res.output == "proc-ok\n"
+    up = await proc_backend.aupload_files([("/notes.txt", b"hello")])
+    assert up[0].error is None
+    dl = await proc_backend.adownload_files(["/notes.txt"])
+    assert dl[0].content == b"hello"
+    assert len(process_calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_substrate_provider_lifecycle_and_proto_codec(monkeypatch):
+    from alephat_platform.common.config import clear_settings_cache
+    from alephat_platform.harness.sandboxes import SubstrateProvider
+    from alephat_platform.harness.substrate_backend import (
+        ACTOR_STATE_RUNNING,
+        ACTOR_STATE_SUSPENDED,
+        SubstrateActorInfo,
+        SubstrateActorRef,
+        SubstrateProtoCodec,
+    )
+
+    codec = SubstrateProtoCodec()
+    actor = SubstrateActorRef(atespace="alephat-sandboxes", name="alephat-abc-123")
+    req_bytes = codec.encode_create_actor_request(
+        actor, SubstrateActorRef(atespace="alephat-sandboxes", name="alephat-sandbox")
+    )
+    assert b"alephat-sandboxes" in req_bytes
+    assert b"alephat-abc-123" in req_bytes
+    egress_bytes = codec.encode_create_egress_policy_request(
+        actor, allowed_hosts=("github.com", "api.github.com")
+    )
+    assert b"github.com" in egress_bytes
+    assert b"api.github.com" in egress_bytes
+
+    calls: list[str] = []
+
+    class FakeControl:
+        async def create_actor(
+            self, a: SubstrateActorRef, t: SubstrateActorRef
+        ) -> SubstrateActorInfo:
+            calls.append(f"create:{a.header_value()}:{t.header_value()}")
+            return SubstrateActorInfo(a.atespace, a.name, "uid-1", ACTOR_STATE_SUSPENDED)
+
+        async def get_actor(self, a: SubstrateActorRef) -> SubstrateActorInfo:
+            calls.append(f"get:{a.header_value()}")
+            return SubstrateActorInfo(a.atespace, a.name, "uid-1", ACTOR_STATE_RUNNING)
+
+        async def resume_actor(self, a: SubstrateActorRef) -> SubstrateActorInfo:
+            calls.append(f"resume:{a.header_value()}")
+            return SubstrateActorInfo(a.atespace, a.name, "uid-1", ACTOR_STATE_RUNNING)
+
+        async def suspend_actor(self, a: SubstrateActorRef) -> SubstrateActorInfo:
+            calls.append(f"suspend:{a.header_value()}")
+            return SubstrateActorInfo(a.atespace, a.name, "uid-1", ACTOR_STATE_SUSPENDED)
+
+        async def delete_actor(self, a: SubstrateActorRef) -> None:
+            calls.append(f"delete:{a.header_value()}")
+
+        async def create_egress_policy(
+            self, a: SubstrateActorRef, allowed_hosts: tuple[str, ...]
+        ) -> None:
+            calls.append(f"egress:{a.header_value()}:{','.join(allowed_hosts)}")
+
+    monkeypatch.setenv("SUBSTRATE_API_ENDPOINT", "api.ate-system.svc:443")
+    monkeypatch.setenv("SUBSTRATE_ROUTER_URL", "http://atenet-router.test:8000")
+    monkeypatch.setenv("SUBSTRATE_ATESPACE", "alephat-sandboxes")
+    monkeypatch.setenv("SUBSTRATE_ACTOR_TEMPLATE", "alephat-sandbox")
+    monkeypatch.setenv("SUBSTRATE_EGRESS_ALLOWED_HOSTS", "github.com,api.github.com")
+    monkeypatch.setenv("SUBSTRATE_SUSPEND_ON_STOP", "true")
+    clear_settings_cache()
+    try:
+        provider = SubstrateProvider(control_client=FakeControl())
+        ref = await provider.create(task_id="12345678-0000-4000-8000-000000000000")
+        assert ref.provider == "substrate"
+        assert ref.sandbox_id.startswith("alephat-sandboxes/alephat-12345678-")
+        await provider.connect(ref.sandbox_id)
+        await provider.stop(ref)
+        await provider.delete(ref)
+    finally:
+        clear_settings_cache()
+
+    assert any(
+        c.startswith("create:") and c.endswith(":alephat-sandboxes/alephat-sandbox") for c in calls
+    )
+    assert any(c.startswith("egress:") and c.endswith(":github.com,api.github.com") for c in calls)
+    assert sum(1 for c in calls if c.startswith("resume:")) == 2
+    assert any(c.startswith("suspend:") for c in calls)
+    assert any(c.startswith("delete:") for c in calls)

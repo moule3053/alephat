@@ -117,6 +117,7 @@ Once any Kubernetes `1.28+` cluster is ready, **one Helm chart** (`deploy/helm/a
 | `temporal` (`namespaces.temporal`) | `temporal` Server `1.32.2` (mTLS `requireClientAuth: true`), `temporal-namespace` Job, `temporal-ui`, `IngressRoute/temporal-ui`, `IngressRoute/temporal-grpc` + `TLSOption` + `ServersTransport` |
 | `litellm` (`namespaces.litellm`) | `litellm` Gateway `1.106.6` (Gemini, Anthropic Claude, and OpenAI coding models) + `litellm-postgresql` (`20Gi` PVC) |
 | `alephat-sandboxes` (`namespaces.sandboxes`) | `SandboxTemplate/python-runtime-template` (`kata-qemu` or `gvisor`), RBAC, `NetworkPolicy` |
+| `alephat-substrate` (`namespaces.substratePool`) | Optional [Agent Substrate](https://github.com/agent-substrate/substrate) `WorkerPool` (`ate.dev/v1`) and `ActorTemplate` ConfigMap (when `DEFAULT_SANDBOX_PROVIDER=substrate` or `substrate.enabled=true`) |
 | `agent-sandbox-system` (`namespaces.agentSandboxSystem`) | `agent-sandbox-controller` (`v1.0.9`) |
 | `kata-system` (`namespaces.kata`) | `kata-deploy` DaemonSet (`4.3.1`) + `RuntimeClass/kata-qemu` (when `sandboxRuntime.type=kata`) |
 | `keda` (`namespaces.keda`) | `keda-operator`, `keda-operator-metrics-apiserver`, `keda-admission-webhooks` (`2.21.0`) |
@@ -124,11 +125,12 @@ Once any Kubernetes `1.28+` cluster is ready, **one Helm chart** (`deploy/helm/a
 | `traefik` (`namespaces.traefik`) | Traefik (`v3.7.17`) `LoadBalancer` (`:80`, `:443`, `:7233`) + Let's Encrypt `tlsChallenge` PVC |
 
 ```bash
-# Install on any ready Kubernetes cluster (auto-generates cross-namespace mTLS & DB secrets when externalSecrets.enabled=false)
+# Install on any ready Kubernetes cluster (select sandbox provider via DEFAULT_SANDBOX_PROVIDER: agent_sandbox | substrate | local)
 helm upgrade --install alephat ./deploy/helm/alephat \
   --namespace alephat \
   --create-namespace \
   --set externalSecrets.enabled=false \
+  --set alephat.config.defaultSandboxProvider="agent_sandbox" \
   --set secrets.providerKeys.geminiApiKey="$GEMINI_API_KEY" \
   --set secrets.providerKeys.anthropicApiKey="$ANTHROPIC_API_KEY" \
   --set secrets.providerKeys.openaiApiKey="$OPENAI_API_KEY" \
@@ -161,6 +163,13 @@ helm upgrade --install alephat ./deploy/helm/alephat \
   --region us-central1 \
   --sandbox-runtime gvisor \
   --node-size e2-standard-4 \
+  --with-traefik
+
+# Or deploy with Agent Substrate (https://github.com/agent-substrate/substrate) as the default sandbox provider
+./deploy/gke-deploy.sh \
+  --project your-gcp-project-id \
+  --region us-central1 \
+  --sandbox-provider substrate \
   --with-traefik
 
 # Preview rendered Helm values and validate chart templates without applying

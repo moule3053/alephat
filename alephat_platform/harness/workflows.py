@@ -67,6 +67,7 @@ from alephat_platform.harness.contracts import (
     UploadSlackFileInput,
 )
 from alephat_platform.harness.sandboxes import StubSandboxBackend
+from alephat_platform.harness.substrate_backend import SubstrateSandboxBackend
 
 DEFAULT_IDLE_TIMEOUT = timedelta(hours=1)
 MAX_SEEN_TURNS = 512
@@ -440,6 +441,14 @@ class TaskAgentWorkflow:
                 factory_argument=prepared.sandbox_id,
                 backend_type=AgentSandboxBackend,
                 metadata={"id": prepared.sandbox_id},
+                activity_options=opts,
+            )
+        if prepared.sandbox_provider == "substrate":
+            return TemporalBackend(
+                "substrate",
+                factory_argument=prepared.sandbox_id,
+                backend_type=SubstrateSandboxBackend,
+                metadata={"id": prepared.sandbox_id, "workspace": "/app/repo"},
                 activity_options=opts,
             )
         return TemporalBackend(

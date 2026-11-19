@@ -41,9 +41,9 @@ docker-compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --scale
 | LLM providers | env on harness | Direct OpenAI/Anthropic/Fireworks/Google (**default**, `max_retries=0` so Temporal owns retries) |
 | LiteLLM | `litellm` (profile `with-litellm`) | **Optional** proxy when `LITELLM_ENABLED=true` |
 
-Sandboxes: `agent_sandbox` (default), `local`, `daytona`, `opensandbox`.
-Real Daytona handles, host-local sandboxes (`local`), and the Kubernetes Agent Sandbox backend (`agent_sandbox`, using Kata `kata-qemu` or `gvisor`) run through `deepagents.create_deep_agent`.
-The Agent Sandbox backend confines file operations to `/app/repo` and implements shell execution plus upload/download over the Python runtime service.
+Sandboxes: `agent_sandbox` (default), `substrate` ([Agent Substrate](https://github.com/agent-substrate/substrate)), `local`, `daytona`, `opensandbox`, selectable via `DEFAULT_SANDBOX_PROVIDER` in both Kubernetes (`alephat.config.defaultSandboxProvider`) and Docker Compose (`deploy/.env`).
+Real Daytona handles, host-local sandboxes (`local`), Kubernetes Agent Sandbox (`agent_sandbox`, using Kata `kata-qemu` or `gvisor`), and Agent Substrate actors (`substrate`, over `ate-api-server` gRPC + `atenet-router` `ate-target-actor` HTTP with `toolbox` or `process` protocols and automatic suspend/resume) run through `deepagents.create_deep_agent`.
+Both `agent_sandbox` and `substrate` confine file operations to `/app/repo` and implement shell execution plus upload/download.
 Stub sandboxes are fail-closed by default and can only be enabled explicitly with `ALLOW_STUB_SANDBOXES=true` for local control-plane/UI testing.
 
 ## Docker Compose (recommended local)

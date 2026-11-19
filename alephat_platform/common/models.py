@@ -56,7 +56,8 @@ class OrgSettings(Base):
     default_model: Mapped[str] = mapped_column(Text, default="gpt-4.1")
     default_sandbox_provider: Mapped[str] = mapped_column(Text, default="agent_sandbox")
     enabled_sandbox_providers: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), server_default=text("ARRAY['daytona','agent_sandbox','opensandbox']")
+        ARRAY(Text),
+        server_default=text("ARRAY['daytona','agent_sandbox','substrate','opensandbox']"),
     )
     mcp_stdio_allowed: Mapped[bool] = mapped_column(Boolean, default=False)
     max_mcp_servers_per_run: Mapped[int] = mapped_column(Integer, default=10)

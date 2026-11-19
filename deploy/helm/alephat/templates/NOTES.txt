@@ -1,7 +1,10 @@
 Alephat and its cluster dependencies have been deployed across isolated namespaces:
 
-  - Alephat Platform (API, Webhook, Harness, UI): {{ .Values.namespaces.alephat }}
+  - Alephat Platform (API, Webhook, Harness, UI): {{ .Values.namespaces.alephat }} (DEFAULT_SANDBOX_PROVIDER={{ .Values.alephat.config.defaultSandboxProvider }})
   - Agent Sandbox Workloads ({{ include "alephat.runtimeClassName" . }}): {{ .Values.namespaces.sandboxes }}
+{{- if eq (include "alephat.substrateEnabled" .) "true" }}
+  - Agent Substrate Pool & ActorTemplate:         {{ .Values.namespaces.substratePool }} (atespace={{ .Values.substrate.atespace }}, template={{ .Values.substrate.actorTemplate }})
+{{- end }}
 {{- if .Values.agentSandbox.enabled }}
   - Agent Sandbox Controller:                     {{ .Values.namespaces.agentSandboxSystem }}
 {{- end }}

@@ -49,6 +49,7 @@ class AgentType(StrEnum):
 class SandboxProvider(StrEnum):
     DAYTONA = "daytona"
     AGENT_SANDBOX = "agent_sandbox"
+    SUBSTRATE = "substrate"
     OPENSANDBOX = "opensandbox"
     LOCAL = "local"
 

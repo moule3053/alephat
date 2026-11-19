@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS org_settings (
     org_id UUID PRIMARY KEY REFERENCES orgs(org_id) ON DELETE CASCADE,
     default_model TEXT NOT NULL DEFAULT 'openai:gpt-4o-mini',
     default_sandbox_provider TEXT NOT NULL DEFAULT 'agent_sandbox',
-    enabled_sandbox_providers TEXT[] NOT NULL DEFAULT ARRAY['daytona', 'agent_sandbox', 'opensandbox'],
+    enabled_sandbox_providers TEXT[] NOT NULL DEFAULT ARRAY['daytona', 'agent_sandbox', 'substrate', 'opensandbox'],
     mcp_stdio_allowed BOOLEAN NOT NULL DEFAULT false,
     max_mcp_servers_per_run INT NOT NULL DEFAULT 10,
     sandbox_fallback BOOLEAN NOT NULL DEFAULT false,

@@ -4,6 +4,7 @@
 {{- if .Values.temporal.enabled }}{{- $nsList = append $nsList .Values.namespaces.temporal -}}{{- end }}
 {{- if .Values.litellm.enabled }}{{- $nsList = append $nsList .Values.namespaces.litellm -}}{{- end }}
 {{- if .Values.agentSandbox.enabled }}{{- $nsList = append $nsList .Values.namespaces.agentSandboxSystem -}}{{- end }}
+{{- if eq (include "alephat.substrateEnabled" .) "true" }}{{- $nsList = append $nsList .Values.namespaces.substratePool -}}{{- end }}
 {{- if eq .Values.sandboxRuntime.type "kata" }}{{- $nsList = append $nsList .Values.namespaces.kata -}}{{- end }}
 {{- if .Values.keda.enabled }}{{- $nsList = append $nsList .Values.namespaces.keda -}}{{- end }}
 {{- if .Values.externalSecrets.enabled }}{{- $nsList = append $nsList .Values.namespaces.externalSecrets -}}{{- end }}
@@ -17,6 +18,9 @@ metadata:
   name: {{ . }}
   labels:
     kubernetes.io/metadata.name: {{ . }}
+    {{- if and (eq . $.Values.namespaces.alephat) (eq (include "alephat.substrateEnabled" $) "true") }}
+    ate.dev/api-access: "true"
+    {{- end }}
     {{- include "alephat.labels" $ | nindent 4 }}
 {{- end }}
 {{- end }}

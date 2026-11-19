@@ -10,6 +10,7 @@ namespaces:
   litellm: litellm
   sandboxes: alephat-sandboxes
   agentSandboxSystem: agent-sandbox-system
+  substratePool: alephat-substrate
   kata: kata-system
   keda: keda
   externalSecrets: external-secrets
@@ -42,6 +43,49 @@ agentSandbox:
     limits:
       cpu: "2"
       memory: 2Gi
+
+# -----------------------------------------------------------------------------
+# Agent Substrate (https://github.com/agent-substrate/substrate) Sandbox Runtime
+# Selectable at runtime via DEFAULT_SANDBOX_PROVIDER=substrate
+# -----------------------------------------------------------------------------
+substrate:
+  # Set true (or set alephat.config.defaultSandboxProvider=substrate) to wire
+  # Substrate control/router settings, projected credentials, and WorkerPool.
+  enabled: false
+  apiEndpoint: api.ate-system.svc:443
+  apiTls: "true"
+  apiServerName: api.ate-system.svc
+  apiCaCertPath: /var/run/ate/ca.crt
+  apiTokenPath: /var/run/ate/token
+  apiCredentialBundlePath: ""
+  routerUrl: https://atenet-router.ate-system.svc:443
+  routerServerName: atenet-router.ate-system.svc
+  routerCaCertPath: /var/run/ate/ca.crt
+  routerCredentialBundlePath: /var/run/ate/credential-bundle.pem
+  atespace: alephat-sandboxes
+  actorTemplate: alephat-sandbox
+  # "toolbox" (alephat-sandbox HTTP toolbox) or "process" (Substrate demos/sandbox /process API)
+  protocol: toolbox
+  suspendOnStop: "true"
+  egressAllowedHosts: "github.com,api.github.com,objects.githubusercontent.com,pypi.org,files.pythonhosted.org,registry.npmjs.org"
+  mountProjectedCredentials: true
+  mountPodCertificate: true
+  workerPool:
+    enabled: false
+    name: alephat-sandbox-pool
+    replicas: 2
+    # "gvisor" or "microvm"
+    sandboxClass: gvisor
+    workerImage: ghcr.io/agent-substrate/ateworker-gvisor:v1.0.0
+    actorCpuMillicores: 2000
+    actorMemoryBytes: 2147483648
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+      limits:
+        cpu: "2"
+        memory: 2Gi
 
 # -----------------------------------------------------------------------------
 # External Secrets Operator (Google Cloud Secret Manager) or Native K8s Secrets
@@ -249,6 +293,9 @@ alephat:
   uiReplicas: 2
   harnessReplicas: 1
   config:
+    # Selectable sandbox provider env var (DEFAULT_SANDBOX_PROVIDER):
+    #   agent_sandbox | substrate | local | daytona | opensandbox
+    defaultSandboxProvider: "agent_sandbox"
     apiAuthDisabled: "false"
     webhookSignaturesRequired: "true"
     bootstrapDevDefaults: "true"

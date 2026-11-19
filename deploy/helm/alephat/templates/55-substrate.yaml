@@ -1,0 +1,51 @@
+{{- if eq (include "alephat.substrateEnabled" .) "true" }}
+{{- $subNs := .Values.namespaces.substratePool -}}
+---
+# Protojson-shaped ActorTemplate for Agent Substrate (`kubectl ate create actor-template -f -`).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alephat-substrate-actor-template
+  namespace: {{ $subNs }}
+  labels:
+    {{- include "alephat.labels" . | nindent 4 }}
+data:
+  actor-template.yaml: |
+    metadata:
+      atespace: {{ .Values.substrate.atespace }}
+      name: {{ .Values.substrate.actorTemplate }}
+    workerSelector:
+      matchLabels:
+        workload: alephat-sandbox
+    containers:
+      - name: sandbox
+        image: {{ .Values.agentSandbox.sandboxImage }}
+        env:
+          - name: PORT
+            value: "80"
+    resources:
+      limits:
+        cpuMillicores: {{ .Values.substrate.workerPool.actorCpuMillicores }}
+        memoryBytes: {{ .Values.substrate.workerPool.actorMemoryBytes }}
+    snapshotConfig:
+      preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
+{{- if .Values.substrate.workerPool.enabled }}
+---
+apiVersion: ate.dev/v1
+kind: WorkerPool
+metadata:
+  name: {{ .Values.substrate.workerPool.name }}
+  namespace: {{ $subNs }}
+  labels:
+    workload: alephat-sandbox
+    {{- include "alephat.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.substrate.workerPool.replicas }}
+  workerImage: {{ .Values.substrate.workerPool.workerImage }}
+  sandboxClasses:
+    - name: {{ .Values.substrate.workerPool.sandboxClass }}
+  template:
+    resources:
+      {{- toYaml .Values.substrate.workerPool.resources | nindent 6 }}
+{{- end }}
+{{- end }}

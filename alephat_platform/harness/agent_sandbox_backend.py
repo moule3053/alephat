@@ -5,7 +5,6 @@ import posixpath
 import secrets
 import shlex
 import urllib.parse
-from typing import Any
 
 import httpx
 from deepagents.backends.protocol import (
@@ -93,7 +92,9 @@ class AgentSandboxBackend(BaseSandbox):
         path: str,
         *,
         timeout: int | float,
-        **kwargs: Any,
+        json: dict[str, object] | None = None,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         last_exc: httpx.ConnectError | None = None
         candidates = [self.base_url]
@@ -105,9 +106,10 @@ class AgentSandboxBackend(BaseSandbox):
                     async with httpx.AsyncClient(
                         base_url=target_url,
                         timeout=timeout,
+                        headers=headers,
                         transport=self._transport,
                     ) as client:
-                        return await client.request(method, path, **kwargs)
+                        return await client.request(method, path, json=json, files=files)
                 except httpx.ConnectError as exc:
                     last_exc = exc
             if self._transport is not None or attempt == 7:

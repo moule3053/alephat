@@ -222,3 +222,40 @@ def test_agent_sandbox_uses_git_enabled_runtime_image_and_readiness_probe():
     assert "python-runtime-sandbox:v0.1.0" in dockerfile
     assert "ca-certificates curl gh git" in dockerfile
     assert "COPY deploy/sandbox-gh /usr/local/bin/gh" in dockerfile
+
+
+def test_substrate_sandbox_selectable_in_helm_chart_and_docker_compose():
+    docs = _render_chart(
+        "--set",
+        "alephat.config.defaultSandboxProvider=substrate",
+        "--set",
+        "substrate.workerPool.enabled=true",
+    )
+    config_map = _document(docs, "ConfigMap", "alephat-config", namespace="alephat")
+    assert config_map["data"]["DEFAULT_SANDBOX_PROVIDER"] == "substrate"
+    assert config_map["data"]["SUBSTRATE_API_ENDPOINT"] == "api.ate-system.svc:443"
+    assert config_map["data"]["SUBSTRATE_ROUTER_URL"] == "https://atenet-router.ate-system.svc:443"
+    assert config_map["data"]["SUBSTRATE_ATESPACE"] == "alephat-sandboxes"
+    assert config_map["data"]["SUBSTRATE_ACTOR_TEMPLATE"] == "alephat-sandbox"
+
+    harness = _document(docs, "Deployment", "alephat-harness", namespace="alephat")
+    harness_vols = {v["name"]: v for v in harness["spec"]["template"]["spec"]["volumes"]}
+    assert "substrate-credentials" in harness_vols
+
+    pool = _document(docs, "WorkerPool", "alephat-sandbox-pool", namespace="alephat-substrate")
+    assert pool["apiVersion"] == "ate.dev/v1"
+    assert pool["spec"]["sandboxClasses"] == [{"name": "gvisor"}]
+
+    template_cm = _document(
+        docs, "ConfigMap", "alephat-substrate-actor-template", namespace="alephat-substrate"
+    )
+    assert "atespace: alephat-sandboxes" in template_cm["data"]["actor-template.yaml"]
+
+    compose_path = CHART_DIR.parents[1] / "docker-compose.yml"
+    compose_doc = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+    harness_env = compose_doc["services"]["harness"]["environment"]
+    assert "DEFAULT_SANDBOX_PROVIDER" in harness_env
+    assert "SUBSTRATE_API_ENDPOINT" in harness_env
+    assert "SUBSTRATE_ROUTER_URL" in harness_env
+    assert "SUBSTRATE_SANDBOX_PROTOCOL" in harness_env
+    assert "substrate-sandbox" in compose_doc["services"]
