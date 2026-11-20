@@ -163,8 +163,8 @@ export function ClaudeCodeSetupSection() {
           </p>
           <p>
             Nothing appears? Run <Code>/hooks</Code> in Claude Code: you should
-            see Alephat’s hooks under eight events. If you don’t, check the
-            file is valid JSON.
+            see Alephat’s hooks under eight events. If you don’t, check the file
+            is valid JSON.
           </p>
         </Step>
       </ol>

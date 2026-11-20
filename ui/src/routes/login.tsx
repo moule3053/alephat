@@ -76,9 +76,8 @@ function Login() {
           Continue with GitHub
         </Button>
         <Text as="p" variant="sm" color="secondary">
-          Use your GitHub account. We'll configure your default model,
-          reasoning effort, and default repo for Slack/Linear/GitHub
-          triggered runs.
+          Use your GitHub account. We'll configure your default model, reasoning
+          effort, and default repo for Slack/Linear/GitHub triggered runs.
         </Text>
       </Card>
     </main>
