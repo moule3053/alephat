@@ -14,7 +14,6 @@
   <a href="https://opensource.org/licenses/MIT" target="_blank"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License"></a>
   <a href="https://github.com/langchain-ai/deepagents" target="_blank"><img src="https://img.shields.io/badge/Built%20on-Deep%20Agents-blue" alt="Built on Deep Agents"></a>
   <a href="https://github.com/langchain-ai/langgraph" target="_blank"><img src="https://img.shields.io/badge/Powered%20by-LangGraph-blue" alt="Powered by LangGraph"></a>
-  <a href="https://x.com/aimodelscompass" target="_blank"><img src="https://img.shields.io/twitter/url/https/twitter.svg?style=social&label=Follow%20%40AI Models Compass" alt="Twitter / X"></a>
 </div>
 
 <br>
